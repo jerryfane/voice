@@ -209,7 +209,7 @@ func Default() Config {
 			Command: Command{"aplay", "-D", "{device}", "-q", "-"},
 		},
 		Wake: Wake{
-			Phrases:  []string{"hey herdr", "hey herder", "hey herd", "a herder", "hey hurdr", "hey hurder"},
+			Phrases:  []string{"hey herdr", "hey herder", "hey herd", "a herder", "hey hurdr", "hey hurder", "hey are there"},
 			Fuzz:     0.25,
 			FollowUp: Duration(8 * time.Second),
 			Detector: "stt",
@@ -223,11 +223,12 @@ func Default() Config {
 		},
 		STT: Engine{
 			Name:    "whisper.cpp",
-			Model:   "models/ggml-tiny.en.bin",
+			Model:   "models/ggml-base.en.bin",
 			Timeout: Duration(30 * time.Second),
 			Command: Command{
 				"whisper-cli", "-m", "{model}", "-f", "{file}",
 				"--no-timestamps", "--no-prints", "-t", "3", "-l", "en",
+				"--prompt", "Hey Herdr. Hey Herder.",
 			},
 		},
 		TTS: Engine{

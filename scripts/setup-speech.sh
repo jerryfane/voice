@@ -40,9 +40,9 @@ if [ ! -x "$DATA/piper/piper" ]; then
 fi
 ln -sf "$DATA/piper/piper" "$BIN/piper"
 
-if [ ! -s "$MODELS/ggml-tiny.en.bin" ]; then
-  curl -fL https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin -o "$MODELS/ggml-tiny.en.bin.tmp"
-  mv "$MODELS/ggml-tiny.en.bin.tmp" "$MODELS/ggml-tiny.en.bin"
+if [ ! -s "$MODELS/ggml-base.en.bin" ]; then
+  curl -fL https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin -o "$MODELS/ggml-base.en.bin.tmp"
+  mv "$MODELS/ggml-base.en.bin.tmp" "$MODELS/ggml-base.en.bin"
 fi
 
 voice_base=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium
