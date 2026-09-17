@@ -90,14 +90,15 @@ func ReadDescriptor(devPath string) ([]byte, error) {
 	return desc, nil
 }
 
-func descriptorSize(devPath string) (int, error) {
+func descriptorSize(devPath string) (size int, err error) {
 	f, err := os.Open(devPath)
 	if err != nil {
 		return 0, err
 	}
-	// discard: opened read-only to ask the kernel for the report-descriptor
-	// length; nothing is written, so a close failure cannot lose anything.
-	defer func() { _ = f.Close() }()
+	// Nothing is written here, so a close failure cannot lose data - but it
+	// does mean the handle Voice thought it released is still open, which is
+	// worth carrying out with the answer.
+	defer func() { err = errors.Join(err, f.Close()) }()
 	var n int32
 	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), hidiocgrdescsize, uintptr(unsafe.Pointer(&n))); errno != 0 {
 		return 0, fmt.Errorf("HIDIOCGRDESCSIZE on %s: %w", devPath, errno)
