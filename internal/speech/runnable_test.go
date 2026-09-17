@@ -166,8 +166,8 @@ func TestGroupMembersSeesLiveMembersAndForgetsDeadOnes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(members) != 1 || members[0] != pgid {
-		t.Fatalf("groupMembers(%d) = %v, want exactly [%d]", pgid, members, pgid)
+	if len(members) != 1 || members[0].pid != pgid {
+		t.Fatalf("groupMembers(%d) = %v, want exactly the leader %d", pgid, members, pgid)
 	}
 
 	if err := killGroup(pgid); err != nil {
@@ -208,14 +208,9 @@ func TestGroupMembersIgnoresZombies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, pid := range members {
-		stat, rerr := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-		if rerr != nil {
-			continue
-		}
-		after := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+1:]))
-		if len(after) > 0 && after[0] == "Z" {
-			t.Errorf("groupMembers reported zombie %d as a survivor", pid)
+	for _, m := range members {
+		if m.state == "Z" {
+			t.Errorf("groupMembers reported zombie %d as a survivor", m.pid)
 		}
 	}
 }
@@ -251,5 +246,70 @@ func TestKillGroupReportsASurvivorWhenTheSignalLies(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), strconv.Itoa(pgid)) {
 		t.Errorf("error does not name the group: %v", err)
+	}
+}
+
+// The finding: returning on the first non-ESRCH signal error left later group
+// members unsignalled, and /proc order has nothing to do with which members
+// are killable - so one unreachable descendant could strand killable siblings,
+// leaving MORE processes alive than the single member out of reach while the
+// error named only that one.
+func TestKillGroupAttemptsEveryMemberEvenAfterAFailure(t *testing.T) {
+	leader := exec.Command("sleep", "45")
+	leader.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := leader.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := leader.Process.Pid
+
+	// Two more real processes joined into the same group, so the group has
+	// three members and enumeration order decides who is attempted first.
+	var joined []*exec.Cmd
+	for i := 0; i < 2; i++ {
+		c := exec.Command("sleep", "45")
+		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
+		if err := c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		joined = append(joined, c)
+	}
+	t.Cleanup(func() {
+		if kerr := killGroup(pgid); kerr != nil {
+			t.Logf("cleanup killGroup: %v", kerr)
+		}
+		for _, c := range append(joined, leader) {
+			if werr := c.Wait(); werr != nil {
+				t.Logf("cleanup wait: %v", werr)
+			}
+		}
+	})
+
+	before, err := groupMembers(pgid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 3 {
+		t.Fatalf("group has %d members, want 3: %v", len(before), before)
+	}
+
+	// The first enumerated member refuses the signal, as a credential
+	// mismatch does. Every other member must still be attempted.
+	first := before[0].pid
+	attempted := map[int]bool{}
+	fussy := func(pid int) error {
+		attempted[pid] = true
+		if pid == first {
+			return syscall.EPERM
+		}
+		return syscall.Kill(pid, syscall.SIGKILL)
+	}
+	err = killGroupWith(pgid, fussy)
+	if err == nil {
+		t.Error("expected an error naming the unreachable member")
+	}
+	for _, m := range before {
+		if !attempted[m.pid] {
+			t.Errorf("member %d was never attempted; one unreachable member must not strand the rest", m.pid)
+		}
 	}
 }
