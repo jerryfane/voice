@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/jerryfane/voice/internal/audio"
 	"github.com/jerryfane/voice/internal/brain"
@@ -279,4 +280,80 @@ func hasState(states []feedback.State, want feedback.State) bool {
 		}
 	}
 	return false
+}
+
+// closingRecorder reports whether its cleanup ran before Run returned, which
+// is what decides whether a shutdown leaves the speakerphone off hook.
+type closingRecorder struct {
+	cleaned chan struct{}
+	slow    time.Duration
+}
+
+func (r *closingRecorder) Stream(ctx context.Context) (<-chan []int16, <-chan error) {
+	pcm := make(chan []int16)
+	errs := make(chan error)
+	go func() {
+		defer close(pcm)
+		defer close(errs)
+		<-ctx.Done()
+		time.Sleep(r.slow) // stands in for clearing the off-hook report
+		close(r.cleaned)
+	}()
+	return pcm, errs
+}
+func (*closingRecorder) Format() audio.Format { return audio.Default() }
+func (*closingRecorder) Describe() string     { return "closing recorder" }
+
+func TestShutdownWaitsForCaptureCleanup(t *testing.T) {
+	rec := &closingRecorder{cleaned: make(chan struct{}), slow: 50 * time.Millisecond}
+	a := &Assistant{
+		Recorder:    rec,
+		Player:      testPlayer{},
+		VAD:         idleSegmenter{},
+		STT:         &queuedTranscriber{},
+		TTS:         testSynthesizer{},
+		Brain:       &countingPlanner{},
+		Devices:     device.NewRegistry(),
+		WakePhrases: []string{"hey voice"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-rec.cleaned:
+	default:
+		t.Fatal("Run returned before capture finished its cleanup")
+	}
+}
+
+// A capture command that never stops must not keep the service from exiting.
+func TestShutdownGivesUpOnAStuckCapture(t *testing.T) {
+	rec := &closingRecorder{cleaned: make(chan struct{}), slow: 10 * time.Second}
+	a := &Assistant{
+		Recorder:    rec,
+		Player:      testPlayer{},
+		VAD:         idleSegmenter{},
+		STT:         &queuedTranscriber{},
+		TTS:         testSynthesizer{},
+		Brain:       &countingPlanner{},
+		Devices:     device.NewRegistry(),
+		WakePhrases: []string{"hey voice"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	time.Sleep(20 * time.Millisecond)
+	start := time.Now()
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if waited := time.Since(start); waited > 2*captureStopTimeout {
+		t.Errorf("shutdown took %v with a stuck capture, want about %v", waited, captureStopTimeout)
+	}
 }

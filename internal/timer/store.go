@@ -33,10 +33,15 @@ CREATE TABLE IF NOT EXISTS timers (
 	deadline TEXT    NOT NULL  -- RFC 3339 in UTC
 );`
 
-// Open prepares the database, creating the file and schema if needed. A
-// journal-mode of WAL is deliberately not set: this is a handful of rows
-// written a few times an hour, and the default journal keeps the state to one
-// file.
+// Open prepares the database, creating the file and schema if needed. WAL is
+// deliberately not enabled: this is a handful of rows written a few times an
+// hour, and the default journal keeps the state in one file.
+//
+// The busy timeout is short on purpose. Every scheduler operation persists
+// while holding the scheduler's lock, so a long wait here would stall
+// announcing a timer that is already due; two seconds is long enough to ride
+// out another process's write and short enough that a stuck peer surfaces as
+// an error instead of silence.
 func Open(path string) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("no timer database path configured")
@@ -47,18 +52,44 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(2000)")
 	if err != nil {
 		return nil, err
 	}
 	// One connection: SQLite writers serialise anyway, and the scheduler holds
 	// its own lock around every save.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
+	if err := prepare(db, path); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("preparing %s: %w", path, err)
+		return nil, err
 	}
 	return &Store{Path: path, db: db}, nil
+}
+
+// prepare creates the schema only when it is missing, and refuses a database
+// that belongs to something else. Creating the table unconditionally wrote to
+// the file on every start - including for `voice doctor` while the service was
+// running - and would quietly add a timers table to whatever database a
+// mistyped path pointed at.
+func prepare(db *sql.DB, path string) error {
+	var timers, others int
+	row := db.QueryRow(`SELECT
+		COUNT(*) FILTER (WHERE name = 'timers'),
+		COUNT(*) FILTER (WHERE name <> 'timers')
+		FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+	if err := row.Scan(&timers, &others); err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	if timers > 0 {
+		return nil
+	}
+	if others > 0 {
+		return fmt.Errorf("%s is a database with %d other table(s) and no timers table; refusing to modify it (check timers.file)", path, others)
+	}
+	if _, err := db.Exec(schema); err != nil {
+		return fmt.Errorf("preparing %s: %w", path, err)
+	}
+	return nil
 }
 
 // rejectLegacyState refuses to start on a state file written by the JSON store
@@ -70,7 +101,11 @@ func rejectLegacyState(path string) error {
 	if err != nil {
 		return nil // missing or unreadable: Open will create or report it
 	}
-	if len(b) > 0 && (b[0] == '[' || b[0] == '{') {
+	// Leading whitespace is still JSON. Sniffing byte zero alone let such a
+	// file reach SQLite, which reported "file is not a database" instead of
+	// saying what to do about it.
+	trimmed := strings.TrimLeft(string(b), " \t\r\n")
+	if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
 		return fmt.Errorf("%s holds JSON timer state from a pre-release build; delete it and restart (timers in it are already expired)", path)
 	}
 	return nil

@@ -107,6 +107,12 @@ func (a *Assistant) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// Capture's cleanup runs as its goroutine unwinds: it clears the
+			// speakerphone's off-hook report, which is the difference between
+			// a device left lit with its microphone held open and one that is
+			// idle. Returning here without waiting lets the process exit
+			// first, so wait for the sample channel to close.
+			a.awaitCaptureStop(pcm)
 			return nil
 		case err, ok := <-recErr:
 			if ok && err != nil {
@@ -136,6 +142,33 @@ func (a *Assistant) Run(ctx context.Context) error {
 			if stop := a.accepted(ctx, command); stop {
 				return nil
 			}
+		}
+	}
+}
+
+// captureStopTimeout bounds the wait for capture to unwind at shutdown. A
+// stuck capture command must not keep the service from exiting; systemd's
+// stop timeout would kill it anyway, and this way the delay is ours and
+// explained rather than a hang.
+const captureStopTimeout = 2 * time.Second
+
+// awaitCaptureStop drains samples until the recorder closes the channel, which
+// it does only after its deferred cleanup has run.
+func (a *Assistant) awaitCaptureStop(pcm <-chan []int16) {
+	if pcm == nil {
+		return
+	}
+	deadline := time.NewTimer(captureStopTimeout)
+	defer deadline.Stop()
+	for {
+		select {
+		case _, ok := <-pcm:
+			if !ok {
+				return
+			}
+		case <-deadline.C:
+			a.logf("capture did not stop within %s; exiting without its cleanup", captureStopTimeout)
+			return
 		}
 	}
 }

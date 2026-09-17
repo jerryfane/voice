@@ -268,37 +268,40 @@ func article(unit string) string {
 	return "a"
 }
 
-// countBefore reads the number immediately preceding a unit word, accepting
-// digits, "ten", "twenty five", "twenty-five" and "half".
-func countBefore(before []string) (int, string, bool) {
-	if len(before) == 0 {
-		return 0, "", false
-	}
-	last := before[len(before)-1]
-	if last == "half" {
-		return 0, "half", true
-	}
-	// "half an hour", "half a minute": the article sits between.
-	if (last == "a" || last == "an") && len(before) >= 2 && before[len(before)-2] == "half" {
-		return 0, "half", true
-	}
-	if v, err := strconv.Atoi(last); err == nil && v > 0 {
-		return v, last, true
-	}
-	if v, ok := smallWords[last]; ok {
-		if len(before) >= 2 {
-			if tens, ok := tensWords[before[len(before)-2]]; ok && v < 10 {
-				return tens + v, before[len(before)-2] + " " + last, true
+// countBefore reads the number sitting immediately before a unit word. Every
+// word handed to it must be part of that number: inspecting only the last word
+// would accept "or five" as "five", which is how "ten minutes or five minutes"
+// became fifteen minutes.
+func countBefore(count []string) (int, string, bool) {
+	switch len(count) {
+	case 1:
+		w := count[0]
+		if w == "half" {
+			return 0, "half", true
+		}
+		if v, err := strconv.Atoi(w); err == nil && v > 0 {
+			return v, w, true
+		}
+		if v, ok := smallWords[w]; ok {
+			if w == "a" || w == "an" {
+				return v, "one", true
 			}
+			return v, w, true
 		}
-		spoken := last
-		if last == "a" || last == "an" {
-			spoken = "one"
+		if v, ok := tensWords[w]; ok {
+			return v, w, true
 		}
-		return v, spoken, true
-	}
-	if v, ok := tensWords[last]; ok {
-		return v, last, true
+	case 2:
+		// "twenty five", and "half an" / "half a" where the article belongs to
+		// the unit that follows.
+		if count[0] == "half" && (count[1] == "a" || count[1] == "an") {
+			return 0, "half", true
+		}
+		tens, isTens := tensWords[count[0]]
+		ones, isOnes := smallWords[count[1]]
+		if isTens && isOnes && ones < 10 && count[1] != "a" && count[1] != "an" {
+			return tens + ones, count[0] + " " + count[1], true
+		}
 	}
 	return 0, "", false
 }

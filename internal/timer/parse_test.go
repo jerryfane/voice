@@ -103,6 +103,14 @@ func TestParseReadsOneContiguousDurationOnly(t *testing.T) {
 		{"my break was 20 minutes long set a timer for 10 minutes now", 10 * time.Minute},
 		{"the movie is 20 minutes long set a timer for 10 minutes", 10 * time.Minute},
 		{"set a timer for 10 minutes plus wait 5 minutes", 10 * time.Minute},
+		// A single word between two durations is not a conjunction the parser
+		// may sum across. Each of these set fifteen minutes when the count
+		// reader inspected only the last word of its lookback.
+		{"set a timer for 10 minutes or 5 minutes", 10 * time.Minute},
+		{"set a timer for 10 minutes then 5 minutes", 10 * time.Minute},
+		{"set a timer for 10 minutes plus 5 minutes", 10 * time.Minute},
+		{"set a timer for 10 minutes not 5 minutes", 10 * time.Minute},
+		{"set a timer for 10 minutes maybe 5 minutes", 10 * time.Minute},
 		{"set a timer for one hour thirty minutes", 90 * time.Minute},
 		{"set a timer for one hour and thirty minutes", 90 * time.Minute},
 	} {

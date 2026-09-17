@@ -1,6 +1,7 @@
 package timer
 
 import (
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -450,4 +451,86 @@ func (f *flakyStore) Save(ts []Timer) error {
 	}
 	f.set = append([]Timer(nil), ts...)
 	return nil
+}
+
+// A JSON state file with leading whitespace is still a JSON state file. It
+// used to reach SQLite and come back as "file is not a database", which tells
+// the operator nothing about what to do.
+func TestLegacyStateIsRecognisedThroughLeadingWhitespace(t *testing.T) {
+	for _, body := range []string{"[]", "\n  {\"timers\":[]}", "\t\r\n[{\"id\":1}]"} {
+		path := filepath.Join(t.TempDir(), "timers.db")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Open(path)
+		if err == nil {
+			t.Errorf("%q accepted as a database", body)
+			continue
+		}
+		if !strings.Contains(err.Error(), "JSON timer state") {
+			t.Errorf("%q reported as %v, want the pre-release JSON message", body, err)
+		}
+	}
+}
+
+// A mistyped timers.file pointing at somebody else's database must be refused,
+// not quietly given a timers table.
+func TestForeignDatabaseIsRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "other.db")
+	other, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Exec(`CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes (body) VALUES ('keep me')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path); err == nil {
+		t.Fatal("a foreign database was accepted")
+	} else if !strings.Contains(err.Error(), "timers.file") {
+		t.Errorf("error does not point at the misconfiguration: %v", err)
+	}
+	// The other database is untouched.
+	again, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	var tables int
+	if err := again.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 1 {
+		t.Errorf("%d tables after a refused open, want the original 1", tables)
+	}
+}
+
+// Reopening an existing timers database must not write to it: `voice doctor`
+// runs while the service holds the file, and a write on every open turned an
+// inspection into lock contention.
+func TestReopeningAnExistingDatabaseDoesNotWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "timers.db")
+	first := store(t, path)
+	if err := first.Save([]Timer{{ID: 1, Label: "one minute", Duration: time.Minute, Deadline: time.Now()}}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := store(t, path)
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) || after.Size() != before.Size() {
+		t.Errorf("opening an existing database modified it: %v/%d -> %v/%d",
+			before.ModTime(), before.Size(), after.ModTime(), after.Size())
+	}
+	loaded, err := second.Load()
+	if err != nil || len(loaded) != 1 {
+		t.Fatalf("second opener loaded %+v, %v", loaded, err)
+	}
 }
