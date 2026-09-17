@@ -246,18 +246,47 @@ TONE
 		rm -f "$tone"
 		return 1
 	fi
+	# Whether the speaker actually emitted the tone decided nothing last run,
+	# because the only witness would have been a person in the room. ALSA can
+	# answer it without one: the playback substream's state and hw_ptr say
+	# whether frames really moved to the device. A peak of zero means nothing
+	# unless playback is proven to have run.
+	card=$(printf '%s' "$OUTDEV" | sed -n 's/.*hw:\([0-9][0-9]*\).*/\1/p')
+	[ -n "$card" ] || card=0
+	printf '    playback mixer state on card %s:\n' "$card"
+	amixer -c "$card" sget 'PCM' 2>/dev/null | sed 's/^/      /' \
+		|| printf '      (no PCM playback control; see the phase 0 mixer dump)\n'
 	aplay -D "$OUTDEV" "$tone" >/dev/null 2>&1 &
 	player=$!
+	# Sample both substreams mid-tone, so the capture reading arrives together
+	# with evidence about whether audio moved in either direction.
+	(
+		sleep 2
+		printf '    playback substream during the tone:\n'
+		sed -n '1,4p' "/proc/asound/card$card/pcm0p/sub0/status" 2>/dev/null | sed 's/^/      /' \
+			|| printf '      (no playback substream status available)\n'
+		printf '    capture substream during the tone:\n'
+		sed -n '1,4p' "/proc/asound/card$card/pcm0c/sub0/status" 2>/dev/null | sed 's/^/      /' \
+			|| printf '      (no capture substream status available)\n'
+	) &
+	sampler=$!
 	# Let the tone actually start before recording, or the capture measures
 	# the silence before playback and repeats the original mistake.
 	sleep 1
 	capture 3 "capture WHILE a 1 kHz tone plays from the device speaker"
 	status=$?
 	wait "$player" 2>/dev/null
+	wait "$sampler" 2>/dev/null
 	rm -f "$tone"
 	return "$status"
 }
 acoustic_probe || note_failure "acoustic self-test (tone through the device speaker)"
+echo "HOW TO READ THE SUBSTREAM LINES: state RUNNING with hw_ptr advancing on"
+echo "the PLAYBACK substream proves frames reached the device, so a capture peak"
+echo "of zero is then a real microphone-path result rather than an untested"
+echo "assumption that something was playing. If playback is not RUNNING, the"
+echo "tone never left the host and the microphone question stays OPEN - which is"
+echo "the state the previous run was actually in, though it could not tell."
 echo "READ THIS: a peak well above the quiet-room readings means the microphone"
 echo "path works and the earlier zeros were an empty room, not a broken device."
 echo "A peak that stays at zero WHILE the tone is audible means the capture path"
