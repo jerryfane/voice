@@ -14,6 +14,7 @@
 package codecheck
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -31,17 +32,14 @@ import (
 //	bytes.Buffer cannot fail
 const justification = "discard:"
 
-// TestNoUnjustifiedDiscardedResults fails on any `_ = call()` in the module
-// that does not say, on the line or the line above, why throwing the result
-// away is safe.
-func TestNoUnjustifiedDiscardedResults(t *testing.T) {
-	root := moduleRoot(t)
-	var offences []string
-	files := 0
-
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+// scan walks a tree and reports unjustified discards. It is a function rather
+// than inline test code so the guard's own failure modes can be exercised
+// against fixtures: a check that goes quiet on a file it cannot read, or that
+// examines nothing at all, would pass over any code in the repository.
+func scan(root string) (files int, offences []string, err error) {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
 		if d.IsDir() {
 			switch d.Name() {
@@ -56,12 +54,12 @@ func TestNoUnjustifiedDiscardedResults(t *testing.T) {
 		fset := token.NewFileSet()
 		file, parseErr := parser.ParseFile(fset, path, nil, parser.ParseComments)
 		if parseErr != nil {
-			// A file the check cannot read is exactly how a guard goes quiet.
+			// A file the check cannot read is exactly how a guard goes quiet,
+			// so this is a failure and never a skip.
 			return parseErr
 		}
 		files++
-		justified := justifiedLines(fset, file)
-		for _, o := range discards(fset, file, justified) {
+		for _, o := range discards(fset, file, justifiedLines(fset, file)) {
 			rel, relErr := filepath.Rel(root, o.file)
 			if relErr != nil {
 				rel = o.file
@@ -71,10 +69,21 @@ func TestNoUnjustifiedDiscardedResults(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walking the module: %v", err)
+		return files, offences, err
 	}
 	if files == 0 {
-		t.Fatal("parsed no Go files: the check would pass regardless of the code")
+		return 0, nil, fmt.Errorf("parsed no Go files under %s: the check would pass regardless of the code", root)
+	}
+	return files, offences, nil
+}
+
+// TestNoUnjustifiedDiscardedResults fails on any discarded call result in the
+// module that does not say why throwing it away is safe.
+func TestNoUnjustifiedDiscardedResults(t *testing.T) {
+	root := moduleRoot(t)
+	files, offences, err := scan(root)
+	if err != nil {
+		t.Fatalf("scanning the module: %v", err)
 	}
 	if len(offences) > 0 {
 		t.Errorf("%d call result(s) discarded with no justification comment:\n  %s\n\n"+
@@ -83,6 +92,59 @@ func TestNoUnjustifiedDiscardedResults(t *testing.T) {
 			len(offences), strings.Join(offences, "\n  "), justification)
 	}
 	t.Logf("checked %d Go files under %s", files, root)
+}
+
+// The guard has been wrong three times about what it can see, so its own
+// failure modes are assertions rather than something to be trusted: a file it
+// cannot parse must fail, a tree with nothing in it must fail, and an
+// unjustified discard must be reported.
+func TestScanFailsRatherThanGoingQuiet(t *testing.T) {
+	t.Run("parse error fails", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "broken.go"), []byte("package p\nfunc oops( {\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := scan(dir)
+		if err == nil {
+			t.Fatal("an unparseable file was skipped instead of failing the check")
+		}
+		if !strings.Contains(err.Error(), "broken.go") {
+			t.Errorf("error does not name the file it could not read: %v", err)
+		}
+	})
+	t.Run("empty tree fails", func(t *testing.T) {
+		if _, _, err := scan(t.TempDir()); err == nil {
+			t.Fatal("a tree with no Go files passed, so the check proves nothing")
+		}
+	})
+	t.Run("unjustified discard is reported", func(t *testing.T) {
+		dir := t.TempDir()
+		src := "package p\n\nfunc f() error { return nil }\n\nfunc g() { _ = f() }\n"
+		if err := os.WriteFile(filepath.Join(dir, "sloppy.go"), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, offences, err := scan(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(offences) != 1 {
+			t.Fatalf("offences = %v, want exactly one", offences)
+		}
+	})
+	t.Run("justified discard is accepted", func(t *testing.T) {
+		dir := t.TempDir()
+		src := "package p\n\nfunc f() error { return nil }\n\nfunc g() {\n\t// discard: cannot fail\n\t_ = f()\n}\n"
+		if err := os.WriteFile(filepath.Join(dir, "fine.go"), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, offences, err := scan(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(offences) != 0 {
+			t.Fatalf("offences = %v, want none", offences)
+		}
+	})
 }
 
 type offence struct {
