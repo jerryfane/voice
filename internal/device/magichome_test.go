@@ -12,6 +12,7 @@ func TestMagicHomeColorPacketAndVerifiedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// discard: the fake device listener; the test fails on its own if it stops early.
 	defer ln.Close()
 	packets := make(chan []byte, 2)
 	go func() {

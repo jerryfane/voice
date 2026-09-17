@@ -47,6 +47,9 @@ func (t *CommandTranscriber) Transcribe(ctx context.Context, pcm []int16, f audi
 		return "", err
 	}
 	name := tmp.Name()
+	// discard: best-effort cleanup of a file in the system temp directory; a
+	// leftover is reaped by the OS and threading a reporter through the speech
+	// engines to say so would cost more than it is worth.
 	defer os.Remove(name)
 	if _, err = tmp.Write(audio.EncodeWAV(pcm, f)); err != nil {
 		return "", errors.Join(err, tmp.Close())
@@ -105,6 +108,7 @@ func (s *CommandSynthesizer) Synthesize(ctx context.Context, text string) ([]byt
 	if err := out.Close(); err != nil {
 		return nil, err
 	}
+	// discard: best-effort cleanup of a temp file, as above.
 	defer os.Remove(outName)
 	vars := map[string]string{"model": s.Model, "text": text, "out": outName}
 	argv := proc.Expand(s.Argv, vars)

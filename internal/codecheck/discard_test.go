@@ -137,19 +137,34 @@ func discards(fset *token.FileSet, file *ast.File, justified map[int]bool) []off
 			report(fset.Position(stmt.Pos()))
 		case *ast.ExprStmt:
 			// A bare call: nothing is assigned, so any result is dropped.
-			call, ok := stmt.X.(*ast.CallExpr)
-			if !ok {
-				return true
+			if namedCall(stmt.X) {
+				report(fset.Position(stmt.Pos()))
 			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || !mustHandle[sel.Sel.Name] {
-				return true
+		case *ast.DeferStmt:
+			// `defer f.Close()` drops the error as completely as a bare call
+			// does, and on a write path that is how data goes missing.
+			if namedCall(stmt.Call) {
+				report(fset.Position(stmt.Pos()))
 			}
-			report(fset.Position(stmt.Pos()))
+		case *ast.GoStmt:
+			if namedCall(stmt.Call) {
+				report(fset.Position(stmt.Pos()))
+			}
 		}
 		return true
 	})
 	return found
+}
+
+// namedCall reports whether an expression is a call to one of the operations
+// whose failure matters.
+func namedCall(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && mustHandle[sel.Sel.Name]
 }
 
 // trailingBlank reports whether the last assigned name is blank, which is
@@ -279,4 +294,23 @@ func offencesIn(t *testing.T, name, src string) int {
 		t.Fatalf("%s: %v", name, err)
 	}
 	return len(discards(fset, file, justifiedLines(fset, file)))
+}
+
+// defer and go statements hide a dropped error exactly as well as a bare
+// call, which is the blind spot that let four Close discards live in this
+// repository while the checker reported clean.
+func TestCheckerCatchesDeferredAndConcurrentDiscards(t *testing.T) {
+	for name, src := range map[string]string{
+		"deferred close":     "package p\nimport \"os\"\nfunc g(f *os.File) { defer f.Close() }\n",
+		"go close":           "package p\nimport \"os\"\nfunc g(f *os.File) { go f.Close() }\n",
+		"deferred justified": "package p\nimport \"os\"\nfunc g(f *os.File) {\n\t// discard: read-only handle\n\tdefer f.Close()\n}\n",
+	} {
+		want := 1
+		if name == "deferred justified" {
+			want = 0
+		}
+		if got := offencesIn(t, name+".go", src); got != want {
+			t.Errorf("%s: checker found %d offences, want %d", name, got, want)
+		}
+	}
 }

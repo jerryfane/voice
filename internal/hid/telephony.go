@@ -1,6 +1,7 @@
 package hid
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -94,6 +95,9 @@ func descriptorSize(devPath string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// discard: this descriptor is opened read-only to ask the kernel for the
+	// report-descriptor length; nothing is written, so a close failure cannot
+	// lose anything.
 	defer f.Close()
 	var n int32
 	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), hidiocgrdescsize, uintptr(unsafe.Pointer(&n))); errno != 0 {
@@ -182,9 +186,14 @@ func (t *Telephony) write(bit Bit, on bool) error {
 	if err != nil {
 		return fmt.Errorf("open %s: %w (install the Voice udev rule)", t.path, err)
 	}
-	defer f.Close()
 	if _, err := f.Write(report); err != nil {
-		return fmt.Errorf("write report %d to %s: %w", bit.ReportID, t.path, err)
+		return errors.Join(fmt.Errorf("write report %d to %s: %w", bit.ReportID, t.path, err), f.Close())
+	}
+	// The close is part of the write: a report that fails to reach the device
+	// leaves the microphone gated or the light wrong, and a deferred close
+	// would hide that.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s after report %d: %w", t.path, bit.ReportID, err)
 	}
 	return nil
 }

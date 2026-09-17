@@ -501,6 +501,7 @@ func TestForeignDatabaseIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// discard: read-only verification handle.
 	defer again.Close()
 	var tables int
 	if err := again.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&tables); err != nil {

@@ -127,6 +127,8 @@ func (s *Store) Load() ([]Timer, error) {
 	if err != nil {
 		return nil, err
 	}
+	// discard: rows.Err below reports anything that went wrong with this
+	// query; closing a finished read adds no failure of its own.
 	defer rows.Close()
 	var ts []Timer
 	for rows.Next() {
@@ -167,6 +169,8 @@ func (s *Store) Save(ts []Timer) error {
 	if err != nil {
 		return err
 	}
+	// discard: the statement is scoped to the transaction, and tx.Commit is
+	// what decides whether this save happened.
 	defer stmt.Close()
 	for _, t := range ts {
 		if _, err := stmt.Exec(t.ID, t.Label, int64(t.Duration), t.Deadline.UTC().Format(time.RFC3339Nano)); err != nil {
