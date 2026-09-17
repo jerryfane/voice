@@ -33,21 +33,63 @@ ask() {
 	read -r _
 }
 
-# capture RATE SECONDS LABEL -> prints the peak of one capture
+# capture SECONDS LABEL [DEVICE] -> prints the peak of one capture, or says
+# why it could not take one.
+#
+# The first version suppressed arecord's stderr and fed whatever appeared into
+# wave.open, so an ALSA failure surfaced as a Python EOFError on a truncated
+# file and the script carried on as though it had a measurement. A diagnostic
+# that cannot tell "the device returned silence" from "the capture never
+# happened" is the exact ambiguity this investigation has been fighting, and it
+# aborted the owner's session for no reason.
 capture() {
-	local secs="$1" label="$2" wav
+	local secs="$1" label="$2" dev="${3:-$DEV}" wav status=0
 	wav=$(mktemp /tmp/powerconf-XXXXXX.wav)
+	# arecord's stderr is the ALSA diagnostic and the most useful thing this
+	# function can produce when something goes wrong, so it is kept.
 	setpriv --reuid="$SERVICE_UID" --regid="$SERVICE_GID" --groups="$SERVICE_GROUPS" \
-		arecord -D "$DEV" -f S16_LE -r 16000 -c 1 -d "$secs" "$wav" 2>/dev/null
-	python3 - "$wav" "$label" <<'PY'
+		arecord -D "$dev" -f S16_LE -r 16000 -c 1 -d "$secs" "$wav" || status=$?
+	if [ "$status" -ne 0 ]; then
+		printf '    %s: CAPTURE FAILED, arecord exit %s on %s (ALSA error above)\n' "$label" "$status" "$dev"
+		rm -f "$wav"
+		return 1
+	fi
+	if [ ! -s "$wav" ]; then
+		printf '    %s: CAPTURE FAILED, arecord wrote an empty file on %s\n' "$label" "$dev"
+		rm -f "$wav"
+		return 1
+	fi
+	python3 - "$wav" "$label" "$dev" <<'PY'
 import sys, wave, audioop
-path, label = sys.argv[1], sys.argv[2]
-with wave.open(path) as w:
-    frames = w.readframes(w.getnframes())
-print(f"    {label}: peak={audioop.max(frames, 2)} frames={len(frames)//2}")
+path, label, dev = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with wave.open(path) as w:
+        frames = w.readframes(w.getnframes())
+except Exception as err:
+    print(f"    {label}: CAPTURE UNREADABLE on {dev}: {type(err).__name__}: {err}")
+    raise SystemExit(1)
+if not frames:
+    print(f"    {label}: CAPTURE EMPTY on {dev}: no audio frames")
+    raise SystemExit(1)
+print(f"    {label}: peak={audioop.max(frames, 2)} frames={len(frames)//2} device={dev}")
 PY
+	status=$?
 	rm -f "$wav"
+	return "$status"
 }
+
+# restore puts the device and the service back however this script exits,
+# including a mid-phase failure. Without it, an abort left the speakerphone
+# holding whatever report was written last and the service stopped.
+restore() {
+	if ! hid '\x02\x00\x00' 2>/dev/null; then
+		printf 'WARNING: could not clear the telephony report on %s\n' "$HIDRAW" >&2
+	fi
+	if ! systemctl start voice >/dev/null 2>&1; then
+		printf 'WARNING: could not restart voice; run: systemctl start voice\n' >&2
+	fi
+}
+trap restore EXIT
 
 echo "=== phase 0: state"
 systemctl is-active voice || true
