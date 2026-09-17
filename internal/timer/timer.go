@@ -5,14 +5,12 @@
 package timer
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/jerryfane/voice/internal/faults"
 )
 
 // Timer is one scheduled announcement.
@@ -35,82 +33,13 @@ func (t Timer) Remaining(now time.Time) time.Duration {
 	return 0
 }
 
-// Saver is how the scheduler persists and recovers its set. Store is the
-// production implementation; the interface exists so the scheduler can be
-// exercised against a store that fails, which is the only way to test that
-// such a failure is reported rather than swallowed.
+// Saver is how the scheduler persists and recovers its set. Store, backed by
+// SQLite, is the production implementation; the interface exists so the
+// scheduler can be exercised against a store that fails, which is the only way
+// to test that such a failure is reported rather than swallowed.
 type Saver interface {
 	Load() ([]Timer, error)
 	Save([]Timer) error
-}
-
-// Store persists the timer set as JSON.
-type Store struct{ Path string }
-
-// Load reads the persisted timers. A missing file is an empty set. A corrupt
-// file is reported and treated as empty, because refusing to start the whole
-// assistant over an unreadable timer file would be a worse failure.
-func (s Store) Load() ([]Timer, error) {
-	if s.Path == "" {
-		return nil, nil
-	}
-	b, err := os.ReadFile(s.Path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var ts []Timer
-	if err := json.Unmarshal(b, &ts); err != nil {
-		return nil, fmt.Errorf("%s is not readable timer state: %w", s.Path, err)
-	}
-	return ts, nil
-}
-
-// Save writes the timers atomically: a truncated write during a power cut
-// would lose every timer, so the file is written, synced, and put in place by
-// rename, and the directory entry is synced too - a rename that is not durable
-// leaves the old set behind after a power cut.
-func (s Store) Save(ts []Timer) error {
-	if s.Path == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(s.Path), 0o755); err != nil {
-		return err
-	}
-	b, err := json.Marshal(ts)
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.Path), ".timers-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(append(b, '\n')); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), s.Path); err != nil {
-		return err
-	}
-	dir, err := os.Open(filepath.Dir(s.Path))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
 }
 
 // Scheduler owns the live timer set. It is safe for concurrent use: the
@@ -126,7 +55,7 @@ type Scheduler struct {
 
 	fired   chan Timer
 	changed chan struct{}
-	onError func(error)
+	faults  faults.Reporter
 }
 
 // Option configures a Scheduler. Tests inject a clock; production uses none.
@@ -138,24 +67,20 @@ func WithClock(now func() time.Time, after func(time.Duration) <-chan time.Time)
 	return func(s *Scheduler) { s.now, s.after = now, after }
 }
 
-// WithErrorHandler reports failures the scheduler cannot return to a caller.
-// Firing happens on its own goroutine, so a failure to persist the set after a
-// timer fires has nowhere to go: without this it would be discarded, and the
-// fired timer could come back after a restart.
-func WithErrorHandler(h func(error)) Option {
-	return func(s *Scheduler) { s.onError = h }
-}
-
 // New loads any persisted timers and returns a scheduler plus the timers that
 // expired while Voice was not running, which the caller should report instead
 // of firing silently.
-func New(store Saver, opts ...Option) (*Scheduler, []Timer, error) {
+// New takes the reporter rather than accepting it as an option: firing happens
+// on the scheduler's own goroutine, so every failure there needs somewhere to
+// go, and a caller that has not decided where must say faults.Discard out loud.
+func New(store Saver, report faults.Reporter, opts ...Option) (*Scheduler, []Timer, error) {
 	s := &Scheduler{
 		store:   store,
 		now:     time.Now,
 		after:   time.After,
 		fired:   make(chan Timer, 8),
 		changed: make(chan struct{}, 1),
+		faults:  report,
 	}
 	for _, o := range opts {
 		o(s)
@@ -242,8 +167,8 @@ func (s *Scheduler) Cancel(match func(Timer) bool) ([]Timer, error) {
 // fail reports an error the scheduler cannot return. Silence here would mean a
 // fired timer that reappears after a restart with nobody warned.
 func (s *Scheduler) fail(err error) {
-	if s.onError != nil {
-		s.onError(err)
+	if s.faults != nil {
+		s.faults.Report(err)
 	}
 }
 

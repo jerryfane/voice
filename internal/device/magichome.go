@@ -49,7 +49,9 @@ func (m *MagicHome) roundTrip(ctx context.Context, p []byte, n int) ([]byte, err
 		return nil, err
 	}
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(m.Timeout))
+	if err := c.SetDeadline(time.Now().Add(m.Timeout)); err != nil {
+		return nil, err
+	}
 	if _, err = c.Write(p); err != nil {
 		return nil, err
 	}

@@ -153,11 +153,16 @@ timer fires, and the set is persisted after every change. A timer set before a
 restart still fires at its original time; one that came due while Voice was off
 is reported as expired, with how long ago, exactly once.
 
-State lives in `timers.json` under `$XDG_STATE_HOME/voice`, falling back to
-`~/.local/state/voice`. The service unit sets `StateDirectory=voice`, which
-puts it in `/var/lib/voice` owned by the `voice-agent` account; `timers.file`
-overrides the path. Writes are atomic, and an unreadable state file is reported
-and then ignored: it costs the saved timers, never the ability to set new ones.
+State lives in the SQLite database `timers.db` under `$XDG_STATE_HOME/voice`,
+falling back to `~/.local/state/voice`. The service unit sets
+`StateDirectory=voice`, which puts it in `/var/lib/voice` owned by the
+`voice-agent` account; `timers.file` overrides the path. Each save replaces the
+set in one transaction, so a crash mid-write leaves the previous set rather
+than half of the new one. A database that cannot be opened disables timers with
+an explanation in the log instead of accepting requests it cannot keep.
+
+The driver is `modernc.org/sqlite`, which is pure Go: the release binaries are
+still `CGO_ENABLED=0` static builds for `amd64` and `arm64`.
 
 Because `voice off` stops the listener, it silences announcements without
 destroying timers; `voice on` brings them back with the correct remaining time.

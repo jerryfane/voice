@@ -79,8 +79,9 @@ type Timers struct {
 	// Disabling it sends the request to the agent instead, which cannot
 	// deliver an announcement when the model or network is unavailable.
 	Enabled bool `json:"enabled"`
-	// File holds the timer set across restarts. Empty uses
-	// $XDG_STATE_HOME/voice/timers.json, or ~/.local/state/voice/timers.json.
+	// File is the SQLite database holding the timer set across restarts.
+	// Empty uses $XDG_STATE_HOME/voice/timers.db, or
+	// ~/.local/state/voice/timers.db.
 	// The directory must be writable by the account Voice runs as.
 	File string `json:"file,omitempty"`
 }

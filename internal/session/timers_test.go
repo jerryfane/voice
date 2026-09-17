@@ -11,6 +11,7 @@ import (
 
 	"github.com/jerryfane/voice/internal/audio"
 	"github.com/jerryfane/voice/internal/device"
+	"github.com/jerryfane/voice/internal/faults"
 	"github.com/jerryfane/voice/internal/timer"
 	"github.com/jerryfane/voice/internal/vad"
 )
@@ -38,7 +39,12 @@ func timerAssistant(t *testing.T, texts ...string) (*Assistant, *recordingSynthe
 	t.Helper()
 	tts := &recordingSynthesizer{}
 	planner := &countingPlanner{}
-	sched, missed, err := timer.New(timer.Store{Path: filepath.Join(t.TempDir(), "timers.json")})
+	store, err := timer.Open(filepath.Join(t.TempDir(), "timers.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	sched, missed, err := timer.New(store, faults.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +189,7 @@ func TestTimerVocabularyWithoutWakePhraseIsIgnored(t *testing.T) {
 // from memory but still in the file, so a restart would bring it back.
 func TestCancelReportsAPersistenceFailure(t *testing.T) {
 	a, tts, _ := timerAssistant(t, "hey voice cancel the ten minute timer")
-	sched, _, err := timer.New(failingStore{}, timer.WithErrorHandler(func(error) {}))
+	sched, _, err := timer.New(failingStore{}, faults.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}

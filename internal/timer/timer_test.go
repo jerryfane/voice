@@ -4,9 +4,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jerryfane/voice/internal/faults"
 )
 
 // fakeClock drives the scheduler without waiting. Advance releases every
@@ -72,9 +75,21 @@ func (c *fakeClock) Advance(d time.Duration) {
 // scheduler starts a scheduler on the fake clock and returns an idempotent
 // stop function, so a test can end the "process" early and still let cleanup
 // run.
+// store opens the real SQLite store and closes it with the test, so the
+// persistence path under test is the one production uses.
+func store(t *testing.T, path string) *Store {
+	t.Helper()
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return st
+}
+
 func scheduler(t *testing.T, path string, c *fakeClock) (*Scheduler, []Timer, func()) {
 	t.Helper()
-	s, missed, err := New(Store{Path: path}, WithClock(c.Now, c.After))
+	s, missed, err := New(store(t, path), faults.Discard, WithClock(c.Now, c.After))
 	if err != nil {
 		t.Fatalf("new scheduler: %v", err)
 	}
@@ -106,7 +121,7 @@ func waitFired(t *testing.T, s *Scheduler, c *fakeClock) Timer {
 
 func TestTimerFiresAtItsWallClockDeadline(t *testing.T) {
 	c := newClock()
-	path := filepath.Join(t.TempDir(), "timers.json")
+	path := filepath.Join(t.TempDir(), "timers.db")
 	s, _, _ := scheduler(t, path, c)
 
 	if _, err := s.Add(10*time.Minute, "ten minute"); err != nil {
@@ -129,7 +144,7 @@ func TestTimerFiresAtItsWallClockDeadline(t *testing.T) {
 
 func TestConcurrentTimersFireInDeadlineOrder(t *testing.T) {
 	c := newClock()
-	s, _, _ := scheduler(t, filepath.Join(t.TempDir(), "timers.json"), c)
+	s, _, _ := scheduler(t, filepath.Join(t.TempDir(), "timers.db"), c)
 
 	for _, d := range []time.Duration{30 * time.Minute, 5 * time.Minute, time.Hour} {
 		if _, err := s.Add(d, Spoken(d)); err != nil {
@@ -154,7 +169,7 @@ func TestConcurrentTimersFireInDeadlineOrder(t *testing.T) {
 
 func TestCancelRemovesOnlyTheNamedTimer(t *testing.T) {
 	c := newClock()
-	s, _, _ := scheduler(t, filepath.Join(t.TempDir(), "timers.json"), c)
+	s, _, _ := scheduler(t, filepath.Join(t.TempDir(), "timers.db"), c)
 	for _, d := range []time.Duration{5 * time.Minute, 20 * time.Minute} {
 		if _, err := s.Add(d, Spoken(d)); err != nil {
 			t.Fatal(err)
@@ -183,7 +198,7 @@ func TestCancelRemovesOnlyTheNamedTimer(t *testing.T) {
 // time, with the remaining time it actually has left, not the time it was set
 // for.
 func TestTimerSurvivesRestartWithCorrectRemaining(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "timers.json")
+	path := filepath.Join(t.TempDir(), "timers.db")
 	first := newClock()
 	s, _, stop := scheduler(t, path, first)
 	if _, err := s.Add(30*time.Minute, "thirty minute"); err != nil {
@@ -213,7 +228,7 @@ func TestTimerSurvivesRestartWithCorrectRemaining(t *testing.T) {
 // A timer that came due while Voice was down must be reported as expired, not
 // fired as if it had just finished, and must not be reported twice.
 func TestTimerExpiredWhileDownIsReportedOnce(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "timers.json")
+	path := filepath.Join(t.TempDir(), "timers.db")
 	first := newClock()
 	s, _, stop := scheduler(t, path, first)
 	if _, err := s.Add(5*time.Minute, "five minute"); err != nil {
@@ -245,26 +260,35 @@ func TestTimerExpiredWhileDownIsReportedOnce(t *testing.T) {
 	}
 }
 
-// Corrupt state must be reported and must not stop Voice from working: a
-// truncated file loses old timers, never the ability to set new ones.
-func TestCorruptStateIsReportedAndRecovered(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "timers.json")
+// A state file from the pre-release JSON store must be refused with a message
+// that says what to do, not silently discarded or half-parsed.
+func TestLegacyJSONStateIsRejectedWithAClearMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "timers.db")
 	if err := os.WriteFile(path, []byte(`[{"id":1,"duration":`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	c := newClock()
-	s, missed, err := New(Store{Path: path}, WithClock(c.Now, c.After))
+	st, err := Open(path)
 	if err == nil {
-		t.Fatal("corrupt state accepted silently")
+		t.Fatal("JSON state from a pre-release build was accepted silently")
 	}
-	if len(missed) != 0 {
-		t.Errorf("missed = %+v, want none", missed)
+	if !strings.Contains(err.Error(), "JSON timer state") {
+		t.Fatalf("error does not explain the problem: %v", err)
+	}
+	// With the stale file removed, the same path works.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	st = store(t, path)
+	s, _, err := New(st, faults.Discard, WithClock(c.Now, c.After))
+	if err != nil {
+		t.Fatal(err)
 	}
 	done := make(chan struct{})
 	defer close(done)
 	go s.Run(done)
 	if _, err := s.Add(time.Minute, "one minute"); err != nil {
-		t.Fatalf("cannot set a timer after corrupt state: %v", err)
+		t.Fatalf("cannot set a timer after rejecting stale state: %v", err)
 	}
 	c.Advance(time.Minute)
 	if fired := waitFired(t, s, c); fired.Duration != time.Minute {
@@ -272,27 +296,45 @@ func TestCorruptStateIsReportedAndRecovered(t *testing.T) {
 	}
 }
 
-// The state file is replaced by rename, so a reader never sees a partial file.
-func TestSaveReplacesFileAtomically(t *testing.T) {
+// Saving replaces the whole set in one transaction and leaves no journal or
+// temporary file behind once the store is closed.
+func TestSaveReplacesTheStoredSetTransactionally(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "timers.json")
-	store := Store{Path: path}
-	if err := store.Save([]Timer{{ID: 1, Duration: time.Minute, Deadline: time.Now()}}); err != nil {
+	path := filepath.Join(dir, "timers.db")
+	st := store(t, path)
+	if err := st.Save([]Timer{{ID: 1, Duration: time.Minute, Deadline: time.Now()}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Save(nil); err != nil {
+	if err := st.Save(nil); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := store.Load()
+	loaded, err := st.Load()
 	if err != nil || len(loaded) != 0 {
 		t.Fatalf("load after empty save = %+v, %v", loaded, err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Errorf("%d files left in the state directory, want only timers.json", len(entries))
+	for _, e := range entries {
+		if e.Name() != "timers.db" {
+			t.Errorf("left %q behind in the state directory", e.Name())
+		}
+	}
+}
+
+// A database that is not a database must disable timers with an explanation,
+// not panic and not pretend the set is empty.
+func TestUnreadableDatabaseIsReported(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "timers.db")
+	if err := os.WriteFile(path, []byte("this is not a database at all"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path); err == nil {
+		t.Fatal("a corrupt database was accepted")
 	}
 }
 
@@ -301,7 +343,7 @@ func TestSaveReplacesFileAtomically(t *testing.T) {
 // or missing ones that do.
 func TestPersistedStateMatchesLiveSetUnderConcurrency(t *testing.T) {
 	c := newClock()
-	path := filepath.Join(t.TempDir(), "timers.json")
+	path := filepath.Join(t.TempDir(), "timers.db")
 	s, _, _ := scheduler(t, path, c)
 
 	var wg sync.WaitGroup
@@ -323,7 +365,7 @@ func TestPersistedStateMatchesLiveSetUnderConcurrency(t *testing.T) {
 	wg.Wait()
 
 	live := s.List()
-	persisted, err := Store{Path: path}.Load()
+	persisted, err := store(t, path).Load()
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -349,8 +391,8 @@ func TestSaveFailureAfterFiringIsReported(t *testing.T) {
 	var mu sync.Mutex
 	var errs []error
 	store := &flakyStore{}
-	s, _, err := New(store, WithClock(c.Now, c.After),
-		WithErrorHandler(func(e error) { mu.Lock(); errs = append(errs, e); mu.Unlock() }))
+	report := faults.Func(func(e error) { mu.Lock(); errs = append(errs, e); mu.Unlock() })
+	s, _, err := New(store, report, WithClock(c.Now, c.After))
 	if err != nil {
 		t.Fatal(err)
 	}

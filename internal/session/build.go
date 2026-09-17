@@ -8,6 +8,7 @@ import (
 	"github.com/jerryfane/voice/internal/brain"
 	"github.com/jerryfane/voice/internal/config"
 	"github.com/jerryfane/voice/internal/device"
+	"github.com/jerryfane/voice/internal/faults"
 	"github.com/jerryfane/voice/internal/feedback"
 	"github.com/jerryfane/voice/internal/hid"
 	"github.com/jerryfane/voice/internal/speech"
@@ -32,7 +33,7 @@ func Build(c config.Config) *Assistant {
 			logger.Printf("telephony HID: %v", err)
 		}
 	}
-	rec := audio.NewCommandRecorder(c.Input.Command, c.Input.Device, f, frame, tel)
+	rec := audio.NewCommandRecorder(c.Input.Command, c.Input.Device, f, frame, tel, faults.Log(logger, "capture"))
 	player := audio.NewCommandPlayer(c.Output.Command, c.Output.Device)
 	stt := speech.NewCommandTranscriber(c.STT.Name, c.STT.Command, c.STT.Model, c.STT.Timeout.D())
 	tts := speech.NewCommandSynthesizer(c.TTS.Name, c.TTS.Command, c.TTS.Model, c.TTS.Timeout.D())
@@ -54,19 +55,24 @@ func Build(c config.Config) *Assistant {
 	if c.Timers.Enabled {
 		path := c.Timers.File
 		if path == "" {
-			p, err := config.StatePath("timers.json")
+			p, err := config.StatePath("timers.db")
 			if err != nil {
 				logger.Printf("timers: %v", err)
 			}
 			path = p
 		}
-		var err error
-		timers, missed, err = timer.New(timer.Store{Path: path},
-			timer.WithErrorHandler(func(err error) { logger.Printf("timers: %v", err) }))
+		store, err := timer.Open(path)
 		if err != nil {
-			// A scheduler is still returned: unreadable saved state costs the
-			// old timers, not the ability to set new ones.
-			logger.Printf("timers: %v", err)
+			// Without a store the timer vocabulary would accept requests it
+			// cannot keep, so say why and leave it to the planner.
+			logger.Printf("timers disabled: %v", err)
+		} else {
+			timers, missed, err = timer.New(store, faults.Log(logger, "timers"))
+			if err != nil {
+				// A scheduler is still returned: unreadable saved state costs
+				// the old timers, not the ability to set new ones.
+				logger.Printf("timers: %v", err)
+			}
 		}
 	}
 	light, why := feedback.NewLight(tel, c.Feedback.Light)

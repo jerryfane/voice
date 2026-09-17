@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/jerryfane/voice/internal/faults"
 	"github.com/jerryfane/voice/internal/hid"
 	"github.com/jerryfane/voice/internal/proc"
 )
@@ -23,16 +24,19 @@ type CommandRecorder struct {
 	format       Format
 	frameSamples int
 	telephony    *hid.Telephony
+	faults       faults.Reporter
 }
 
 // NewCommandRecorder builds a recorder. frameSamples controls the size of each
 // emitted buffer; 20 ms frames are a good VAD default. tel may be nil when the
-// input needs no telephony handshake.
-func NewCommandRecorder(argv []string, device string, f Format, frameSamples int, tel *hid.Telephony) *CommandRecorder {
+// input needs no telephony handshake. report receives failures that happen
+// after Stream has returned - notably clearing the off-hook report when
+// capture ends, which has no caller left to tell.
+func NewCommandRecorder(argv []string, device string, f Format, frameSamples int, tel *hid.Telephony, report faults.Reporter) *CommandRecorder {
 	if frameSamples <= 0 {
 		frameSamples = f.SampleRate / 50
 	}
-	return &CommandRecorder{argv: argv, device: device, format: f, frameSamples: frameSamples, telephony: tel}
+	return &CommandRecorder{argv: argv, device: device, format: f, frameSamples: frameSamples, telephony: tel, faults: report}
 }
 
 func (r *CommandRecorder) Format() Format { return r.format }
@@ -81,7 +85,14 @@ func (r *CommandRecorder) Stream(ctx context.Context) (<-chan []int16, <-chan er
 			errCh <- err
 			return
 		}
-		defer func() { _ = r.setOffHook(false) }()
+		// Clearing off-hook happens as capture unwinds, when nothing is left
+		// to return an error to: a silent failure here leaves the
+		// speakerphone off hook with its light on.
+		defer func() {
+			if err := r.setOffHook(false); err != nil && r.faults != nil {
+				r.faults.Report(err)
+			}
+		}()
 
 		vars := map[string]string{
 			"device": r.device, "rate": strconv.Itoa(r.format.SampleRate),

@@ -164,7 +164,7 @@ func (a *Assistant) accepted(ctx context.Context, command string) (stop bool) {
 	p, err := a.HandleText(ctx, command)
 	if err != nil {
 		a.logf("command %q: %v", command, err)
-		_ = a.Speak(ctx, "I couldn't do that.")
+		a.say(ctx, "I couldn't do that.")
 		return false
 	}
 	if err := a.Speak(ctx, p.Speak); err != nil {
