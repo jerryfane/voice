@@ -3,10 +3,10 @@
 // Two modes exist, and the distinction matters:
 //
 //   - "plan": the transcript plus a device inventory go to the model, which
-//     returns a strict JSON Plan. herdr executes the actions itself. Fast,
+//     returns a strict JSON Plan. voiced executes the actions itself. Fast,
 //     predictable, and the model never gets shell access.
 //   - "agent": the transcript is handed to a full agent session (omp/claude)
-//     that may use its own tools, including the herdr CLI. Slower, unbounded
+//     that may use its own tools, including the voiced CLI. Slower, unbounded
 //     capability. Use when you want "figure it out", not "do this".
 //
 // Before either runs, a rules pass answers trivial local questions (time,
@@ -29,7 +29,7 @@ type Action struct {
 
 // Plan is the planner's complete response to one utterance.
 type Plan struct {
-	// Speak is what herdr says back. Empty means stay silent.
+	// Speak is what voiced says back. Empty means stay silent.
 	Speak string `json:"speak"`
 	// Actions run in order, after Speak is queued.
 	Actions []Action `json:"actions,omitempty"`

@@ -41,7 +41,7 @@ func (t *CommandTranscriber) Available() (bool, string) {
 	return true, p
 }
 func (t *CommandTranscriber) Transcribe(ctx context.Context, pcm []int16, f audio.Format) (string, error) {
-	tmp, err := os.CreateTemp("", "herdr-*.wav")
+	tmp, err := os.CreateTemp("", "voiced-*.wav")
 	if err != nil {
 		return "", err
 	}
@@ -95,7 +95,7 @@ func (s *CommandSynthesizer) Available() (bool, string) {
 	return true, p
 }
 func (s *CommandSynthesizer) Synthesize(ctx context.Context, text string) ([]byte, error) {
-	out, err := os.CreateTemp("", "herdr-tts-*.wav")
+	out, err := os.CreateTemp("", "voiced-tts-*.wav")
 	if err != nil {
 		return nil, err
 	}

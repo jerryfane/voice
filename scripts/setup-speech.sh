@@ -1,16 +1,16 @@
 #!/usr/bin/env sh
 set -eu
 
-# Installs the default local speech engines used by herdr:
+# Installs the default local speech engines used by voiced:
 #   - whisper.cpp for speech-to-text (built natively for this CPU)
 #   - Piper for text-to-speech (official prebuilt archive)
-# Models live outside the repository under $XDG_DATA_HOME/herdr/models.
-# Nothing here is linked into the herdr binary; config may select other engines.
+# Models live outside the repository under $XDG_DATA_HOME/voiced/models.
+# Nothing here is linked into the voiced binary; config may select other engines.
 
 WHISPER_VERSION=${WHISPER_VERSION:-v1.9.4}
 PIPER_VERSION=${PIPER_VERSION:-2023.11.14-2}
-DATA=${XDG_DATA_HOME:-"$HOME/.local/share"}/herdr
-CACHE=${XDG_CACHE_HOME:-"$HOME/.cache"}/herdr
+DATA=${XDG_DATA_HOME:-"$HOME/.local/share"}/voiced
+CACHE=${XDG_CACHE_HOME:-"$HOME/.cache"}/voiced
 BIN=${HOME}/.local/bin
 MODELS=$DATA/models
 mkdir -p "$DATA" "$CACHE" "$BIN" "$MODELS"

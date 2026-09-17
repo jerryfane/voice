@@ -2,10 +2,10 @@
 // contracts.
 //
 // Engines are external programs described by a command template in the config.
-// herdr writes audio to a temp file, runs the template, and reads the result.
+// voiced writes audio to a temp file, runs the template, and reads the result.
 // This is deliberate: it lets a user swap whisper.cpp for faster-whisper, a
 // cloud endpoint, or a wrapper script without recompiling, and it keeps the
-// herdr binary free of CGO and model weights.
+// voiced binary free of CGO and model weights.
 package speech
 
 import (
@@ -20,7 +20,7 @@ type Transcriber interface {
 	// empty string (not an error) when the audio contains no intelligible
 	// speech, which is a normal outcome for false VAD triggers.
 	Transcribe(ctx context.Context, pcm []int16, f audio.Format) (string, error)
-	// Name identifies the engine in logs and `herdr doctor`.
+	// Name identifies the engine in logs and `voiced doctor`.
 	Name() string
 	// Available reports whether the engine's binary and model are present, with
 	// a human-readable reason when they are not.

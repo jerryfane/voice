@@ -17,7 +17,7 @@ import (
 	"github.com/jerryfane/herdr-voice/internal/wake"
 )
 
-// Assistant is one configured herdr runtime.
+// Assistant is one configured voiced runtime.
 type Assistant struct {
 	Recorder    audio.Recorder
 	Player      audio.Player

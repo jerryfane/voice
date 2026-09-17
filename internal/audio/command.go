@@ -41,14 +41,14 @@ func (r *CommandRecorder) Describe() string {
 
 // setOffHook sends the standard USB HID telephony output report used by
 // speakerphones such as the Anker PowerConf. The report is cleared when capture
-// ends. A udev rule should grant the herdr service access to the hidraw node.
+// ends. A udev rule should grant the voiced service access to the hidraw node.
 func (r *CommandRecorder) setOffHook(on bool) error {
 	if r.telephonyHID == "" {
 		return nil
 	}
 	f, err := os.OpenFile(r.telephonyHID, os.O_WRONLY, 0)
 	if err != nil {
-		return fmt.Errorf("open telephony HID %s: %w (install the herdr udev rule)", r.telephonyHID, err)
+		return fmt.Errorf("open telephony HID %s: %w (install the voiced udev rule)", r.telephonyHID, err)
 	}
 	defer f.Close()
 	v := byte(0)

@@ -1,10 +1,10 @@
-// Package config is herdr's single source of truth for how a deployment is
-// wired: which microphone, which speaker, which speech engines, which agent
-// binary, and which devices exist.
+// Package config is voiced's single source of truth for how a Herdr Voice
+// deployment is wired: which microphone, speaker, speech engines, agent binary,
+// and devices exist.
 //
-// The format is JSON, on purpose. herdr has no third-party dependencies, so
+// The format is JSON, on purpose. voiced has no third-party dependencies, so
 // adding YAML or TOML would mean vendoring a parser into a binary whose whole
-// selling point is that it is one self-contained file. `herdr init` writes a
+// selling point is that it is one self-contained file. `voiced init` writes a
 // fully populated config with every default spelled out, so nobody has to
 // author JSON from memory.
 package config
@@ -32,7 +32,7 @@ type Config struct {
 	Input Input `json:"input"`
 	// Output is the speaker.
 	Output Output `json:"output"`
-	// Wake controls when herdr starts listening for a command.
+	// Wake controls when voiced starts listening for a command.
 	Wake Wake `json:"wake"`
 	// STT is speech-to-text.
 	STT Engine `json:"stt"`
@@ -49,7 +49,7 @@ type Config struct {
 // Input describes audio capture.
 type Input struct {
 	// Device is passed to the capture command as {device}. "default" uses the
-	// host default; `herdr devices audio` lists the alternatives.
+	// host default; `voiced devices audio` lists the alternatives.
 	Device string `json:"device"`
 	// Command captures signed 16-bit mono PCM to stdout, forever.
 	Command Command `json:"command"`
@@ -57,7 +57,7 @@ type Input struct {
 	SampleRate int `json:"sample_rate"`
 	// TelephonyHID is an optional hidraw path for USB speakerphones that gate
 	// capture until the host signals "off hook" (for example Anker PowerConf).
-	// Herdr sends the standard report before capture and clears it on stop.
+	// Voiced sends the standard report before capture and clears it on stop.
 	TelephonyHID string `json:"telephony_hid,omitempty"`
 }
 
@@ -79,7 +79,7 @@ type Wake struct {
 	// match. 0 demands an exact transcript; 0.25 tolerates one wrong character
 	// in four. Raise it if the recogniser keeps mangling the name.
 	Fuzz float64 `json:"fuzz"`
-	// FollowUp is how long herdr keeps listening for another command after
+	// FollowUp is how long voiced keeps listening for another command after
 	// answering, so you can say "and turn off the TV" without repeating the
 	// wake phrase. Zero disables it.
 	FollowUp Duration `json:"follow_up"`
@@ -124,7 +124,7 @@ type Engine struct {
 
 // Brain configures reasoning.
 type Brain struct {
-	// Mode is "plan" (model returns JSON, herdr executes) or "agent" (full
+	// Mode is "plan" (model returns JSON, voiced executes) or "agent" (full
 	// agent session with its own tools).
 	Mode string `json:"mode"`
 	// Command runs the model. The prompt is substituted as {prompt}; if no
@@ -132,7 +132,7 @@ type Brain struct {
 	Command Command `json:"command"`
 	// Timeout bounds one invocation.
 	Timeout Duration `json:"timeout"`
-	// Persona is prepended to the planning prompt: how herdr should sound.
+	// Persona is prepended to the planning prompt: how voiced should sound.
 	Persona string `json:"persona"`
 	// Rules enables the local no-model fast path for trivial queries.
 	Rules bool `json:"rules"`
@@ -243,7 +243,7 @@ func Default() Config {
 			Mode:    "plan",
 			Timeout: Duration(60 * time.Second),
 			Command: Command{"omp", "-p", "--no-session", "--no-tools", "{prompt}"},
-			Persona: "You are herdr, a terse voice assistant. Answer in one or two spoken sentences. Never use markdown, lists, or emoji: every word you produce is read aloud.",
+			Persona: "You are Herdr Voice, a terse voice assistant. Answer in one or two spoken sentences. Never use markdown, lists, or emoji: every word you produce is read aloud.",
 			Rules:   true,
 		},
 		Lights: []Light{},
@@ -251,20 +251,20 @@ func Default() Config {
 	}
 }
 
-// Path returns the config file location, honouring HERDR_CONFIG and
-// XDG_CONFIG_HOME before falling back to ~/.config/herdr/config.json.
+// Path returns the config file location, honouring VOICED_CONFIG and
+// XDG_CONFIG_HOME before falling back to ~/.config/voiced/config.json.
 func Path() (string, error) {
-	if p := os.Getenv("HERDR_CONFIG"); p != "" {
+	if p := os.Getenv("VOICED_CONFIG"); p != "" {
 		return p, nil
 	}
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "herdr", "config.json"), nil
+		return filepath.Join(x, "voiced", "config.json"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("cannot locate home directory: %w", err)
 	}
-	return filepath.Join(home, ".config", "herdr", "config.json"), nil
+	return filepath.Join(home, ".config", "voiced", "config.json"), nil
 }
 
 // Load reads the config at path, or at the default location when path is empty.
@@ -332,7 +332,7 @@ func (c Config) Validate() error {
 		return fmt.Errorf("wake.detector is \"external\" but wake.command is empty")
 	}
 	if c.Wake.Detector == "stt" && len(c.Wake.Phrases) == 0 {
-		return fmt.Errorf("wake.phrases is empty: herdr would never wake")
+		return fmt.Errorf("wake.phrases is empty: voiced would never wake")
 	}
 	if c.Wake.Fuzz < 0 || c.Wake.Fuzz > 1 {
 		return fmt.Errorf("wake.fuzz must be between 0 and 1, got %v", c.Wake.Fuzz)

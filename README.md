@@ -1,8 +1,8 @@
-# herdr
+# Herdr Voice
 
-A local, open-source voice runtime for agent harnesses.
+A local, open-source voice runtime for agent harnesses. The installed command and service are named `voiced`; `herdr` is intentionally reserved for the separate Herdr terminal-workspace federation.
 
-Say a wake phrase, speak a command, let an agent reason, hear the answer, and control local devices. Herdr is one statically linked Go binary. It does not own your microphone, speaker, speech model, or agent provider: each boundary is configurable, so any device or engine that exposes a command-line interface works.
+Say a wake phrase, speak a command, let an agent reason, hear the answer, and control local devices. Voiced is one statically linked Go binary. It does not own your microphone, speaker, speech model, or agent provider: each boundary is configurable, so any device or engine that exposes a command-line interface works.
 
 ```
 microphone → VAD → speech-to-text → wake phrase → rules / OMP → actions
@@ -19,7 +19,7 @@ microphone → VAD → speech-to-text → wake phrase → rules / OMP → action
 - **Any speech engine:** defaults to whisper.cpp and Piper, both local. Engines are external and replaceable.
 - **Local-first devices:** Magic Home/LEDENET lights use TCP 5577 directly. TVs use Linux HDMI-CEC. Neither requires a cloud account.
 - **Fast path:** time, date, common power/color/volume commands bypass the model.
-- **Safe actions:** the model returns a strict JSON plan. Herdr validates every device ID and capability before execution. Configured commands are argv arrays, never shell strings.
+- **Safe actions:** the model returns a strict JSON plan. Voiced validates every device ID and capability before execution. Configured commands are argv arrays, never shell strings.
 
 ## Install
 
@@ -27,19 +27,25 @@ Download the latest release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jerryfane/herdr-voice/main/install.sh | sh
-herdr init
-herdr doctor
+voiced init
+voiced doctor
 ```
 
 Or build from source (Go 1.24+):
 
 ```sh
-go build -trimpath -ldflags='-s -w' -o ~/.local/bin/herdr ./cmd/herdr
+go build -trimpath -ldflags='-s -w' -o ~/.local/bin/voiced ./cmd/voiced
 ./scripts/setup-speech.sh
-herdr init
+voiced init
 ```
 
-`setup-speech.sh` builds whisper.cpp and installs Piper plus the default English models under `~/.local/share/herdr/models`. They are not linked into Herdr; edit the JSON config to use other engines.
+`setup-speech.sh` builds whisper.cpp and installs Piper plus the default English models under `~/.local/share/voiced/models`. They are not linked into Voiced; edit the JSON config to use other engines.
+
+Configuration defaults to `~/.config/voiced/config.json`. Override it with `VOICED_CONFIG` or `--config PATH`.
+
+### Upgrading from v0.1
+
+v0.1 incorrectly installed the voice runtime as `~/.local/bin/herdr`. Restore the federation binary before upgrading, then install v0.2 or newer as `voiced`. Move only the voice file `~/.config/herdr/config.json` to `~/.config/voiced/config.json`; do not move or delete the surrounding `~/.config/herdr` directory because the Herdr federation owns its other files. Move voice models from `~/.local/share/herdr` to `~/.local/share/voiced`, update absolute model paths, and replace the old voice unit with `voiced.service`.
 
 ## Configure audio
 
@@ -63,7 +69,7 @@ Set `input.device` and `output.device`, for example:
 }
 ```
 
-The optional `telephony_hid` handles USB speakerphones that stream silence until the host reports an active call. `packaging/99-herdr-powerconf.rules` grants the service permission for Anker PowerConf (`291a:3301`). Other microphones omit it.
+The optional `telephony_hid` handles USB speakerphones that stream silence until the host reports an active call. `packaging/99-voiced-powerconf.rules` grants the service permission for Anker PowerConf (`291a:3301`). Other microphones omit it.
 
 Commands may use placeholders documented in `internal/config/config.go`: `{device}`, `{rate}`, `{channels}`, `{file}`, `{model}`, `{text}`, `{out}`, and `{prompt}`.
 
@@ -92,34 +98,34 @@ Check the bus with `cec-ctl -d /dev/cec0 --playback --to 0 --give-device-power-s
 ## Use
 
 ```sh
-herdr doctor
-herdr devices
-herdr ask 'turn the bedroom light purple'
-herdr light bedroom white 60
-herdr tv tv off
-herdr say 'Herdr is ready.'
-herdr listen
+voiced doctor
+voiced devices
+voiced ask 'turn the bedroom light purple'
+voiced light bedroom white 60
+voiced tv tv off
+voiced say 'Herdr is ready.'
+voiced listen
 ```
 
 Default wake spellings include “hey herdr”, “hey herder”, and likely STT variants. Recognition is fuzzy and configurable. The default detector transcribes only VAD-accepted speech segments; custom wake engines can be substituted without changing the binary.
 
 ## Agent skill
 
-`skills/herdr/SKILL.md` packages the binary as an agentskills.io-compatible skill. Agents should call deterministic CLI operations directly (`herdr light`, `herdr tv`, `herdr devices`) and use `herdr ask` only for natural-language planning.
+`skills/voiced/SKILL.md` packages the runtime as an agentskills.io-compatible skill. Agents should call deterministic CLI operations directly (`voiced light`, `voiced tv`, `voiced devices`) and use `voiced ask` only for natural-language planning.
 
 ## Service
 
 ```sh
 mkdir -p ~/.config/systemd/user
-cp packaging/herdr.service ~/.config/systemd/user/
+cp packaging/voiced.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now herdr
+systemctl --user enable --now voiced
 ```
 
 Install the optional PowerConf udev rule as root, then replug the device:
 
 ```sh
-sudo cp packaging/99-herdr-powerconf.rules /etc/udev/rules.d/
+sudo cp packaging/99-voiced-powerconf.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```

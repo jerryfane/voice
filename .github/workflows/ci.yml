@@ -22,5 +22,5 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       - name: Static binaries
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/herdr-amd64 ./cmd/herdr
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/herdr-arm64 ./cmd/herdr
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/voiced-amd64 ./cmd/voiced
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/voiced-arm64 ./cmd/voiced

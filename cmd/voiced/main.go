@@ -22,13 +22,13 @@ var version = "0.1.0-dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "herdr:", err)
+		fmt.Fprintln(os.Stderr, "voiced:", err)
 		os.Exit(1)
 	}
 }
 func run(args []string) error {
-	fs := flag.NewFlagSet("herdr", flag.ContinueOnError)
-	path := fs.String("config", "", "config path (default: $HERDR_CONFIG or ~/.config/herdr/config.json)")
+	fs := flag.NewFlagSet("voiced", flag.ContinueOnError)
+	path := fs.String("config", "", "config path (default: $VOICED_CONFIG or ~/.config/voiced/config.json)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -37,7 +37,7 @@ func run(args []string) error {
 		return usage()
 	}
 	if args[0] == "version" {
-		fmt.Println("herdr", version)
+		fmt.Println("voiced", version)
 		return nil
 	}
 	if args[0] == "init" {
@@ -46,7 +46,7 @@ func run(args []string) error {
 	}
 	cfg, p, err := config.Load(*path)
 	if err != nil {
-		return fmt.Errorf("load config: %w (run `herdr init`)", err)
+		return fmt.Errorf("load config: %w (run `voiced init`)", err)
 	}
 	_ = p
 	a := session.Build(cfg)
@@ -62,12 +62,12 @@ func run(args []string) error {
 		return a.Run(ctx)
 	case "say":
 		if len(args) < 2 {
-			return errors.New("usage: herdr say TEXT")
+			return errors.New("usage: voiced say TEXT")
 		}
 		return a.Speak(ctx, strings.Join(args[1:], " "))
 	case "ask":
 		if len(args) < 2 {
-			return errors.New("usage: herdr ask TEXT")
+			return errors.New("usage: voiced ask TEXT")
 		}
 		p, err := a.HandleText(ctx, strings.Join(args[1:], " "))
 		if err != nil {
@@ -91,9 +91,9 @@ func run(args []string) error {
 	}
 }
 func usage() error {
-	fmt.Print(`herdr — local voice assistant runtime
+	fmt.Print(`voiced — Herdr Voice local assistant runtime
 
-Usage: herdr [--config PATH] COMMAND
+Usage: voiced [--config PATH] COMMAND
 
   init [--force]           write a complete starter config
   doctor                    check audio, engines and devices
@@ -127,7 +127,7 @@ func initConfig(path string, force bool) error {
 		return err
 	}
 	fmt.Println("Wrote", path)
-	fmt.Println("Run `herdr doctor`, then edit device names and addresses.")
+	fmt.Println("Run `voiced doctor`, then edit device names and addresses.")
 	return nil
 }
 func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
@@ -185,7 +185,7 @@ func listDevices(ctx context.Context, a *session.Assistant) error {
 }
 func commandDevice(ctx context.Context, a *session.Assistant, kind string, args []string) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: herdr %s ID OP [VALUE]", kind)
+		return fmt.Errorf("usage: voiced %s ID OP [VALUE]", kind)
 	}
 	d, err := a.Devices.Get(args[0])
 	if err != nil {
