@@ -39,9 +39,34 @@ DWELL=${DWELL:-8}
 
 hid() { printf "$1" >"$HIDRAW"; }
 
+# DRY_RUN=1 executes every automated phase with the human steps stubbed, so
+# the instrument can be proven on the real hardware BEFORE a person is asked to
+# stand at the speaker. Two sessions have now died on defects in this script,
+# and the owner's time is the scarcest resource in the program: nothing that
+# needs him runs until a dry run has produced a measurement or a named failure
+# at every step. It is deliberately not a simulation - mixer reads, both-device
+# captures, the HID walk, restore and service restart all really run.
+DRY_RUN=${DRY_RUN:-0}
+
 ask() {
+	if [ "$DRY_RUN" = "1" ]; then
+		printf '\n>>> [DRY RUN, nobody asked] %s\n' "$1"
+		return 0
+	fi
 	printf '\n>>> %s\n>>> press Enter to continue: ' "$1"
 	read -r _
+}
+
+# Steps whose whole purpose is a human observation - reading the ring colour,
+# pressing the mute button, speaking the phrase - cannot be stubbed into a
+# result. A dry run says so out loud rather than printing something that could
+# later be quoted as an observation nobody made.
+human_only() {
+	if [ "$DRY_RUN" = "1" ]; then
+		printf '    [DRY RUN] NOT MEASURED, needs a person: %s\n' "$1"
+		return 1
+	fi
+	return 0
 }
 
 # capture SECONDS LABEL [DEVICE] -> prints the peak of one capture, or says
@@ -139,19 +164,27 @@ systemctl stop voice
 sleep 1
 hid '\x02\x01\x00' # off-hook, as Voice holds it while running
 
-ask "LOOK at the ring now and write down its colour (red usually means muted)"
+human_only "the ring colour (red usually means muted)" \
+	&& ask "LOOK at the ring now and write down its colour (red usually means muted)"
 capture 3 "capture as found" || note_failure "capture as found"
 
 echo "Now reading HID input reports for 15 s. Press the PowerConf's mute button"
 echo "ONCE during that window; a report appearing proves the button reaches the host."
 timeout 15 cat "$HIDRAW" | od -An -tx1 -v | sed -n '1,10p' &
 reader=$!
-ask "press the mute button once now, then press Enter"
+if human_only "a mute button press"; then
+	ask "press the mute button once now, then press Enter"
+else
+	echo "    [DRY RUN] reading hidraw unattended for the full window; a report"
+	echo "    appearing without a press would itself be worth knowing."
+	sleep 15
+fi
 wait "$reader" 2>/dev/null
 capture 3 "capture after toggling mute" || note_failure "capture after toggling mute"
 
 echo "If the second capture is still zero, toggle the button once more and repeat:"
-ask "press the mute button once more (back to the other state), then press Enter"
+human_only "a second mute button press" \
+	&& ask "press the mute button once more (back to the other state), then press Enter"
 capture 3 "capture after second toggle" || note_failure "capture after second toggle"
 
 echo
@@ -163,8 +196,16 @@ sleep 3
 journalctl -u voice -f -n 0 >"$LOG" 2>&1 &
 follower=$!
 sleep 2
-ask "say clearly, 30 cm from the device: 'Hey Voice, what time is it' - then wait 3 s and press Enter"
-sleep 3
+if human_only "the spoken phrase 'Hey Voice, what time is it'"; then
+	ask "say clearly, 30 cm from the device: 'Hey Voice, what time is it' - then wait 3 s and press Enter"
+	sleep 3
+else
+	# Still exercise the journal capture and the attribution block, so a dry
+	# run proves the plumbing that would record his utterance actually works.
+	echo "    [DRY RUN] journal armed and attribution block exercised on whatever"
+	echo "    the service logs unprompted; no transcript is claimed."
+	sleep 5
+fi
 kill "$follower" 2>/dev/null
 wait "$follower" 2>/dev/null
 echo "--- journal during the attempt"
@@ -225,7 +266,11 @@ step() {
 	hid "$1"
 	printf '\n[report 2 = %s] %s\n    expected observable: %s\n    look now (%ss)...\n' "$1" "$2" "$3" "$DWELL"
 	sleep "$DWELL"
-	ask "write down what the ring looked like for: $2"
+	# The HID write and the dwell really happen in a dry run - that is the
+	# part that can break - but the observation is a person's, so it is
+	# reported as NOT MEASURED rather than as a prompt nobody answered.
+	human_only "the ring appearance for: $2" \
+		&& ask "write down what the ring looked like for: $2"
 }
 
 step '\x02\x00\x00' 'all indicators clear' 'idle appearance'
@@ -262,6 +307,13 @@ REPORT
 # Final verdict. A run that failed to measure exits nonzero and says so, so the
 # absence of a number is never mistaken for the number zero.
 echo
+if [ "$DRY_RUN" = "1" ]; then
+	echo "=== DRY RUN. The human-only steps above are NOT MEASURED and must not"
+	echo "be quoted as observations. What a clean dry run proves is narrower and"
+	echo "is exactly the gate that matters: every automated step ran on the real"
+	echo "hardware and produced either a measurement or a named failure, so the"
+	echo "instrument is fit to put in front of a person."
+fi
 if [ "$failures" -eq 0 ]; then
 	echo "=== every capture step produced a measurement (peak and frame count)."
 else
