@@ -68,17 +68,46 @@ card_of() {
 	printf '%s' "$1" | sed -n 's/.*hw:\([0-9][0-9]*\).*/\1/p'
 }
 
-# sample_streams CARD prints the playback and capture substream status, which
-# is how this script knows whether audio actually moved rather than assuming
-# it. state RUNNING with hw_ptr advancing on playback is the proof that a
-# capture peak of zero is a real result and not an untested assumption.
+# sample_streams CARD prints the FULL playback and capture substream status.
+# The first version printed only the first four lines, and on real hardware
+# hw_ptr sits below them - so the device seat got state RUNNING with no hw_ptr
+# and correctly reported that advancing playback was NOT proven. The field the
+# proof depends on must not be truncated by the tool collecting it.
 sample_streams() {
-	printf '    playback substream:\n'
-	sed -n '1,4p' "/proc/asound/card$1/pcm0p/sub0/status" 2>/dev/null | sed 's/^/      /' \
+	printf '    playback substream (full status):\n'
+	sed 's/^/      /' "/proc/asound/card$1/pcm0p/sub0/status" 2>/dev/null \
 		|| printf '      (no playback substream status available)\n'
-	printf '    capture substream:\n'
-	sed -n '1,4p' "/proc/asound/card$1/pcm0c/sub0/status" 2>/dev/null | sed 's/^/      /' \
+	printf '    capture substream (full status):\n'
+	sed 's/^/      /' "/proc/asound/card$1/pcm0c/sub0/status" 2>/dev/null \
 		|| printf '      (no capture substream status available)\n'
+}
+
+# hw_ptr_of CARD STREAM prints the substream's hw_ptr, or nothing.
+hw_ptr_of() {
+	sed -n 's/^hw_ptr *: *\([0-9][0-9]*\).*/\1/p' \
+		"/proc/asound/card$1/pcm0$2/sub0/status" 2>/dev/null | head -1
+}
+
+# playback_advanced CARD samples hw_ptr twice and reports whether it MOVED.
+# RUNNING alone is not the claim that matters: a stream can be open and
+# running while no frames are delivered, so the evidence is the delta.
+playback_advanced() {
+	first=$(hw_ptr_of "$1" p)
+	sleep 1
+	second=$(hw_ptr_of "$1" p)
+	if [ -z "$first" ] || [ -z "$second" ]; then
+		printf '    playback hw_ptr: NOT AVAILABLE (first=%s second=%s), so advancing\n' "${first:-none}" "${second:-none}"
+		printf '    playback is UNPROVEN and this arm cannot support a conclusion\n'
+		return 1
+	fi
+	if [ "$second" -gt "$first" ]; then
+		printf '    playback hw_ptr ADVANCED %s -> %s (delta %s frames): frames really moved\n' \
+			"$first" "$second" "$((second - first))"
+		return 0
+	fi
+	printf '    playback hw_ptr DID NOT ADVANCE (%s -> %s): the tone did not reach\n' "$first" "$second"
+	printf '    the device, so the microphone question stays OPEN\n'
+	return 1
 }
 
 # DRY_RUN=1 executes every automated phase with the human steps stubbed, so
@@ -432,11 +461,20 @@ offhook_tone_capture() {
 	[ -n "$card" ] || card=0
 	aplay -D "$OUTDEV" "$tone" >/dev/null 2>&1 &
 	player=$!
-	( sleep 2; sample_streams "$card" ) &
-	sampler=$!
+	# Prove playback is really moving frames BEFORE the capture is read, and
+	# carry that into the arm's status: an arm whose precondition failed must
+	# not hand back a zero as evidence.
 	sleep 1
+	advanced=0
+	if playback_advanced "$card"; then
+		advanced=1
+	fi
+	sample_streams "$card"
 	capture 3 "capture with OFF-HOOK HELD AND the tone playing"
 	status=$?
+	if [ "$advanced" -ne 1 ]; then
+		status=1
+	fi
 	wait "$player" 2>/dev/null
 	wait "$sampler" 2>/dev/null
 	if printf '\x02\x01\x00' >&9 2>/dev/null; then
