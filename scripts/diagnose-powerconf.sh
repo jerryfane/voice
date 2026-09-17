@@ -19,6 +19,17 @@ set -u
 
 HIDRAW=${HIDRAW:-/dev/hidraw5}
 CARD=${CARD:-2}
+failures=0
+# A capture that never ran is not a capture that recorded silence. Every
+# failure increments this, the run ends with an explicit verdict, and the exit
+# status is nonzero - so a phase that produced no measurement cannot be quoted
+# as evidence of a quiet microphone.
+note_failure() {
+	failures=$((failures + 1))
+	printf '    ^ THAT STEP PRODUCED NO MEASUREMENT: %s\n' "$1"
+	printf '      Nothing below may be read as "the device returned silence".\n'
+}
+
 DEV=${DEV:-plughw:2,0}
 SERVICE_UID=${SERVICE_UID:-995}
 SERVICE_GID=${SERVICE_GID:-989}
@@ -45,6 +56,25 @@ ask() {
 capture() {
 	local secs="$1" label="$2" dev="${3:-$DEV}" wav status=0
 	wav=$(mktemp /tmp/powerconf-XXXXXX.wav)
+	# mktemp creates the file as ROOT, but arecord runs as the service uid, so
+	# without this it cannot write and reports Permission denied - which this
+	# function would then have printed as CAPTURE FAILED, an unmeasured run
+	# looking like a device problem. Caught on the device by the pi-burj seat.
+	if ! chown "$SERVICE_UID:$SERVICE_GID" "$wav"; then
+		printf '    %s: SETUP FAILED, cannot chown %s to %s:%s\n' \
+			"$label" "$wav" "$SERVICE_UID" "$SERVICE_GID"
+		rm -f "$wav"
+		return 1
+	fi
+	# And prove the service user can actually write it before blaming the
+	# microphone for whatever comes next.
+	if ! setpriv --reuid="$SERVICE_UID" --regid="$SERVICE_GID" \
+		--groups="$SERVICE_GROUPS" test -w "$wav"; then
+		printf '    %s: SETUP FAILED, uid %s cannot write %s\n' \
+			"$label" "$SERVICE_UID" "$wav"
+		rm -f "$wav"
+		return 1
+	fi
 	# arecord's stderr is the ALSA diagnostic and the most useful thing this
 	# function can produce when something goes wrong, so it is kept.
 	setpriv --reuid="$SERVICE_UID" --regid="$SERVICE_GID" --groups="$SERVICE_GROUPS" \
@@ -60,7 +90,9 @@ capture() {
 		return 1
 	fi
 	python3 - "$wav" "$label" "$dev" <<'PY'
-import sys, wave, audioop
+import array
+import sys
+import wave
 path, label, dev = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     with wave.open(path) as w:
@@ -71,7 +103,10 @@ except Exception as err:
 if not frames:
     print(f"    {label}: CAPTURE EMPTY on {dev}: no audio frames")
     raise SystemExit(1)
-print(f"    {label}: peak={audioop.max(frames, 2)} frames={len(frames)//2} device={dev}")
+samples = array.array("h")
+samples.frombytes(frames)
+peak = max(abs(s) for s in samples)
+print(f"    {label}: peak={peak} frames={len(samples)} device={dev}")
 PY
 	status=$?
 	rm -f "$wav"
@@ -105,7 +140,7 @@ sleep 1
 hid '\x02\x01\x00' # off-hook, as Voice holds it while running
 
 ask "LOOK at the ring now and write down its colour (red usually means muted)"
-capture 3 "capture as found"
+capture 3 "capture as found" || note_failure "capture as found"
 
 echo "Now reading HID input reports for 15 s. Press the PowerConf's mute button"
 echo "ONCE during that window; a report appearing proves the button reaches the host."
@@ -113,11 +148,11 @@ timeout 15 cat "$HIDRAW" | od -An -tx1 -v | sed -n '1,10p' &
 reader=$!
 ask "press the mute button once now, then press Enter"
 wait "$reader" 2>/dev/null
-capture 3 "capture after toggling mute"
+capture 3 "capture after toggling mute" || note_failure "capture after toggling mute"
 
 echo "If the second capture is still zero, toggle the button once more and repeat:"
 ask "press the mute button once more (back to the other state), then press Enter"
-capture 3 "capture after second toggle"
+capture 3 "capture after second toggle" || note_failure "capture after second toggle"
 
 echo
 echo "=== phase 2: live wake attempt"
@@ -223,3 +258,15 @@ Mapping for the winning step, straight into the Voice config:
   mute LED 0x09       -> "mute"                  hold LED 0x20 -> "hold"
   nothing distinguishable -> "none": Voice keeps the acknowledgement sound only.
 REPORT
+
+# Final verdict. A run that failed to measure exits nonzero and says so, so the
+# absence of a number is never mistaken for the number zero.
+echo
+if [ "$failures" -eq 0 ]; then
+	echo "=== every capture step produced a measurement (peak and frame count)."
+else
+	printf '=== %s capture step(s) PRODUCED NO MEASUREMENT.\n' "$failures"
+	echo "Those steps say nothing about what the microphone heard. Do not quote"
+	echo "them as silence; fix the reported cause and re-run."
+	exit 1
+fi
