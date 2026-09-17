@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -21,9 +22,60 @@ import (
 
 var version = "0.1.0-dev"
 
+// stdout and stderr remember the first write failure instead of discarding it,
+// so a command whose output went nowhere exits non-zero rather than reporting
+// success for work nobody received. Every write goes through them, so one
+// place decides what a failed write means and no site drops the error.
+//
+// What this does NOT catch, stated because the first version of this comment
+// claimed it did: a closed pipe. Go's runtime raises SIGPIPE for writes to
+// file descriptors 1 and 2 and lets the default disposition kill the process,
+// which is what `voice version | true` does - exit 141, no error to report and
+// nothing to report it to. That is correct Unix behaviour for a CLI and is
+// deliberately not overridden here. What the printer catches is the rest: a
+// full disk, an I/O error, a redirect to a file that cannot be written.
+var (
+	stdout = &printer{w: os.Stdout}
+	stderr = &printer{w: os.Stderr}
+)
+
+type printer struct {
+	w   io.Writer
+	err error
+}
+
+func (p *printer) printf(format string, a ...any) {
+	if p.err != nil {
+		return
+	}
+	_, p.err = fmt.Fprintf(p.w, format, a...)
+}
+
+func (p *printer) println(a ...any) {
+	if p.err != nil {
+		return
+	}
+	_, p.err = fmt.Fprintln(p.w, a...)
+}
+
+func (p *printer) print(a ...any) {
+	if p.err != nil {
+		return
+	}
+	_, p.err = fmt.Fprint(p.w, a...)
+}
+
 func main() {
-	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "voice:", err)
+	err := run(os.Args[1:])
+	// A failed write is a failure of the command, not a detail: report it if
+	// nothing worse happened first. Piped-and-closed output never reaches
+	// here - SIGPIPE has already ended the process - so this is the full-disk
+	// and bad-redirect path.
+	if err == nil {
+		err = errors.Join(stdout.err, stderr.err)
+	}
+	if err != nil {
+		stderr.println("voice:", err)
 		os.Exit(1)
 	}
 }
@@ -38,7 +90,7 @@ func run(args []string) error {
 		return usage()
 	}
 	if args[0] == "version" {
-		fmt.Println("voice", version)
+		stdout.println("voice", version)
 		return nil
 	}
 	if args[0] == "init" {
@@ -62,7 +114,7 @@ func run(args []string) error {
 	case "devices":
 		return listDevices(ctx, a)
 	case "listen":
-		fmt.Fprintf(os.Stderr, "Listening for %q. Ctrl-C to stop.\n", cfg.Wake.Phrases[0])
+		stderr.printf("Listening for %q. Ctrl-C to stop.\n", cfg.Wake.Phrases[0])
 		return a.Run(ctx)
 	case "say":
 		if len(args) < 2 {
@@ -77,7 +129,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println(p.Speak)
+		stdout.println(p.Speak)
 		if p.Speak != "" {
 			return a.Speak(ctx, p.Speak)
 		}
@@ -91,14 +143,14 @@ func run(args []string) error {
 		if err != nil {
 			return fmt.Errorf("rendering the effective config: %w", err)
 		}
-		fmt.Println(string(b))
+		stdout.println(string(b))
 		return nil
 	default:
 		return usage()
 	}
 }
 func usage() error {
-	fmt.Print(`voice — persistent local voice agent
+	stdout.print(`voice — persistent local voice agent
 
 Usage: voice [--config PATH] COMMAND
 
@@ -126,12 +178,12 @@ func controlService(action string) error {
 	if action == "status" {
 		err := exec.Command("systemctl", "is-active", "--quiet", "voice.service").Run()
 		if err == nil {
-			fmt.Println("Voice is on.")
+			stdout.println("Voice is on.")
 			return nil
 		}
 		var exit *exec.ExitError
 		if errors.As(err, &exit) && exit.ExitCode() == 3 {
-			fmt.Println("Voice is off.")
+			stdout.println("Voice is off.")
 			return nil
 		}
 		return fmt.Errorf("query voice.service: %w", err)
@@ -145,7 +197,7 @@ func controlService(action string) error {
 	if err != nil {
 		return fmt.Errorf("%s voice.service: %w: %s", verb, err, strings.TrimSpace(string(out)))
 	}
-	fmt.Printf("Voice is %s.\n", map[string]string{"on": "on", "off": "off"}[action])
+	stdout.printf("Voice is %s.\n", map[string]string{"on": "on", "off": "off"}[action])
 	return nil
 }
 func initConfig(path string, force bool) error {
@@ -163,8 +215,8 @@ func initConfig(path string, force bool) error {
 	if err := config.Save(c, path); err != nil {
 		return err
 	}
-	fmt.Println("Wrote", path)
-	fmt.Println("Run `voice doctor`, then edit device names and addresses.")
+	stdout.println("Wrote", path)
+	stdout.println("Run `voice doctor`, then edit device names and addresses.")
 	return nil
 }
 func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
@@ -175,7 +227,7 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 			status = "FAIL"
 			bad++
 		}
-		fmt.Printf("%-12s %-4s %s\n", label, status, detail)
+		stdout.printf("%-12s %-4s %s\n", label, status, detail)
 	}
 	_, ok := proc.Which(c.Input.Command[0])
 	check("microphone", ok, a.Recorder.Describe())
@@ -187,7 +239,7 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 	check("text-to-speech", ok, a.TTS.Name()+": "+d)
 	ok, d = a.Brain.Available()
 	check("brain", ok, a.Brain.Name()+": "+d)
-	fmt.Printf("%-12s %-4s %s\n", "wake feedback", "INFO", a.Feedback.Describe())
+	stdout.printf("%-12s %-4s %s\n", "wake feedback", "INFO", a.Feedback.Describe())
 	if c.Timers.Enabled {
 		if a.Timers == nil {
 			check("timers", false, "enabled but no scheduler was built")
@@ -221,11 +273,11 @@ func errText(e error) string {
 func listDevices(ctx context.Context, a *session.Assistant) error {
 	for _, d := range a.Devices.List() {
 		s, e := d.Read(ctx)
-		fmt.Printf("%-12s %-6s %-40s state=%v", d.ID(), d.Kind(), d.Describe(), s)
+		stdout.printf("%-12s %-6s %-40s state=%v", d.ID(), d.Kind(), d.Describe(), s)
 		if e != nil {
-			fmt.Printf(" error=%v", e)
+			stdout.printf(" error=%v", e)
 		}
-		fmt.Println()
+		stdout.println()
 	}
 	return nil
 }
@@ -269,6 +321,6 @@ func commandDevice(ctx context.Context, a *session.Assistant, kind string, args 
 	if err != nil {
 		return fmt.Errorf("rendering device state: %w", err)
 	}
-	fmt.Println(string(b))
+	stdout.println(string(b))
 	return nil
 }
