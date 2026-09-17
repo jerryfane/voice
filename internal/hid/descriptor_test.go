@@ -1,6 +1,9 @@
 package hid
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // HID Push/Pop snapshot the whole global item state, not just the usage page.
 // A descriptor that pushes, changes report id/size/count inside a nested
@@ -55,5 +58,47 @@ func TestTruncatedDumpIsRejectedNotPartiallyParsed(t *testing.T) {
 		if err == nil {
 			t.Errorf("%d-byte dump accepted, mapping %d usages", n, len(outs.Usages()))
 		}
+	}
+}
+
+// A usage range declares a whole span of usages from six bytes, so counting
+// declared usages is not a length bound: a 17-byte descriptor could ask the
+// parser to index 32768 outputs. Work must stay proportional to the input.
+func TestUsageRangeCannotOutrunDescriptorLength(t *testing.T) {
+	desc := []byte{
+		0x05, 0x08, // usage page LED
+		0x85, 0x02, // report ID 2
+		0x75, 0x01, // report size 1
+		0x96, 0x00, 0x80, // report count 32768
+		0x19, 0x00, // usage minimum 0
+		0x2a, 0xff, 0xff, // usage maximum 0xffff
+		0x91, 0x02, // output
+	}
+	start := time.Now()
+	outs, err := ParseOutputs(desc)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("%d-byte descriptor indexed %d usages", len(desc), len(outs.Usages()))
+	}
+	if elapsed > 5*time.Millisecond {
+		t.Errorf("rejecting a %d-byte descriptor took %v", len(desc), elapsed)
+	}
+	// The same shape within the length budget is legitimate and must parse: a
+	// device may declare a small LED array as a range.
+	small := []byte{
+		0x05, 0x08, 0x85, 0x02, 0x75, 0x01, 0x95, 0x0b,
+		0x19, 0x17, 0x29, 0x21, // usages 0x17..0x21: off-hook through microphone
+		0x91, 0x02,
+	}
+	outs, err = ParseOutputs(small)
+	if err != nil {
+		t.Fatalf("legitimate LED range rejected: %v", err)
+	}
+	if bit, ok := outs.Bit(PageLED, LEDOffHook); !ok || bit.Mask != 0x01 {
+		t.Errorf("off-hook from a usage range = %+v, ok=%v", bit, ok)
+	}
+	// 0x21 is the eleventh usage in the range, so bit 10: byte 1, mask 0x04.
+	if bit, ok := outs.Bit(PageLED, LEDMic); !ok || bit.Byte != 1 || bit.Mask != 0x04 {
+		t.Errorf("mic LED from a usage range = %+v, ok=%v", bit, ok)
 	}
 }

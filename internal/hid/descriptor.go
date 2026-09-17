@@ -107,13 +107,15 @@ const (
 
 // A descriptor is firmware input, so the parser's work must be bounded by the
 // bytes it was handed rather than by numbers those bytes claim. Two bounds do
-// that: iteration only ever walks usages the descriptor actually declares (at
-// most one per two bytes), and a report's bit budget is capped by what the
-// hidraw transport can carry, so no declared count can make the parser loop or
-// allocate beyond the input it came from.
+// that. A report's bit budget is capped by what the hidraw transport can
+// carry. And the number of single-bit outputs indexed is capped at eight per
+// descriptor byte: a usage range declares a whole span from six bytes, so
+// counting declared usages alone is not a length bound. Eight per byte leaves
+// real devices a wide margin - the installed speakerphone names six outputs in
+// 191 bytes - while keeping the work proportional to the input.
 const (
-	maxReportBytes = 4096               // hidraw rejects larger reports than this
-	maxIndexedBits = maxReportBytes * 8 // single-bit outputs Voice will index at all
+	maxReportBytes     = 4096 // hidraw rejects larger reports than this
+	indexedBitsPerByte = 8    // single-bit outputs indexed per descriptor byte
 )
 
 // ParseOutputs walks a HID report descriptor and records every one-bit output
@@ -197,8 +199,9 @@ func ParseOutputs(desc []byte) (*Outputs, error) {
 			if g.reportSize == 1 {
 				fields := named(usages, rangeMin, rangeMax, haveRange, g.reportCount)
 				indexed += fields
-				if indexed > maxIndexedBits {
-					return nil, fmt.Errorf("report descriptor names more than %d single-bit outputs", maxIndexedBits)
+				if indexed > len(desc)*indexedBitsPerByte {
+					return nil, fmt.Errorf("%d-byte report descriptor names %d single-bit outputs, more than %d per byte",
+						len(desc), indexed, indexedBitsPerByte)
 				}
 				for n := range fields {
 					u, ok := usageAt(usages, rangeMin, rangeMax, haveRange, n)
