@@ -24,7 +24,15 @@ jobs:
       # never enters go.mod and never reaches the shipped binary, which keeps
       # the single static CGO_ENABLED=0 build intact.
       #
-      # -blank is on and there is NO exclude file, on purpose. Four rounds of
+      # -blank is on and there is no PROJECT exclude file, on purpose. Note
+      # what that does not mean: errcheck ships DefaultExcludedSymbols, so
+      # fmt printing and similar are still excluded by the tool itself.
+      # Running with -excludeonly (nothing excluded at all) adds only
+      # fmt.Print/Fprint calls writing to stdout and stderr in cmd/voice,
+      # whose errors a CLI cannot act on, so the bundled list is accepted and
+      # named here rather than described as "nothing excluded".
+      #
+      # Four rounds of
       # review each enumerated a shape or a name, and the next real defect
       # arrived in the gap every time: assignment-only missed bare calls, then
       # those missed defer, then the name list missed three json.Marshal

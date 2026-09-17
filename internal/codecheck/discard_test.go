@@ -4,8 +4,10 @@
 // call whose error was assigned to the blank identifier, so a failure to
 // persist a fired timer or to clear a speakerphone's off-hook report vanished.
 //
-// CI runs `errcheck -blank -ignoretests` with no exclusions, which is the real
-// guarantee for production code: it is type-aware and enumerates nothing. This
+// CI runs `errcheck -blank -ignoretests` with no project exclude file, which
+// is the real guarantee for production code: it is type-aware and enumerates
+// nothing of ours. errcheck's own DefaultExcludedSymbols still apply, covering
+// fmt printing whose errors a CLI cannot act on. This
 // check covers the test tree that CI skips, and it fails fast in the suite
 // people actually run. It is name-scoped by design - a syntactic pass cannot
 // know a call returns an error - so it is a fast regression guard, not a
@@ -51,15 +53,19 @@ func scan(root string) (files int, offences []string, err error) {
 		if !strings.HasSuffix(path, ".go") {
 			return nil
 		}
+		src, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
 		fset := token.NewFileSet()
-		file, parseErr := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		file, parseErr := parser.ParseFile(fset, path, src, parser.ParseComments)
 		if parseErr != nil {
 			// A file the check cannot read is exactly how a guard goes quiet,
 			// so this is a failure and never a skip.
 			return parseErr
 		}
 		files++
-		for _, o := range discards(fset, file, justifiedLines(fset, file)) {
+		for _, o := range discards(fset, file, justifiedLines(fset, file, src)) {
 			rel, relErr := filepath.Rel(root, o.file)
 			if relErr != nil {
 				rel = o.file
@@ -284,10 +290,14 @@ func callsSomething(exprs []ast.Expr) bool {
 	return false
 }
 
-// justifiedLines collects the lines a justification covers: every line of the
-// comment group carrying the marker, and the line after it, so a multi-line
-// justification written above a statement covers that statement.
-func justifiedLines(fset *token.FileSet, file *ast.File) map[int]bool {
+// justifiedLines collects the lines a justification covers.
+//
+// A justification written on its own line covers the statement below it, which
+// is how a multi-line reason above a discard works. A TRAILING justification -
+// one sharing a line with code - covers only that line: extending it downwards
+// silently excused the next, unrelated discard, which is the guard quietly
+// approving something nobody wrote a reason for.
+func justifiedLines(fset *token.FileSet, file *ast.File, src []byte) map[int]bool {
 	lines := map[int]bool{}
 	for _, group := range file.Comments {
 		marked := false
@@ -300,13 +310,30 @@ func justifiedLines(fset *token.FileSet, file *ast.File) map[int]bool {
 		if !marked {
 			continue
 		}
-		first := fset.Position(group.Pos()).Line
-		last := fset.Position(group.End()).Line
-		for l := first; l <= last+1; l++ {
+		start := fset.Position(group.Pos())
+		first, last := start.Line, fset.Position(group.End()).Line
+		for l := first; l <= last; l++ {
 			lines[l] = true
+		}
+		if ownLine(src, start.Offset) {
+			lines[last+1] = true
 		}
 	}
 	return lines
+}
+
+// ownLine reports whether only whitespace precedes the byte at off on its line.
+func ownLine(src []byte, off int) bool {
+	for i := off - 1; i >= 0; i-- {
+		switch src[i] {
+		case '\n':
+			return true
+		case ' ', '\t', '\r':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func moduleRoot(t *testing.T) string {
@@ -360,7 +387,7 @@ func offencesIn(t *testing.T, name, src string) int {
 	if err != nil {
 		t.Fatalf("%s: %v", name, err)
 	}
-	return len(discards(fset, file, justifiedLines(fset, file)))
+	return len(discards(fset, file, justifiedLines(fset, file, []byte(src))))
 }
 
 // defer and go statements hide a dropped error exactly as well as a bare
@@ -379,5 +406,28 @@ func TestCheckerCatchesDeferredAndConcurrentDiscards(t *testing.T) {
 		if got := offencesIn(t, name+".go", src); got != want {
 			t.Errorf("%s: checker found %d offences, want %d", name, got, want)
 		}
+	}
+}
+
+// A justification sharing a line with code must not excuse the discard on the
+// next line. Extending it downwards made the guard approve something nobody
+// wrote a reason for, which is the failure mode this whole check exists to
+// prevent.
+func TestTrailingJustificationDoesNotCoverTheNextLine(t *testing.T) {
+	trailing := "package p\n\nfunc f() error { return nil }\n\nfunc g() {\n\t_ = f() // discard: this one is fine\n\t_ = f()\n}\n"
+	if got := offencesIn(t, "trailing.go", trailing); got != 1 {
+		t.Errorf("offences = %d, want 1: the second discard is unjustified", got)
+	}
+
+	// The same reason written above covers the statement below it.
+	above := "package p\n\nfunc f() error { return nil }\n\nfunc g() {\n\t// discard: this one is fine\n\t_ = f()\n}\n"
+	if got := offencesIn(t, "above.go", above); got != 0 {
+		t.Errorf("offences = %d, want 0: an own-line justification covers the next line", got)
+	}
+
+	// A trailing justification still covers its own line.
+	own := "package p\n\nfunc f() error { return nil }\n\nfunc g() {\n\t_ = f() // discard: this one is fine\n}\n"
+	if got := offencesIn(t, "own.go", own); got != 0 {
+		t.Errorf("offences = %d, want 0: a trailing justification covers its own line", got)
 	}
 }
