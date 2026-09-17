@@ -26,7 +26,14 @@ if ! command -v whisper-cli >/dev/null 2>&1; then
   src="$CACHE/whisper.cpp-$WHISPER_VERSION"
   rm -rf "$src"
   git clone --depth 1 --branch "$WHISPER_VERSION" https://github.com/ggml-org/whisper.cpp.git "$src"
-  cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+  # BUILD_SHARED_LIBS=OFF is load-bearing: whisper.cpp defaults to shared
+  # libraries, and installing only the binary leaves it looking for
+  # libwhisper.so.1 in loader paths it was never installed into. That shipped
+  # a speech engine that could not start, and because the failure happens at
+  # exec time the service logged it once per utterance and transcribed
+  # nothing. Linking statically means there is one file to install.
+  cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
   cmake --build "$src/build" --config Release -j "$(nproc)"
   install -m 0755 "$src/build/bin/whisper-cli" "$BIN/whisper-cli"
 fi
@@ -54,7 +61,34 @@ for ext in onnx onnx.json; do
   fi
 done
 
+# Verify by running each engine and checking its exit status. The previous
+# version piped --help into sed, so the pipeline succeeded whatever the engine
+# did: an engine that could not load its own libraries reported as installed.
+check_engine() {
+  name=$1
+  path=$2
+  if out=$("$path" --help 2>&1); then
+    printf '%s: %s\n' "$name" "$(printf '%s' "$out" | sed -n '1p')"
+    return 0
+  fi
+  status=$?
+  # 127 and the loader's own message are the signature of a binary that
+  # cannot find its shared libraries.
+  printf '%s failed to run (exit %s):\n%s\n' "$name" "$status" "$out" >&2
+  case "$out" in
+    *"error while loading shared libraries"*)
+      printf 'The engine was built against shared libraries that are not installed.\n' >&2
+      ;;
+  esac
+  return 1
+}
+
 echo "Speech engines installed:"
-"$BIN/whisper-cli" --help 2>&1 | sed -n '1p'
-"$BIN/piper" --help 2>&1 | sed -n '1p'
+failed=0
+check_engine whisper-cli "$BIN/whisper-cli" || failed=1
+check_engine piper "$BIN/piper" || failed=1
+if [ "$failed" -ne 0 ]; then
+  echo "Speech setup did not produce working engines; Voice would log a failure per utterance and transcribe nothing." >&2
+  exit 1
+fi
 echo "Models: $MODELS"

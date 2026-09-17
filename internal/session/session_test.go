@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"errors"
+	stdlog "log"
+	"strings"
 	"testing"
 	"time"
 
@@ -383,3 +385,55 @@ func TestBareWakePhraseAsksAndSkipsThePlanner(t *testing.T) {
 		t.Errorf("indicator transitions = %v, want %v", got, want)
 	}
 }
+
+// A silent device and a broken transcriber used to produce the same journal:
+// one line after a successful transcription, nothing before it. Each stage
+// must now report its own outcome, so a future silence names the stage that
+// stopped instead of leaving five rounds of guessing.
+func TestEachPipelineStageIsObservable(t *testing.T) {
+	var log strings.Builder
+	a, _, _ := feedbackAssistant(t, &countingPlanner{}, "hey voice turn on the light", "the television is loud")
+	a.Logger = stdlog.New(&log, "", 0)
+	a.STT = &queuedTranscriber{texts: []string{"hey voice turn on the light", "the television is loud"}}
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"stage=capture state=starting",
+		"stage=segment state=ok",
+		"stage=transcribe state=ok",
+		"stage=wake state=matched",
+		"stage=wake state=nomatch",
+	} {
+		if !strings.Contains(log.String(), want) {
+			t.Errorf("journal is missing %q:\n%s", want, log.String())
+		}
+	}
+}
+
+// A transcriber that cannot start must say so per utterance, and must not be
+// mistaken for a device that heard nothing.
+func TestTranscribeFailureIsDistinguishableFromSilence(t *testing.T) {
+	var log strings.Builder
+	a, _, _ := feedbackAssistant(t, &countingPlanner{}, "ignored")
+	a.Logger = stdlog.New(&log, "", 0)
+	a.STT = brokenTranscriber{}
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	out := log.String()
+	if !strings.Contains(out, "stage=segment state=ok") {
+		t.Errorf("a segmented utterance was not reported:\n%s", out)
+	}
+	if !strings.Contains(out, "stage=transcribe state=failed") {
+		t.Errorf("the transcriber failure was not reported as its own stage:\n%s", out)
+	}
+}
+
+type brokenTranscriber struct{}
+
+func (brokenTranscriber) Transcribe(context.Context, []int16, audio.Format) (string, error) {
+	return "", errors.New("whisper-cli: exit status 127: libwhisper.so.1: cannot open shared object file")
+}
+func (brokenTranscriber) Name() string              { return "broken transcriber" }
+func (brokenTranscriber) Available() (bool, string) { return false, "cannot start" }
