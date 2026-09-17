@@ -136,8 +136,48 @@ echo "--- journal during the attempt"
 cat "$LOG"
 echo "--- utterances seen"
 grep -c 'heard=' "$LOG" || true
-echo "EXPECTED IF CAPTURE WORKS: a 'heard=...' line with a nonzero peak."
+echo "EXPECTED IF CAPTURE WORKS: a 'heard=...' line CONTAINING the phrase, with"
+echo "a peak well above 0.02. Any other transcript is a FAIL."
 echo "EXPECTED IF STILL SILENT: no heard= line at all."
+
+# Attribution. Whether those lines come from the service's own capture loop or
+# from a CLI invocation has been the open question behind every conclusion on
+# issue #9, and testimony is not the same evidence as metadata. The script
+# collects it so the answer cannot depend on anyone remembering to ask.
+echo
+echo "--- who produced those lines (service MainPID vs anything else)"
+systemctl show -p MainPID -p InvocationID voice
+# python reads its program from a file, not from stdin: the journal is on
+# stdin, and a heredoc would have replaced it - the script would have
+# printed nothing and looked like an absence of evidence.
+meta=$(mktemp /tmp/powerconf-meta-XXXXXX.py)
+cat >"$meta" <<'META'
+import json
+import sys
+
+for line in sys.stdin:
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    message = entry.get("MESSAGE", "")
+    if "transcribe" not in message and "heard=" not in message and "stage=" not in message:
+        continue
+    print(
+        "    pid={pid} comm={comm} ident={ident} :: {msg}".format(
+            pid=entry.get("_PID"),
+            comm=entry.get("_COMM"),
+            ident=entry.get("SYSLOG_IDENTIFIER"),
+            msg=message[:90],
+        )
+    )
+META
+journalctl -u voice -o json --since "-3 minutes" | python3 "$meta"
+rm -f "$meta"
+echo "READ THIS: if those pids equal the MainPID above, the service's own"
+echo "capture loop heard him and issue #9 is answered by observation. If they"
+echo "do not, the lines came from something else and the microphone question is"
+echo "still open - which is the answer the coordinator has been asking for."
 
 echo
 echo "=== phase 3: which LED reads as listening (issue #2)"
