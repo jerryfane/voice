@@ -1,9 +1,12 @@
 package speech
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -46,25 +49,59 @@ func TestRunnableRejectsABinaryThatCannotStart(t *testing.T) {
 	}
 }
 
-// The context kills the direct child only. A launcher that backgrounds a
-// descendant and exits leaves that descendant holding the output pipe, which
-// blocked the probe for as long as the grandchild lived - five seconds of
-// timeout became thirty. `voice doctor` is the reachable caller, and this
-// package adapts any user-configured executable, so wrapper engines are real.
-func TestRunnableReturnsOnTimeEvenIfTheEngineSpawnsALingeringChild(t *testing.T) {
+// The probe must leave nothing running. A launcher that backgrounds a
+// descendant and exits used to leave that descendant alive after `voice
+// doctor` returned - one orphan per invocation - and the earlier fix hid it:
+// WaitDelay unblocked the caller, so the probe returned in about a second
+// while the process it had been waiting on kept running to completion.
+//
+// This asserts the descendant is GONE, not that the probe was quick. A
+// timing-only assertion is precisely what let the leak through review.
+func TestRunnableLeavesNoDescendantRunning(t *testing.T) {
 	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "descendant.pid")
 	launcher := filepath.Join(dir, "launcher-engine")
-	script := "#!/bin/sh\nsleep 30 &\necho 'usage: launcher-engine'\nexit 0\n"
+	// The shim records the pid it backgrounds, so the test can ask the
+	// operating system about that exact process rather than about timing.
+	script := "#!/bin/sh\nsleep 45 &\necho $! > " + pidFile + "\necho 'usage: launcher-engine'\nexit 0\n"
 	if err := os.WriteFile(launcher, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	start := time.Now()
 	ok, detail := runnable(launcher)
 	elapsed := time.Since(start)
-	if elapsed > 10*time.Second {
-		t.Errorf("probe took %v; it must not wait on a descendant holding the pipe (%s)", elapsed, detail)
-	}
 	if !ok {
 		t.Logf("engine reported unusable after %v: %s", elapsed, detail)
+	}
+
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("shim never recorded a descendant pid, so this test proves nothing: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 0 {
+		t.Fatalf("unusable descendant pid %q: %v", raw, err)
+	}
+
+	// Signal 0 asks whether the process exists without touching it. Give the
+	// kill a moment to land; a descendant that survives sleeps for 45s, so a
+	// two-second window cannot pass by luck.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := syscall.Kill(pid, 0); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return // gone, which is the whole assertion
+			}
+			t.Fatalf("cannot check descendant %d: %v", pid, err)
+		}
+		if time.Now().After(deadline) {
+			// Do not leave it behind for the rest of the suite.
+			if kerr := syscall.Kill(pid, syscall.SIGKILL); kerr != nil {
+				t.Logf("cleanup kill of %d failed: %v", pid, kerr)
+			}
+			t.Fatalf("descendant %d is still running %v after the probe returned; WaitDelay only unblocks the caller, the process group must be killed", pid, elapsed)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

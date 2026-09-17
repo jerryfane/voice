@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jerryfane/voice/internal/audio"
@@ -68,14 +69,40 @@ func runnable(path string) (bool, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, "--help")
-	// The context kills the direct child only. A launcher that backgrounds a
-	// descendant and exits leaves that descendant holding the output pipe, and
-	// CombinedOutput then blocks for as long as the grandchild lives - five
-	// seconds of timeout became thirty in the reviewer's reproduction. WaitDelay
-	// forces the pipes closed shortly after the context is done, so the probe
-	// returns on time whatever the engine spawned.
+	// The probe runs in its own process group so a wrapper engine's
+	// descendants can be killed with it. Without this, cancelling reaches the
+	// direct child only: a launcher that backgrounds work and exits left that
+	// descendant running after `voice doctor` returned, one orphan per
+	// invocation. WaitDelay fixed the symptom - the probe returned on time,
+	// because forcing the pipes closed unblocks the caller - while the process
+	// it was waiting on stayed alive, which is why the fix looked complete.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Cancel therefore signals the GROUP, negative pid, rather than the child.
+	// Kill, not terminate: this is a --help probe with no state to flush, and a
+	// wrapper that ignores SIGTERM is exactly the case that leaked.
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			// ESRCH means it exited first, which is the common, healthy path.
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
+	// Kept as a backstop: if a descendant escapes the group by calling
+	// setsid itself, the pipes still close and the probe still returns.
 	cmd.WaitDelay = time.Second
 	out, err := cmd.CombinedOutput()
+	// The group is killed here, not only in Cancel, because Cancel runs ONLY
+	// when the context ends. The leak this fixes happens on the healthy path:
+	// the launcher exits immediately, the deadline never fires, Wait returns
+	// once WaitDelay closes the pipes, and the backgrounded descendant is
+	// still running. Cancel alone would have left it exactly as it was.
+	groupErr := killGroup(cmd.Process)
 	text := strings.TrimSpace(string(out))
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return false, path + ": did not respond to --help within 5s"
@@ -90,7 +117,33 @@ func runnable(path string) (bool, string) {
 	if err != nil && text == "" {
 		return false, fmt.Sprintf("%s: %v", path, err)
 	}
+	if groupErr != nil {
+		// The engine starts, so it is usable; but a probe that cannot clean up
+		// after itself leaves processes on the host once per doctor run, and
+		// staying silent about it is how the first leak survived a fix.
+		return true, fmt.Sprintf("%s (warning: probe process group may have survived: %v)", path, groupErr)
+	}
 	return true, path
+}
+
+// killGroup signals the probe's whole process group. A wrapper engine that
+// backgrounds a descendant and exits is the reachable case: the descendant
+// inherits the group, so one signal reaches it without the caller needing to
+// know it exists.
+func killGroup(p *os.Process) error {
+	if p == nil {
+		return nil
+	}
+	err := syscall.Kill(-p.Pid, syscall.SIGKILL)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, syscall.ESRCH):
+		// Nothing left in the group: the common, healthy outcome.
+		return nil
+	default:
+		return err
+	}
 }
 
 func firstLine(s string) string {
