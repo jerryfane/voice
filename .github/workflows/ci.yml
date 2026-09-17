@@ -22,16 +22,22 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       # Type-aware unhandled-error check. Run with `go run pkg@version` so it
       # never enters go.mod and never reaches the shipped binary, which keeps
-      # the single static CGO_ENABLED=0 build intact. The in-suite check in
-      # internal/codecheck covers the other half - errors assigned to a blank
-      # with a written justification, which errcheck cannot express - and says
-      # in its own comment that it is name-scoped rather than complete.
+      # the single static CGO_ENABLED=0 build intact.
       #
-      # No exclude file: production code is clean in errcheck's default mode.
-      # Tests are skipped because their discards are fake fixtures that the
-      # in-suite check already covers site by site, with reasons.
+      # -blank is on and there is NO exclude file, on purpose. Four rounds of
+      # review each enumerated a shape or a name, and the next real defect
+      # arrived in the gap every time: assignment-only missed bare calls, then
+      # those missed defer, then the name list missed three json.Marshal
+      # discards that would have told the model a device did not exist. The
+      # invariant that ends that pattern is not a better list - it is that
+      # production discards nothing, which is checkable without enumerating
+      # anything. A type-level exclude file would silence the next real case
+      # at that type, so there is none.
+      #
+      # Tests are skipped here; internal/codecheck covers the test tree, and
+      # its comment stays honest that it is name-scoped rather than complete.
       - name: Unhandled errors (errcheck, CI only)
-        run: go run github.com/kisielk/errcheck@v1.9.0 -ignoretests ./...
+        run: go run github.com/kisielk/errcheck@v1.9.0 -ignoretests -blank ./...
       - name: Static binaries
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/voice-amd64 ./cmd/voice

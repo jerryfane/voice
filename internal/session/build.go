@@ -35,8 +35,8 @@ func Build(c config.Config) *Assistant {
 	}
 	rec := audio.NewCommandRecorder(c.Input.Command, c.Input.Device, f, frame, tel, faults.Log(logger, "capture"))
 	player := audio.NewCommandPlayer(c.Output.Command, c.Output.Device)
-	stt := speech.NewCommandTranscriber(c.STT.Name, c.STT.Command, c.STT.Model, c.STT.Timeout.D())
-	tts := speech.NewCommandSynthesizer(c.TTS.Name, c.TTS.Command, c.TTS.Model, c.TTS.Timeout.D())
+	stt := speech.NewCommandTranscriber(c.STT.Name, c.STT.Command, c.STT.Model, c.STT.Timeout.D(), faults.Log(logger, "speech-to-text"))
+	tts := speech.NewCommandSynthesizer(c.TTS.Name, c.TTS.Command, c.TTS.Model, c.TTS.Timeout.D(), faults.Log(logger, "text-to-speech"))
 	ext := brain.NewExternal("brain", c.Brain.Command, c.Brain.Persona, c.Brain.Timeout.D(), c.Brain.Mode)
 	var planner brain.Planner = ext
 	if c.Brain.Rules {

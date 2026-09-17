@@ -3,6 +3,7 @@ package device
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -42,16 +43,16 @@ func checksum(b []byte) byte {
 	}
 	return n
 }
-func (m *MagicHome) roundTrip(ctx context.Context, p []byte, n int) ([]byte, error) {
+func (m *MagicHome) roundTrip(ctx context.Context, p []byte, n int) (reply []byte, err error) {
 	d := net.Dialer{Timeout: m.Timeout}
 	c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(m.Host, strconv.Itoa(m.Port)))
 	if err != nil {
 		return nil, err
 	}
-	// discard: the controller's reply has already been read by the time this
-	// runs, and TCP gives no delivery guarantee at close that Write did not
-	// already give.
-	defer func() { _ = c.Close() }()
+	// The reply has already been read by the time this runs, so a close
+	// failure costs nothing that was asked for - but a controller that cannot
+	// be closed cleanly is worth reporting alongside whatever it answered.
+	defer func() { err = errors.Join(err, c.Close()) }()
 	if err := c.SetDeadline(time.Now().Add(m.Timeout)); err != nil {
 		return nil, err
 	}

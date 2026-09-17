@@ -119,7 +119,7 @@ func (s *Store) Close() error {
 }
 
 // Load reads the persisted timers.
-func (s *Store) Load() ([]Timer, error) {
+func (s *Store) Load() (timers []Timer, err error) {
 	if s == nil || s.db == nil {
 		return nil, nil
 	}
@@ -127,9 +127,9 @@ func (s *Store) Load() ([]Timer, error) {
 	if err != nil {
 		return nil, err
 	}
-	// discard: rows.Err below reports anything that went wrong with this
-	// query; closing a finished read adds no failure of its own.
-	defer func() { _ = rows.Close() }()
+	// Closing a finished read rarely fails, but when it does it means the
+	// rows Voice just read may be incomplete, which is worth saying.
+	defer func() { err = errors.Join(err, rows.Close()) }()
 	var ts []Timer
 	for rows.Next() {
 		var (
@@ -153,7 +153,7 @@ func (s *Store) Load() ([]Timer, error) {
 
 // Save replaces the stored set in one transaction, so a crash mid-write leaves
 // the previous set rather than half of the new one.
-func (s *Store) Save(ts []Timer) error {
+func (s *Store) Save(ts []Timer) (err error) {
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -161,10 +161,14 @@ func (s *Store) Save(ts []Timer) error {
 	if err != nil {
 		return err
 	}
-	// discard: the standard transaction idiom - after a successful Commit this
-	// rollback returns sql.ErrTxDone, which is the expected outcome, and any
-	// real failure surfaces from Commit itself.
-	defer func() { _ = tx.Rollback() }()
+	defer func() {
+		// The rollback is the abort path. After a successful Commit it reports
+		// ErrTxDone, which is the expected outcome and not a failure; anything
+		// else means the transaction was left behind and belongs in the error.
+		if rollback := tx.Rollback(); rollback != nil && !errors.Is(rollback, sql.ErrTxDone) {
+			err = errors.Join(err, rollback)
+		}
+	}()
 	if _, err := tx.Exec(`DELETE FROM timers`); err != nil {
 		return err
 	}
@@ -172,9 +176,7 @@ func (s *Store) Save(ts []Timer) error {
 	if err != nil {
 		return err
 	}
-	// discard: the statement is scoped to the transaction, and tx.Commit is
-	// what decides whether this save happened.
-	defer func() { _ = stmt.Close() }()
+	defer func() { err = errors.Join(err, stmt.Close()) }()
 	for _, t := range ts {
 		if _, err := stmt.Exec(t.ID, t.Label, int64(t.Duration), t.Deadline.UTC().Format(time.RFC3339Nano)); err != nil {
 			return err

@@ -1,11 +1,16 @@
 // Package codecheck holds checks that run inside the ordinary test suite.
 //
-// It exists because of a defect class this repository produced twice: a call
-// whose error was assigned to the blank identifier, so a failure to persist a
-// fired timer or to clear a speakerphone's off-hook report vanished. Requiring
-// a faults.Reporter in the constructors of the types that own background work
-// makes the right thing available, but Go cannot forbid writing `_ = f()`, so
-// the guard lives here instead of in a lint job someone can skip.
+// It exists because of a defect class this repository produced repeatedly: a
+// call whose error was assigned to the blank identifier, so a failure to
+// persist a fired timer or to clear a speakerphone's off-hook report vanished.
+//
+// CI runs `errcheck -blank -ignoretests` with no exclusions, which is the real
+// guarantee for production code: it is type-aware and enumerates nothing. This
+// check covers the test tree that CI skips, and it fails fast in the suite
+// people actually run. It is name-scoped by design - a syntactic pass cannot
+// know a call returns an error - so it is a fast regression guard, not a
+// complete one, and the errcheck run is what makes completeness a property of
+// production rather than of a list.
 package codecheck
 
 import (

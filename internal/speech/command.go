@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jerryfane/voice/internal/audio"
+	"github.com/jerryfane/voice/internal/faults"
 	"github.com/jerryfane/voice/internal/proc"
 )
 
@@ -20,10 +21,21 @@ type CommandTranscriber struct {
 	Argv    []string
 	Model   string
 	Timeout time.Duration
+	Faults  faults.Reporter
 }
 
-func NewCommandTranscriber(name string, argv []string, model string, timeout time.Duration) *CommandTranscriber {
-	return &CommandTranscriber{name, argv, model, timeout}
+// NewCommandTranscriber builds a transcriber. report receives failures that
+// happen after the answer is already known - temp-file cleanup - which have no
+// caller left to return them to.
+func NewCommandTranscriber(name string, argv []string, model string, timeout time.Duration, report faults.Reporter) *CommandTranscriber {
+	return &CommandTranscriber{Engine: name, Argv: argv, Model: model, Timeout: timeout, Faults: report}
+}
+
+// report forwards a failure that has no caller left to receive it.
+func (t *CommandTranscriber) report(err error) {
+	if t.Faults != nil {
+		t.Faults.Report(err)
+	}
 }
 func (t *CommandTranscriber) Name() string { return t.Engine }
 func (t *CommandTranscriber) Available() (bool, string) {
@@ -47,10 +59,11 @@ func (t *CommandTranscriber) Transcribe(ctx context.Context, pcm []int16, f audi
 		return "", err
 	}
 	name := tmp.Name()
-	// discard: best-effort cleanup of a file in the system temp directory; a
-	// leftover is reaped by the OS and threading a reporter through the speech
-	// engines to say so would cost more than it is worth.
-	defer func() { _ = os.Remove(name) }()
+	defer func() {
+		if err := os.Remove(name); err != nil {
+			t.report(fmt.Errorf("removing the capture temp file %s: %w", name, err))
+		}
+	}()
 	if _, err = tmp.Write(audio.EncodeWAV(pcm, f)); err != nil {
 		return "", errors.Join(err, tmp.Close())
 	}
@@ -76,10 +89,18 @@ type CommandSynthesizer struct {
 	Argv    []string
 	Model   string
 	Timeout time.Duration
+	Faults  faults.Reporter
 }
 
-func NewCommandSynthesizer(name string, argv []string, model string, timeout time.Duration) *CommandSynthesizer {
-	return &CommandSynthesizer{name, argv, model, timeout}
+// NewCommandSynthesizer builds a synthesizer. report receives temp-file
+// cleanup failures, as above.
+func NewCommandSynthesizer(name string, argv []string, model string, timeout time.Duration, report faults.Reporter) *CommandSynthesizer {
+	return &CommandSynthesizer{Engine: name, Argv: argv, Model: model, Timeout: timeout, Faults: report}
+}
+func (s *CommandSynthesizer) report(err error) {
+	if s.Faults != nil {
+		s.Faults.Report(err)
+	}
 }
 func (s *CommandSynthesizer) Name() string { return s.Engine }
 func (s *CommandSynthesizer) Available() (bool, string) {
@@ -108,8 +129,11 @@ func (s *CommandSynthesizer) Synthesize(ctx context.Context, text string) ([]byt
 	if err := out.Close(); err != nil {
 		return nil, err
 	}
-	// discard: best-effort cleanup of a temp file, as above.
-	defer func() { _ = os.Remove(outName) }()
+	defer func() {
+		if err := os.Remove(outName); err != nil {
+			s.report(fmt.Errorf("removing the synthesis temp file %s: %w", outName, err))
+		}
+	}()
 	vars := map[string]string{"model": s.Model, "text": text, "out": outName}
 	argv := proc.Expand(s.Argv, vars)
 	stdin := []byte(nil)

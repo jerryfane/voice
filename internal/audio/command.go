@@ -200,10 +200,15 @@ func (p *CommandPlayer) Stop() error {
 func EncodeWAV(pcm []int16, f Format) []byte {
 	var b bytes.Buffer
 	dataLen := len(pcm) * 2
-	// discard: bytes.Buffer never fails a write, so there is no error here to
-	// report or return; one helper keeps that judgement in one place instead
-	// of repeating it on every field below.
-	put := func(v any) { _ = binary.Write(&b, binary.LittleEndian, v) }
+	// A bytes.Buffer cannot fail a write: it grows or it panics on allocation
+	// failure, which is fatal either way. Checking the error states that
+	// judgement at the call instead of discarding it, and turns a future
+	// change of sink into a loud failure rather than a silent truncation.
+	put := func(v any) {
+		if err := binary.Write(&b, binary.LittleEndian, v); err != nil {
+			panic(fmt.Sprintf("encoding WAV into a bytes.Buffer: %v", err))
+		}
+	}
 	put([4]byte{'R', 'I', 'F', 'F'})
 	put(uint32(36 + dataLen))
 	put([4]byte{'W', 'A', 'V', 'E'})
