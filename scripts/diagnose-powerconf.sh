@@ -252,6 +252,72 @@ systemctl is-active voice || true
 amixer -c "$CARD" cget numid=5 numid=6 2>&1 | sed -n '1,12p'
 
 echo
+echo "=== phase 0b: loader and unit pre-state, plus who logged the exit-127 lines"
+echo "All read-only, silent, and changing nothing. A fix applied first destroys"
+echo "the evidence that answers the question, so this is collected before any"
+echo "arm touches the device - and it is IN THE SCRIPT because the coordinator"
+echo "asked for it three rounds ago and instructions do not survive a handoff."
+echo "--- the engine binary and what it actually links"
+command -v whisper-cli || echo "    whisper-cli NOT on PATH"
+if command -v whisper-cli >/dev/null 2>&1; then
+	ldd "$(command -v whisper-cli)" 2>&1 | sed 's/^/    /'
+fi
+echo "--- any libwhisper on the system, and the loader's view of it"
+# Bounded on purpose: a find over the whole filesystem took minutes here and
+# would stall the run on the device. These are the only places the installer,
+# the distribution or a hand build put it.
+for dir in /usr/local/lib /usr/local/lib64 /usr/lib /usr/lib64 /opt "$HOME/.cache/voice" /home/pi/.cache/voice /var/lib/voice; do
+	[ -d "$dir" ] || continue
+	timeout 10 find "$dir" -maxdepth 3 -name 'libwhisper.so*' -printf '    %p\n' 2>/dev/null || true
+done
+ldconfig -p 2>/dev/null | grep -i whisper | sed 's/^/    /' || echo "    (ldconfig knows no whisper library)"
+echo "--- loader search paths"
+sed -n '1,20p' /etc/ld.so.conf 2>/dev/null | sed 's/^/    /'
+for f in /etc/ld.so.conf.d/*.conf; do
+	[ -f "$f" ] || continue
+	printf '    %s:\n' "$f"
+	sed 's/^/      /' "$f"
+done
+echo "--- the unit's own environment and command"
+systemctl show voice -p ExecStart -p Environment -p EnvironmentFiles -p User -p Group -p SupplementaryGroups 2>&1 | sed 's/^/    /'
+echo "--- WHO logged the exit-127 and transcribe lines (the open attribution question)"
+systemctl show -p MainPID -p InvocationID voice 2>&1 | sed 's/^/    /'
+attr=$(mktemp /tmp/powerconf-attr-XXXXXX.py)
+cat >"$attr" <<'ATTR'
+import json
+import sys
+
+seen = 0
+for line in sys.stdin:
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    message = entry.get("MESSAGE", "")
+    if not any(k in message for k in ("127", "transcribe", "heard=", "stage=")):
+        continue
+    seen += 1
+    print(
+        "    pid={pid} comm={comm} ident={ident} unit={unit} :: {msg}".format(
+            pid=entry.get("_PID"),
+            comm=entry.get("_COMM"),
+            ident=entry.get("SYSLOG_IDENTIFIER"),
+            unit=entry.get("_SYSTEMD_UNIT"),
+            msg=message[:100],
+        )
+    )
+if seen == 0:
+    print("    (no matching lines in the retained journal window)")
+ATTR
+journalctl -u voice -o json --no-pager 2>/dev/null | python3 "$attr"
+rm -f "$attr"
+echo "READ THIS: if those pids equal the MainPID above, the service's own loop"
+echo "logged them and the CLI explanation is dead. If they do not, the lines"
+echo "came from something else and every conclusion resting on them is void."
+echo "A count of zero means the journal no longer retains that window, which is"
+echo "an absence of evidence and NOT evidence that the lines never happened."
+
+echo
 echo "=== phase 1: does the device's own mute explain the silence?"
 echo "The PowerConf has a hardware mute button. If it is engaged, the device"
 echo "streams silence and no host-side setting can undo it; the ring is"
