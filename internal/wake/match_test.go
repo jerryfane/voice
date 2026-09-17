@@ -20,3 +20,17 @@ func TestNoMatchInsideUnrelatedSpeech(t *testing.T) {
 		t.Fatal("unexpected wake match")
 	}
 }
+
+func TestNoMatchWhenWakePhraseIsEmbeddedInConversation(t *testing.T) {
+	ok, _, _ := Match("I heard someone say hey voice turn on the light", []string{"hey voice"}, 0)
+	if ok {
+		t.Fatal("wake phrase must start the transcript")
+	}
+}
+
+func TestExactModeRejectsApproximateWakePhrase(t *testing.T) {
+	ok, _, _ := Match("hey voise turn on the light", []string{"hey voice"}, 0)
+	if ok {
+		t.Fatal("exact mode must reject approximate wake phrases")
+	}
+}

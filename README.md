@@ -64,6 +64,9 @@ User-mode configuration defaults to `~/.config/voice/config.json`; override it w
 ## Use
 
 ```sh
+voice on
+voice off
+voice status
 voice doctor
 voice devices
 voice ask 'remember that I prefer concise answers'
@@ -89,6 +92,11 @@ The default wake phrase is exactly:
 ```text
 Hey Voice
 ```
+
+Voice only calls the agent when a transcript starts with the wake phrase and
+includes the request in the same utterance. Ambient speech, noise segments, and
+standalone wake phrases never reach the LLM. Say `Hey Voice, turn off` to stop
+the listener without an LLM call; run `voice on` to start it again.
 
 ALSA capture and playback are configurable argv templates. The current Pi deployment uses an Anker PowerConf. `packaging/99-voice-powerconf.rules` grants only `voice-agent` permission to send the USB telephony off-hook report required by that microphone.
 

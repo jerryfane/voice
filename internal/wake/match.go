@@ -6,9 +6,9 @@ import (
 	"unicode"
 )
 
-// Match reports whether transcript contains a configured phrase within the
-// normalised edit-distance tolerance. It returns the remaining command after
-// the wake phrase, so "hey voice turn off the TV" needs only one utterance.
+// Match reports whether transcript starts with a configured phrase within the
+// normalised edit-distance tolerance. Requiring the phrase at the beginning
+// prevents incidental mentions in household conversation from activating Voice.
 func Match(transcript string, phrases []string, fuzz float64) (matched bool, command string, phrase string) {
 	words := strings.Fields(normalize(transcript))
 	for _, raw := range phrases {
@@ -16,17 +16,15 @@ func Match(transcript string, phrases []string, fuzz float64) (matched bool, com
 		if len(p) == 0 || len(words) < len(p) {
 			continue
 		}
-		for i := 0; i+len(p) <= len(words); i++ {
-			candidate := strings.Join(words[i:i+len(p)], " ")
-			want := strings.Join(p, " ")
-			d := distance(candidate, want)
-			den := len([]rune(want))
-			if den == 0 {
-				continue
-			}
-			if float64(d)/float64(den) <= fuzz {
-				return true, strings.TrimSpace(strings.Join(words[i+len(p):], " ")), raw
-			}
+		candidate := strings.Join(words[:len(p)], " ")
+		want := strings.Join(p, " ")
+		d := distance(candidate, want)
+		den := len([]rune(want))
+		if den == 0 {
+			continue
+		}
+		if float64(d)/float64(den) <= fuzz {
+			return true, strings.TrimSpace(strings.Join(words[len(p):], " ")), raw
 		}
 	}
 	return false, "", ""

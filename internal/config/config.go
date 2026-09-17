@@ -77,10 +77,6 @@ type Wake struct {
 	// match. 0 demands an exact transcript; 0.25 tolerates one wrong character
 	// in four. Raise it if the recogniser keeps mangling the name.
 	Fuzz float64 `json:"fuzz"`
-	// FollowUp is how long Voice keeps listening for another command after
-	// answering, so you can say "and turn off the TV" without repeating the
-	// wake phrase. Zero disables it.
-	FollowUp Duration `json:"follow_up"`
 	// Detector selects the strategy: "stt" transcribes every speech segment
 	// and matches the phrase (no extra dependency, works today); "external"
 	// runs Command and treats any line on stdout as a detection.
@@ -208,8 +204,7 @@ func Default() Config {
 		},
 		Wake: Wake{
 			Phrases:  []string{"hey voice"},
-			Fuzz:     0.2,
-			FollowUp: Duration(8 * time.Second),
+			Fuzz:     0,
 			Detector: "stt",
 			VAD: VAD{
 				Threshold:    0,

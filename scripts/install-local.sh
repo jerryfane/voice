@@ -25,7 +25,7 @@ sudo chown -R "$agent_user:$agent_user" "$agent_home"
 sudo install -d -o root -g root -m 0755 /usr/local/libexec /etc/voice
 sudo install -m 0755 /tmp/voice-install /usr/local/bin/voice
 sudo install -m 0755 "$(command -v omp)" /usr/local/libexec/voice-omp
-printf '%s ALL=(voice-agent) NOPASSWD: /usr/local/bin/voice-agent-run *\n' "$owner" | sudo tee /etc/sudoers.d/voice-agent >/dev/null
+printf '%s ALL=(voice-agent) NOPASSWD: /usr/local/bin/voice-agent-run *\n%s ALL=(root) NOPASSWD: /usr/bin/systemctl start voice.service, /usr/bin/systemctl stop voice.service\n' "$owner" "$owner" | sudo tee /etc/sudoers.d/voice-agent >/dev/null
 sudo chmod 0440 /etc/sudoers.d/voice-agent
 sudo visudo -cf /etc/sudoers.d/voice-agent >/dev/null
 sudo install -m 0755 packaging/voice-agent-run /usr/local/bin/voice-agent-run
@@ -53,7 +53,8 @@ if [ ! -f /etc/voice/config.json ]; then
 fi
 sudo jq '
   .wake.phrases = ["hey voice"] |
-  .wake.fuzz = 0.2 |
+  .wake.fuzz = 0 |
+  del(.wake.follow_up) |
   .stt.model = "/var/lib/voice/models/ggml-base.en.bin" |
   .tts.model = "/var/lib/voice/models/en_US-amy-medium.onnx" |
   .brain.mode = "agent" |

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -43,6 +44,9 @@ func run(args []string) error {
 	if args[0] == "init" {
 		force := len(args) > 1 && args[1] == "--force"
 		return initConfig(*path, force)
+	}
+	if args[0] == "on" || args[0] == "off" || args[0] == "status" {
+		return controlService(args[0])
 	}
 	cfg, p, err := config.Load(*path)
 	if err != nil {
@@ -96,6 +100,9 @@ func usage() error {
 Usage: voice [--config PATH] COMMAND
 
   init [--force]           write a complete starter config
+  on                        start listening
+  off                       stop listening
+  status                    report whether Voice is listening
   doctor                    check audio, engines and devices
   listen                    run the wake-word voice loop
   ask TEXT                  process one text command through the same brain
@@ -109,6 +116,33 @@ Usage: voice [--config PATH] COMMAND
 Light ops: on, off, toggle, color NAME, white 0-100, brightness 0-100
 TV ops: on, off, volume-up, volume-down, mute
 `)
+	return nil
+}
+
+func controlService(action string) error {
+	if action == "status" {
+		err := exec.Command("systemctl", "is-active", "--quiet", "voice.service").Run()
+		if err == nil {
+			fmt.Println("Voice is on.")
+			return nil
+		}
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 3 {
+			fmt.Println("Voice is off.")
+			return nil
+		}
+		return fmt.Errorf("query voice.service: %w", err)
+	}
+	verb := map[string]string{"on": "start", "off": "stop"}[action]
+	argv := []string{"systemctl", verb, "voice.service"}
+	if os.Geteuid() != 0 {
+		argv = append([]string{"sudo", "-n"}, argv...)
+	}
+	out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s voice.service: %w: %s", verb, err, strings.TrimSpace(string(out)))
+	}
+	fmt.Printf("Voice is %s.\n", map[string]string{"on": "on", "off": "off"}[action])
 	return nil
 }
 func initConfig(path string, force bool) error {

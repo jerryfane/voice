@@ -32,8 +32,7 @@
     "phrases": [
       "hey voice"
     ],
-    "fuzz": 0.2,
-    "follow_up": "8s",
+    "fuzz": 0,
     "detector": "stt",
     "vad": {
       "threshold": 0,

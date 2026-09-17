@@ -33,5 +33,5 @@ func Build(c config.Config) *Assistant {
 		return n
 	}
 	seg := vad.NewEnergy(vad.Params{Threshold: c.Wake.VAD.Threshold, MinSpeech: frames(c.Wake.VAD.MinSpeech), Silence: frames(c.Wake.VAD.Silence), MaxUtterance: frames(c.Wake.VAD.MaxUtterance), PreRoll: frames(c.Wake.VAD.PreRoll), FrameSize: frame})
-	return &Assistant{Recorder: rec, Player: player, VAD: seg, STT: stt, TTS: tts, Brain: planner, Devices: device.Build(c), WakePhrases: c.Wake.Phrases, WakeFuzz: c.Wake.Fuzz, FollowUp: c.Wake.FollowUp.D(), Logger: log.New(os.Stderr, "voice: ", log.LstdFlags)}
+	return &Assistant{Recorder: rec, Player: player, VAD: seg, STT: stt, TTS: tts, Brain: planner, Devices: device.Build(c), WakePhrases: c.Wake.Phrases, WakeFuzz: c.Wake.Fuzz, Logger: log.New(os.Stderr, "voice: ", log.LstdFlags)}
 }

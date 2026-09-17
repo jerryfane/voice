@@ -1,5 +1,5 @@
 // Package session connects audio, VAD, speech, reasoning and devices into the
-// always-listening assistant loop.
+// wake-gated assistant loop.
 package session
 
 import (
@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/jerryfane/voice/internal/audio"
 	"github.com/jerryfane/voice/internal/brain"
@@ -28,7 +27,6 @@ type Assistant struct {
 	Devices     *device.Registry
 	WakePhrases []string
 	WakeFuzz    float64
-	FollowUp    time.Duration
 	Logger      *log.Logger
 }
 
@@ -74,13 +72,12 @@ func (a *Assistant) Speak(ctx context.Context, text string) error {
 	return a.Player.PlayWAV(ctx, wav)
 }
 
-// Run listens until ctx is cancelled. Wake and command may be in one utterance
-// ("Hey Voice turn off the TV") or two ("Hey Voice" / "turn off the TV").
+// Run listens until ctx is cancelled. Every model request must contain the wake
+// phrase and command in the same utterance.
 func (a *Assistant) Run(ctx context.Context) error {
 	pcm, recErr := a.Recorder.Stream(ctx)
 	utterances := a.VAD.Run(ctx, pcm, a.Recorder.Format())
-	waiting := false
-	var deadline time.Time
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -104,24 +101,24 @@ func (a *Assistant) Run(ctx context.Context) error {
 				continue
 			}
 			a.logf("heard=%q peak=%.4f", text, u.Peak)
-			command := ""
-			if waiting && time.Now().Before(deadline) {
-				command = text
-				waiting = false
-			} else {
-				matched, rest, _ := wake.Match(text, a.WakePhrases, a.WakeFuzz)
-				if !matched {
-					continue
+			matched, command, _ := wake.Match(text, a.WakePhrases, a.WakeFuzz)
+			if !matched {
+				continue
+			}
+			if command == "" {
+				if err := a.Speak(ctx, "Please say Hey Voice followed by your request."); err != nil {
+					a.logf("speak: %v", err)
 				}
-				command = rest
-				if command == "" {
-					waiting = true
-					deadline = time.Now().Add(a.FollowUp)
-					if err := a.Speak(ctx, "Yes?"); err != nil {
-						a.logf("speak: %v", err)
-					}
-					continue
+				continue
+			}
+			if reply, stop, handled := localControl(command); handled {
+				if err := a.Speak(ctx, reply); err != nil {
+					a.logf("speak: %v", err)
 				}
+				if stop {
+					return nil
+				}
+				continue
 			}
 			p, err := a.HandleText(ctx, command)
 			if err != nil {
@@ -133,5 +130,16 @@ func (a *Assistant) Run(ctx context.Context) error {
 				a.logf("speak: %v", err)
 			}
 		}
+	}
+}
+
+func localControl(command string) (reply string, stop bool, handled bool) {
+	switch strings.ToLower(strings.TrimSpace(command)) {
+	case "turn off", "turn yourself off", "stop listening", "go offline":
+		return "Turning off.", true, true
+	case "turn on", "start listening", "go online":
+		return "I'm already on.", false, true
+	default:
+		return "", false, false
 	}
 }
