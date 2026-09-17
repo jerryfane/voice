@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/jerryfane/voice/internal/audio"
 	"github.com/jerryfane/voice/internal/brain"
 	"github.com/jerryfane/voice/internal/device"
 	"github.com/jerryfane/voice/internal/feedback"
 	"github.com/jerryfane/voice/internal/speech"
+	"github.com/jerryfane/voice/internal/timer"
 	"github.com/jerryfane/voice/internal/vad"
 	"github.com/jerryfane/voice/internal/wake"
 )
@@ -28,10 +30,18 @@ type Assistant struct {
 	Devices  *device.Registry
 	// Feedback acknowledges an accepted wake phrase locally. A nil Notifier
 	// disables light and sound without changing command handling.
-	Feedback    *feedback.Notifier
+	Feedback *feedback.Notifier
+	// Timers runs local timers. A nil Scheduler means the timer vocabulary
+	// falls through to the planner, as it did before timers existed.
+	Timers *timer.Scheduler
+	// Missed are timers that came due while Voice was not running; Run
+	// reports them once at startup.
+	Missed      []timer.Timer
 	WakePhrases []string
 	WakeFuzz    float64
-	Logger      *log.Logger
+	// Now is the clock used for timer arithmetic. Nil means time.Now.
+	Now    func() time.Time
+	Logger *log.Logger
 }
 
 func (a *Assistant) logf(f string, v ...any) {
@@ -85,6 +95,14 @@ func (a *Assistant) Run(ctx context.Context) error {
 	defer a.Feedback.Restore()
 	pcm, recErr := a.Recorder.Stream(ctx)
 	utterances := a.VAD.Run(ctx, pcm, a.Recorder.Format())
+	var fired <-chan timer.Timer
+	if a.Timers != nil {
+		done := make(chan struct{})
+		defer close(done)
+		go a.Timers.Run(done)
+		fired = a.Timers.Fired()
+		a.announceMissed(ctx, a.Missed)
+	}
 
 	for {
 		select {
@@ -95,6 +113,8 @@ func (a *Assistant) Run(ctx context.Context) error {
 				return err
 			}
 			recErr = nil
+		case t := <-fired:
+			a.announceFired(ctx, t)
 		case u, ok := <-utterances:
 			if !ok {
 				return nil
@@ -130,6 +150,9 @@ func (a *Assistant) accepted(ctx context.Context, command string) (stop bool) {
 		if err := a.Speak(ctx, "Please say Hey Voice followed by your request."); err != nil {
 			a.logf("speak: %v", err)
 		}
+		return false
+	}
+	if a.timerControl(ctx, command) {
 		return false
 	}
 	if reply, stop, handled := localControl(command); handled {

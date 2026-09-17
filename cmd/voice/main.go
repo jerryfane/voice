@@ -185,6 +185,14 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 	ok, d = a.Brain.Available()
 	check("brain", ok, a.Brain.Name()+": "+d)
 	fmt.Printf("%-12s %-4s %s\n", "wake feedback", "INFO", a.Feedback.Describe())
+	if c.Timers.Enabled {
+		if a.Timers == nil {
+			check("timers", false, "enabled but no scheduler was built")
+		} else {
+			check("timers", true, fmt.Sprintf("%d running, %d expired while offline",
+				len(a.Timers.List()), len(a.Missed)))
+		}
+	}
 	if c.Input.TelephonyHID != "" {
 		f, e := os.OpenFile(c.Input.TelephonyHID, os.O_WRONLY, 0)
 		if e == nil {

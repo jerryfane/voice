@@ -1,0 +1,296 @@
+package timer
+
+import (
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+)
+
+// fakeClock drives the scheduler without waiting. Advance releases every
+// sleeper whose deadline has passed, which is what lets a test cover a
+// multi-hour timer in microseconds.
+type fakeClock struct {
+	mu      sync.Mutex
+	now     time.Time
+	waiters []waiter
+}
+
+type waiter struct {
+	at time.Time
+	ch chan time.Time
+}
+
+func newClock() *fakeClock {
+	return &fakeClock{now: time.Date(2026, 9, 17, 18, 0, 0, 0, time.UTC)}
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) After(d time.Duration) <-chan time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ch := make(chan time.Time, 1)
+	at := c.now.Add(d)
+	// A sleeper registered for a deadline that has already passed fires at
+	// once; otherwise a scheduler that registers just after an Advance would
+	// wait forever for a wake-up that already happened.
+	if !at.After(c.now) {
+		ch <- c.now
+		return ch
+	}
+	c.waiters = append(c.waiters, waiter{at: at, ch: ch})
+	return ch
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	var due []waiter
+	kept := c.waiters[:0:0]
+	for _, w := range c.waiters {
+		if !w.at.After(c.now) {
+			due = append(due, w)
+			continue
+		}
+		kept = append(kept, w)
+	}
+	c.waiters = kept
+	now := c.now
+	c.mu.Unlock()
+	for _, w := range due {
+		w.ch <- now
+	}
+}
+
+// scheduler starts a scheduler on the fake clock and returns an idempotent
+// stop function, so a test can end the "process" early and still let cleanup
+// run.
+func scheduler(t *testing.T, path string, c *fakeClock) (*Scheduler, []Timer, func()) {
+	t.Helper()
+	s, missed, err := New(Store{Path: path}, WithClock(c.Now, c.After))
+	if err != nil {
+		t.Fatalf("new scheduler: %v", err)
+	}
+	done := make(chan struct{})
+	var once sync.Once
+	stop := func() { once.Do(func() { close(done) }) }
+	go s.Run(done)
+	t.Cleanup(stop)
+	return s, missed, stop
+}
+
+// waitFired waits for one fired timer, sweeping the clock so a sleeper the
+// scheduler registered after the test advanced time still wakes.
+func waitFired(t *testing.T, s *Scheduler, c *fakeClock) Timer {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case fired := <-s.Fired():
+			return fired
+		case <-time.After(5 * time.Millisecond):
+			if time.Now().After(deadline) {
+				t.Fatal("timer never fired")
+			}
+			c.Advance(0)
+		}
+	}
+}
+
+func TestTimerFiresAtItsWallClockDeadline(t *testing.T) {
+	c := newClock()
+	path := filepath.Join(t.TempDir(), "timers.json")
+	s, _, _ := scheduler(t, path, c)
+
+	if _, err := s.Add(10*time.Minute, "ten minute"); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(9 * time.Minute)
+	select {
+	case fired := <-s.Fired():
+		t.Fatalf("timer fired early: %+v", fired)
+	case <-time.After(20 * time.Millisecond):
+	}
+	c.Advance(time.Minute)
+	if fired := waitFired(t, s, c); fired.Duration != 10*time.Minute {
+		t.Errorf("fired %+v, want the ten minute timer", fired)
+	}
+	if live := s.List(); len(live) != 0 {
+		t.Errorf("%d timers left after firing, want 0", len(live))
+	}
+}
+
+func TestConcurrentTimersFireInDeadlineOrder(t *testing.T) {
+	c := newClock()
+	s, _, _ := scheduler(t, filepath.Join(t.TempDir(), "timers.json"), c)
+
+	for _, d := range []time.Duration{30 * time.Minute, 5 * time.Minute, time.Hour} {
+		if _, err := s.Add(d, Spoken(d)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if live := s.List(); len(live) != 3 || live[0].Duration != 5*time.Minute {
+		t.Fatalf("live set = %+v, want three timers earliest first", live)
+	}
+	var order []time.Duration
+	for range 3 {
+		c.Advance(time.Hour)
+		order = append(order, waitFired(t, s, c).Duration)
+	}
+	want := []time.Duration{5 * time.Minute, 30 * time.Minute, time.Hour}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("fired order %v, want %v", order, want)
+		}
+	}
+}
+
+func TestCancelRemovesOnlyTheNamedTimer(t *testing.T) {
+	c := newClock()
+	s, _, _ := scheduler(t, filepath.Join(t.TempDir(), "timers.json"), c)
+	for _, d := range []time.Duration{5 * time.Minute, 20 * time.Minute} {
+		if _, err := s.Add(d, Spoken(d)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := s.Cancel(func(x Timer) bool { return x.Duration == 5*time.Minute })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0].Duration != 5*time.Minute {
+		t.Fatalf("removed %+v, want the five minute timer", removed)
+	}
+	c.Advance(10 * time.Minute)
+	select {
+	case fired := <-s.Fired():
+		t.Fatalf("cancelled timer fired: %+v", fired)
+	case <-time.After(20 * time.Millisecond):
+	}
+	c.Advance(15 * time.Minute)
+	if fired := waitFired(t, s, c); fired.Duration != 20*time.Minute {
+		t.Errorf("fired %+v, want the twenty minute timer", fired)
+	}
+}
+
+// A timer set before a restart must still fire at its original wall-clock
+// time, with the remaining time it actually has left, not the time it was set
+// for.
+func TestTimerSurvivesRestartWithCorrectRemaining(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "timers.json")
+	first := newClock()
+	s, _, stop := scheduler(t, path, first)
+	if _, err := s.Add(30*time.Minute, "thirty minute"); err != nil {
+		t.Fatal(err)
+	}
+	stop() // the process stops here
+
+	restart := newClock()
+	restart.Advance(10 * time.Minute) // ten minutes of downtime
+	s2, missed, _ := scheduler(t, path, restart)
+	if len(missed) != 0 {
+		t.Fatalf("reported %d missed timers, want none", len(missed))
+	}
+	live := s2.List()
+	if len(live) != 1 {
+		t.Fatalf("%d timers after restart, want 1", len(live))
+	}
+	if got := live[0].Remaining(restart.Now()); got != 20*time.Minute {
+		t.Errorf("remaining after restart = %v, want 20m", got)
+	}
+	restart.Advance(20 * time.Minute)
+	if fired := waitFired(t, s2, restart); fired.Duration != 30*time.Minute {
+		t.Errorf("fired %+v, want the thirty minute timer", fired)
+	}
+}
+
+// A timer that came due while Voice was down must be reported as expired, not
+// fired as if it had just finished, and must not be reported twice.
+func TestTimerExpiredWhileDownIsReportedOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "timers.json")
+	first := newClock()
+	s, _, stop := scheduler(t, path, first)
+	if _, err := s.Add(5*time.Minute, "five minute"); err != nil {
+		t.Fatal(err)
+	}
+	stop()
+
+	restart := newClock()
+	restart.Advance(9 * time.Minute)
+	s2, missed, stop2 := scheduler(t, path, restart)
+	if len(missed) != 1 || missed[0].Duration != 5*time.Minute {
+		t.Fatalf("missed = %+v, want the five minute timer", missed)
+	}
+	if live := s2.List(); len(live) != 0 {
+		t.Errorf("expired timer still live: %+v", live)
+	}
+	select {
+	case fired := <-s2.Fired():
+		t.Fatalf("expired-while-down timer also fired: %+v", fired)
+	case <-time.After(20 * time.Millisecond):
+	}
+	stop2()
+
+	again := newClock()
+	again.Advance(20 * time.Minute)
+	_, missedAgain, _ := scheduler(t, path, again)
+	if len(missedAgain) != 0 {
+		t.Errorf("second restart reported %+v again", missedAgain)
+	}
+}
+
+// Corrupt state must be reported and must not stop Voice from working: a
+// truncated file loses old timers, never the ability to set new ones.
+func TestCorruptStateIsReportedAndRecovered(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "timers.json")
+	if err := os.WriteFile(path, []byte(`[{"id":1,"duration":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := newClock()
+	s, missed, err := New(Store{Path: path}, WithClock(c.Now, c.After))
+	if err == nil {
+		t.Fatal("corrupt state accepted silently")
+	}
+	if len(missed) != 0 {
+		t.Errorf("missed = %+v, want none", missed)
+	}
+	done := make(chan struct{})
+	defer close(done)
+	go s.Run(done)
+	if _, err := s.Add(time.Minute, "one minute"); err != nil {
+		t.Fatalf("cannot set a timer after corrupt state: %v", err)
+	}
+	c.Advance(time.Minute)
+	if fired := waitFired(t, s, c); fired.Duration != time.Minute {
+		t.Errorf("fired %+v after recovery", fired)
+	}
+}
+
+// The state file is replaced by rename, so a reader never sees a partial file.
+func TestSaveReplacesFileAtomically(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "timers.json")
+	store := Store{Path: path}
+	if err := store.Save([]Timer{{ID: 1, Duration: time.Minute, Deadline: time.Now()}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(nil); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load()
+	if err != nil || len(loaded) != 0 {
+		t.Fatalf("load after empty save = %+v, %v", loaded, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("%d files left in the state directory, want only timers.json", len(entries))
+	}
+}

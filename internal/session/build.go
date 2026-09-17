@@ -11,6 +11,7 @@ import (
 	"github.com/jerryfane/voice/internal/feedback"
 	"github.com/jerryfane/voice/internal/hid"
 	"github.com/jerryfane/voice/internal/speech"
+	"github.com/jerryfane/voice/internal/timer"
 	"github.com/jerryfane/voice/internal/vad"
 )
 
@@ -48,6 +49,25 @@ func Build(c config.Config) *Assistant {
 		return n
 	}
 	seg := vad.NewEnergy(vad.Params{Threshold: c.Wake.VAD.Threshold, MinSpeech: frames(c.Wake.VAD.MinSpeech), Silence: frames(c.Wake.VAD.Silence), MaxUtterance: frames(c.Wake.VAD.MaxUtterance), PreRoll: frames(c.Wake.VAD.PreRoll), FrameSize: frame})
+	var timers *timer.Scheduler
+	var missed []timer.Timer
+	if c.Timers.Enabled {
+		path := c.Timers.File
+		if path == "" {
+			p, err := config.StatePath("timers.json")
+			if err != nil {
+				logger.Printf("timers: %v", err)
+			}
+			path = p
+		}
+		var err error
+		timers, missed, err = timer.New(timer.Store{Path: path})
+		if err != nil {
+			// A scheduler is still returned: unreadable saved state costs the
+			// old timers, not the ability to set new ones.
+			logger.Printf("timers: %v", err)
+		}
+	}
 	light, why := feedback.NewLight(tel, c.Feedback.Light)
 	if _, off := light.(feedback.Nop); off && c.Feedback.Light != feedback.LightNone {
 		logger.Printf("wake light: %s", why)
@@ -59,5 +79,5 @@ func Build(c config.Config) *Assistant {
 		logger.Printf("wake sound: %v", err)
 	}
 	fb := &feedback.Notifier{Indicator: light, Player: player, Sound: sound, Format: f, Logger: logger}
-	return &Assistant{Recorder: rec, Player: player, VAD: seg, STT: stt, TTS: tts, Brain: planner, Devices: device.Build(c), Feedback: fb, WakePhrases: c.Wake.Phrases, WakeFuzz: c.Wake.Fuzz, Logger: logger}
+	return &Assistant{Recorder: rec, Player: player, VAD: seg, STT: stt, TTS: tts, Brain: planner, Devices: device.Build(c), Feedback: fb, Timers: timers, Missed: missed, WakePhrases: c.Wake.Phrases, WakeFuzz: c.Wake.Fuzz, Logger: logger}
 }

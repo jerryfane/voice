@@ -47,6 +47,9 @@
     "sound": "chime",
     "volume": 0.35
   },
+  "timers": {
+    "enabled": true
+  },
   "stt": {
     "name": "whisper.cpp",
     "command": [

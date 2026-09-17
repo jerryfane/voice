@@ -132,6 +132,36 @@ reports what was selected and why, and commands keep working.
 `sound` is a generated waveform, not a bundled asset: `chime`, `blip`,
 `two-up`, or `none`. `volume` scales it between 0 and 1.
 
+## Timers
+
+Timers are local. "Hey Voice, set a timer for ten minutes" is parsed,
+scheduled, and announced by the session layer, so a timer can be set and can
+still fire when the model, the network, or the speech engines are unavailable —
+the announcement is the only part that needs text-to-speech. Ask "how long is
+left on my timer", cancel by duration ("cancel the ten minute timer") or in
+bulk ("cancel all timers"). Anything the timer vocabulary does not recognise
+goes to the agent unchanged.
+
+```json
+"timers": {
+  "enabled": true
+}
+```
+
+Deadlines are wall-clock, so a slow or suspended host does not shift when a
+timer fires, and the set is persisted after every change. A timer set before a
+restart still fires at its original time; one that came due while Voice was off
+is reported as expired, with how long ago, exactly once.
+
+State lives in `timers.json` under `$XDG_STATE_HOME/voice`, falling back to
+`~/.local/state/voice`. The service unit sets `StateDirectory=voice`, which
+puts it in `/var/lib/voice` owned by the `voice-agent` account; `timers.file`
+overrides the path. Writes are atomic, and an unreadable state file is reported
+and then ignored: it costs the saved timers, never the ability to set new ones.
+
+Because `voice off` stops the listener, it silences announcements without
+destroying timers; `voice on` brings them back with the correct remaining time.
+
 ## Devices
 
 Magic Home/LEDENET lights use their local TCP protocol on port 5577. HDMI-CEC TVs use the Linux CEC device. The OMP agent does not directly access hardware: it returns structured device actions, which Voice validates against configured IDs and capabilities before execution.
