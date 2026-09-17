@@ -11,6 +11,7 @@ import (
 	"github.com/jerryfane/voice/internal/audio"
 	"github.com/jerryfane/voice/internal/brain"
 	"github.com/jerryfane/voice/internal/device"
+	"github.com/jerryfane/voice/internal/feedback"
 	"github.com/jerryfane/voice/internal/speech"
 	"github.com/jerryfane/voice/internal/vad"
 	"github.com/jerryfane/voice/internal/wake"
@@ -18,13 +19,16 @@ import (
 
 // Assistant is one configured Voice runtime.
 type Assistant struct {
-	Recorder    audio.Recorder
-	Player      audio.Player
-	VAD         vad.Segmenter
-	STT         speech.Transcriber
-	TTS         speech.Synthesizer
-	Brain       brain.Planner
-	Devices     *device.Registry
+	Recorder audio.Recorder
+	Player   audio.Player
+	VAD      vad.Segmenter
+	STT      speech.Transcriber
+	TTS      speech.Synthesizer
+	Brain    brain.Planner
+	Devices  *device.Registry
+	// Feedback acknowledges an accepted wake phrase locally. A nil Notifier
+	// disables light and sound without changing command handling.
+	Feedback    *feedback.Notifier
 	WakePhrases []string
 	WakeFuzz    float64
 	Logger      *log.Logger
@@ -75,6 +79,10 @@ func (a *Assistant) Speak(ctx context.Context, text string) error {
 // Run listens until ctx is cancelled. Every model request must contain the wake
 // phrase and command in the same utterance.
 func (a *Assistant) Run(ctx context.Context) error {
+	// Establish a known indicator state at startup and leave it idle however
+	// Run exits: cancellation, shutdown or a spoken "turn off".
+	a.Feedback.Restore()
+	defer a.Feedback.Restore()
 	pcm, recErr := a.Recorder.Stream(ctx)
 	utterances := a.VAD.Run(ctx, pcm, a.Recorder.Format())
 
@@ -105,32 +113,41 @@ func (a *Assistant) Run(ctx context.Context) error {
 			if !matched {
 				continue
 			}
-			if command == "" {
-				if err := a.Speak(ctx, "Please say Hey Voice followed by your request."); err != nil {
-					a.logf("speak: %v", err)
-				}
-				continue
-			}
-			if reply, stop, handled := localControl(command); handled {
-				if err := a.Speak(ctx, reply); err != nil {
-					a.logf("speak: %v", err)
-				}
-				if stop {
-					return nil
-				}
-				continue
-			}
-			p, err := a.HandleText(ctx, command)
-			if err != nil {
-				a.logf("command %q: %v", command, err)
-				_ = a.Speak(ctx, "I couldn't do that.")
-				continue
-			}
-			if err := a.Speak(ctx, p.Speak); err != nil {
-				a.logf("speak: %v", err)
+			if stop := a.accepted(ctx, command); stop {
+				return nil
 			}
 		}
 	}
+}
+
+// accepted handles one utterance that passed the wake gate. All local feedback
+// happens here and nowhere else, so ambient noise, an embedded mention or an
+// approximate phrase can never produce a light or a sound.
+func (a *Assistant) accepted(ctx context.Context, command string) (stop bool) {
+	a.Feedback.Accepted(ctx)
+	defer a.Feedback.Restore()
+	if command == "" {
+		if err := a.Speak(ctx, "Please say Hey Voice followed by your request."); err != nil {
+			a.logf("speak: %v", err)
+		}
+		return false
+	}
+	if reply, stop, handled := localControl(command); handled {
+		if err := a.Speak(ctx, reply); err != nil {
+			a.logf("speak: %v", err)
+		}
+		return stop
+	}
+	p, err := a.HandleText(ctx, command)
+	if err != nil {
+		a.logf("command %q: %v", command, err)
+		_ = a.Speak(ctx, "I couldn't do that.")
+		return false
+	}
+	if err := a.Speak(ctx, p.Speak); err != nil {
+		a.logf("speak: %v", err)
+	}
+	return false
 }
 
 func localControl(command string) (reply string, stop bool, handled bool) {

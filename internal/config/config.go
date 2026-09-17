@@ -16,6 +16,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jerryfane/voice/internal/audio"
+	"github.com/jerryfane/voice/internal/feedback"
 )
 
 // Command is an argv template. Placeholders are expanded by internal/proc:
@@ -34,6 +37,9 @@ type Config struct {
 	Output Output `json:"output"`
 	// Wake controls when Voice starts listening for a command.
 	Wake Wake `json:"wake"`
+	// Feedback is the local acknowledgement played and shown when the wake
+	// gate accepts a phrase. It never involves the model.
+	Feedback Feedback `json:"feedback"`
 	// STT is speech-to-text.
 	STT Engine `json:"stt"`
 	// TTS is text-to-speech.
@@ -44,6 +50,25 @@ type Config struct {
 	Lights []Light `json:"lights"`
 	// TVs are HDMI-CEC displays.
 	TVs []TV `json:"tvs"`
+}
+
+// Feedback configures the immediate acknowledgement of an accepted wake
+// phrase. It is emitted by the session layer, so it works with no network and
+// no model.
+type Feedback struct {
+	// Light selects which speakerphone LED shows that Voice is listening:
+	// "auto" takes the first indicator the configured input.telephony_hid
+	// device advertises, "none" disables the light, or name one explicitly
+	// ("mic", "ring", "mute", "hold") after looking at which one reads as
+	// listening on your hardware. The off-hook LED is not offered: capture
+	// holds it for the whole session to keep the microphone un-gated.
+	// Unsupported hardware only costs the light, never command handling.
+	Light string `json:"light"`
+	// Sound is the acknowledgement earcon: "chime", "blip", "two-up", or
+	// "none" to stay silent. The waveform is generated, not a bundled asset.
+	Sound string `json:"sound"`
+	// Volume scales the earcon between 0 (silent) and 1 (full scale).
+	Volume float64 `json:"volume"`
 }
 
 // Input describes audio capture.
@@ -214,6 +239,11 @@ func Default() Config {
 				PreRoll:      Duration(300 * time.Millisecond),
 			},
 		},
+		Feedback: Feedback{
+			Light:  "auto",
+			Sound:  audio.EarconChime,
+			Volume: 0.35,
+		},
 		STT: Engine{
 			Name:    "whisper.cpp",
 			Model:   "models/ggml-base.en.bin",
@@ -335,6 +365,20 @@ func (c Config) Validate() error {
 	}
 	if c.Wake.VAD.MaxUtterance.D() <= c.Wake.VAD.MinSpeech.D() {
 		return fmt.Errorf("wake.vad.max_utterance must exceed min_speech")
+	}
+	switch c.Feedback.Light {
+	case feedback.LightAuto, feedback.LightNone, feedback.LightMic, feedback.LightRing, feedback.LightMute, feedback.LightHold:
+	default:
+		return fmt.Errorf("feedback.light must be one of %s, got %q", strings.Join(feedback.Lights(), ", "), c.Feedback.Light)
+	}
+	if c.Feedback.Light != feedback.LightAuto && c.Feedback.Light != feedback.LightNone && c.Input.TelephonyHID == "" {
+		return fmt.Errorf("feedback.light is %q but input.telephony_hid is empty: no device can show it", c.Feedback.Light)
+	}
+	if c.Feedback.Volume < 0 || c.Feedback.Volume > 1 {
+		return fmt.Errorf("feedback.volume must be between 0 and 1, got %v", c.Feedback.Volume)
+	}
+	if _, err := audio.Earcon(c.Feedback.Sound, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.Volume); err != nil {
+		return fmt.Errorf("feedback.sound: %w", err)
 	}
 	switch c.Brain.Mode {
 	case "plan", "agent":

@@ -2,11 +2,13 @@ package session
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/jerryfane/voice/internal/audio"
 	"github.com/jerryfane/voice/internal/brain"
 	"github.com/jerryfane/voice/internal/device"
+	"github.com/jerryfane/voice/internal/feedback"
 	"github.com/jerryfane/voice/internal/vad"
 )
 
@@ -109,3 +111,172 @@ func (p *countingPlanner) Plan(context.Context, string, []device.Info) (brain.Pl
 }
 func (*countingPlanner) Name() string              { return "test planner" }
 func (*countingPlanner) Available() (bool, string) { return true, "available" }
+
+type recordingIndicator struct{ states []feedback.State }
+
+func (r *recordingIndicator) Set(s feedback.State) error {
+	r.states = append(r.states, s)
+	return nil
+}
+func (*recordingIndicator) Describe() string { return "recording indicator" }
+
+type countingPlayer struct {
+	testPlayer
+	pcm  int
+	wavs int
+}
+
+func (p *countingPlayer) PlayPCM(context.Context, []int16, audio.Format) error {
+	p.pcm++
+	return nil
+}
+func (p *countingPlayer) PlayWAV(context.Context, []byte) error {
+	p.wavs++
+	return nil
+}
+
+type failingPlanner struct{}
+
+func (failingPlanner) Plan(context.Context, string, []device.Info) (brain.Plan, error) {
+	return brain.Plan{}, errors.New("brain unavailable")
+}
+func (failingPlanner) Name() string              { return "failing planner" }
+func (failingPlanner) Available() (bool, string) { return false, "unavailable" }
+
+func feedbackAssistant(t *testing.T, planner brain.Planner, texts ...string) (*Assistant, *recordingIndicator, *countingPlayer) {
+	t.Helper()
+	ind := &recordingIndicator{}
+	player := &countingPlayer{}
+	a := &Assistant{
+		Recorder: testRecorder{},
+		Player:   player,
+		VAD:      testSegmenter{count: len(texts)},
+		STT:      &queuedTranscriber{texts: texts},
+		TTS:      testSynthesizer{},
+		Brain:    planner,
+		Devices:  device.NewRegistry(),
+		Feedback: &feedback.Notifier{
+			Indicator: ind,
+			Player:    player,
+			Sound:     []int16{1, 2, 3},
+			Format:    audio.Default(),
+		},
+		WakePhrases: []string{"hey voice"},
+		WakeFuzz:    0,
+	}
+	return a, ind, player
+}
+
+func TestEachAcceptedWakeLightsUpThenReturnsToIdle(t *testing.T) {
+	a, ind, player := feedbackAssistant(t, &countingPlanner{},
+		"hey voice turn on the light",
+		"hey voice turn off the light",
+	)
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if player.pcm != 2 {
+		t.Errorf("acknowledgement sound played %d times for 2 accepted wakes, want 2", player.pcm)
+	}
+	want := []feedback.State{feedback.Idle, feedback.Listening, feedback.Idle, feedback.Listening, feedback.Idle}
+	if got := transitions(ind.states); !equal(got, want) {
+		t.Errorf("indicator transitions = %v, want %v", got, want)
+	}
+}
+
+func TestNonWakeSpeechProducesNoLightOrSound(t *testing.T) {
+	a, ind, player := feedbackAssistant(t, &countingPlanner{},
+		"the television is loud",
+		"someone said hey voice turn on the light",
+		"hey voise turn on the light",
+	)
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if player.pcm != 0 {
+		t.Errorf("played %d acknowledgement sounds for non-wake speech, want 0", player.pcm)
+	}
+	if hasState(ind.states, feedback.Listening) {
+		t.Errorf("indicator lit for non-wake speech: %v", ind.states)
+	}
+}
+
+func TestIndicatorReturnsToIdleWhenCommandFails(t *testing.T) {
+	a, ind, player := feedbackAssistant(t, failingPlanner{},
+		"hey voice turn on the light",
+		"hey voice turn on the light",
+	)
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if player.pcm != 2 {
+		t.Errorf("acknowledgement sound played %d times, want 2", player.pcm)
+	}
+	want := []feedback.State{feedback.Idle, feedback.Listening, feedback.Idle, feedback.Listening, feedback.Idle}
+	if got := transitions(ind.states); !equal(got, want) {
+		t.Errorf("indicator transitions = %v, want %v", got, want)
+	}
+}
+
+func TestSpokenTurnOffLeavesIndicatorIdle(t *testing.T) {
+	a, ind, _ := feedbackAssistant(t, &countingPlanner{}, "hey voice turn yourself off")
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if last := ind.states[len(ind.states)-1]; last != feedback.Idle {
+		t.Errorf("indicator left in %v after turning off, want idle", last)
+	}
+}
+
+func TestAssistantWithoutFeedbackStillHandlesCommands(t *testing.T) {
+	planner := &countingPlanner{}
+	a := &Assistant{
+		Recorder:    testRecorder{},
+		Player:      testPlayer{},
+		VAD:         testSegmenter{count: 1},
+		STT:         &queuedTranscriber{texts: []string{"hey voice turn on the light"}},
+		TTS:         testSynthesizer{},
+		Brain:       planner,
+		Devices:     device.NewRegistry(),
+		WakePhrases: []string{"hey voice"},
+	}
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if planner.calls != 1 {
+		t.Fatalf("planner called %d times without a feedback notifier, want 1", planner.calls)
+	}
+}
+
+// transitions collapses repeated writes so a test pins the state changes a
+// user would see, not how many times the same state was written.
+func transitions(states []feedback.State) []feedback.State {
+	out := make([]feedback.State, 0, len(states))
+	for i, s := range states {
+		if i == 0 || states[i-1] != s {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func equal(a, b []feedback.State) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func hasState(states []feedback.State, want feedback.State) bool {
+	for _, s := range states {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}

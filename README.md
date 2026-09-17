@@ -102,6 +102,36 @@ ALSA capture and playback are configurable argv templates. The current Pi deploy
 
 Speech engines and models are external. `scripts/setup-speech.sh` installs whisper.cpp, Piper, and their default English models under `~/.local/share/voice`; the restricted installer copies them to `/var/lib/voice`.
 
+## Activation feedback
+
+When the exact wake phrase is accepted, Voice acknowledges it locally before
+the request reaches the agent: a speakerphone LED switches to a listening
+state, and a short generated tone plays once. Both are emitted by the session
+layer, so they cost no model call and work with no network. Ambient noise, an
+embedded mention, or an approximate phrase produce neither. The light returns
+to idle on success, failure, timeout, cancellation, and shutdown.
+
+```json
+"feedback": {
+  "light": "auto",
+  "sound": "chime",
+  "volume": 0.35
+}
+```
+
+`light` names the indicator on the `input.telephony_hid` speakerphone: `auto`
+takes the first LED the device's HID report descriptor advertises, `none`
+disables it, or pick the one that reads as "listening" on your hardware with
+`mic`, `ring`, `mute`, or `hold`. The off-hook LED is deliberately not
+offered: capture holds it for the whole session to keep the microphone
+un-gated. Indicator writes carry the complete HID output report, so lighting
+up never clears that off-hook bit. A device whose descriptor advertises no
+usable LED, or that cannot be opened, costs only the light: `voice doctor`
+reports what was selected and why, and commands keep working.
+
+`sound` is a generated waveform, not a bundled asset: `chime`, `blip`,
+`two-up`, or `none`. `volume` scales it between 0 and 1.
+
 ## Devices
 
 Magic Home/LEDENET lights use their local TCP protocol on port 5577. HDMI-CEC TVs use the Linux CEC device. The OMP agent does not directly access hardware: it returns structured device actions, which Voice validates against configured IDs and capabilities before execution.
