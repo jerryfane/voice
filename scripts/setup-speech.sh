@@ -31,7 +31,16 @@ if ! command -v whisper-cli >/dev/null 2>&1; then
   # libwhisper.so.1 in loader paths it was never installed into. That shipped
   # a speech engine that could not start, and because the failure happens at
   # exec time the service logged it once per utterance and transcribed
-  # nothing. Linking statically means there is one file to install.
+  # nothing. With it, whisper.cpp's own libraries are linked into the
+  # executable, so there is one file to install and no libwhisper.so.1 to
+  # find.
+  #
+  # Stated precisely, because the loose version of this claim is how the
+  # original defect passed review: the result is NOT a static binary. On the
+  # installed arm64 host, ldd whisper-cli still resolves libgomp, libstdc++,
+  # libm, libgcc_s and libc from the distribution. Those ship with the base
+  # system and are why the reported failure cannot recur; whisper.cpp's own
+  # shared objects were the ones nobody installed.
   cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
   cmake --build "$src/build" --config Release -j "$(nproc)"
