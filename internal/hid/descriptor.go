@@ -94,6 +94,15 @@ const (
 	tagPop           = 0xb4
 )
 
+// Descriptors come from device firmware, so a malformed one must fail fast
+// instead of making Voice walk a four-billion-field report item. Real reports
+// are orders of magnitude smaller than these ceilings.
+const (
+	maxFieldBits  = 32
+	maxFieldCount = 1024
+	maxReportBits = 1 << 16
+)
+
 // ParseOutputs walks a HID report descriptor and records every one-bit output
 // control with its report ID and bit position. Only single-bit outputs are
 // indexed: those are the LED and hook controls, and indexing wider fields would
@@ -152,6 +161,9 @@ func ParseOutputs(desc []byte) (*Outputs, error) {
 		case tagUsageMax:
 			rangeMax, haveRange = packUsage(page, v, size), true
 		case tagOutput:
+			if reportSize > maxFieldBits || reportCount > maxFieldCount {
+				return nil, fmt.Errorf("implausible output item at byte %d: %d fields of %d bits", i, reportCount, reportSize)
+			}
 			start := offsets[reportID]
 			if reportSize == 1 {
 				for n := range int(reportCount) {
@@ -164,6 +176,9 @@ func ParseOutputs(desc []byte) (*Outputs, error) {
 				}
 			}
 			offsets[reportID] = start + int(reportSize*reportCount)
+			if offsets[reportID] > maxReportBits {
+				return nil, fmt.Errorf("output report %d exceeds %d bits", reportID, maxReportBits)
+			}
 			if sz := (offsets[reportID] + 7) / 8; sz > o.sizes[reportID] {
 				o.sizes[reportID] = sz
 			}
