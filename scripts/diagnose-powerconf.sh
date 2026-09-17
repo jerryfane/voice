@@ -31,6 +31,7 @@ note_failure() {
 }
 
 DEV=${DEV:-plughw:2,0}
+OUTDEV=${OUTDEV:-plughw:2,0}
 SERVICE_UID=${SERVICE_UID:-995}
 SERVICE_GID=${SERVICE_GID:-989}
 SERVICE_GROUPS=${SERVICE_GROUPS:-29,44,989}
@@ -186,6 +187,58 @@ echo "If the second capture is still zero, toggle the button once more and repea
 human_only "a second mute button press" \
 	&& ask "press the mute button once more (back to the other state), then press Enter"
 capture 3 "capture after second toggle" || note_failure "capture after second toggle"
+
+echo
+echo "=== phase 1c: does the microphone hear a KNOWN SOUND (no human needed)"
+echo "Every capture so far was taken in a quiet room with nobody speaking, so"
+echo "peak=0 was the EXPECTED result and proves nothing about the microphone."
+echo "This plays a 1 kHz tone out of the PowerConf's own speaker while its own"
+echo "microphone records, which separates the two explanations without anyone"
+echo "having to be present."
+acoustic_probe() {
+	tone=$(mktemp /tmp/powerconf-tone-XXXXXX.wav)
+	python3 - "$tone" <<'TONE'
+import array
+import math
+import sys
+import wave
+
+rate = 48000
+seconds = 4
+# Half amplitude: loud enough to be unmistakable, not clipping.
+samples = array.array(
+    "h",
+    (int(16000 * math.sin(2 * math.pi * 1000 * n / rate)) for n in range(rate * seconds)),
+)
+with wave.open(sys.argv[1], "wb") as w:
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(rate)
+    w.writeframes(samples.tobytes())
+TONE
+	if [ ! -s "$tone" ]; then
+		printf '    SETUP FAILED, could not generate the tone file\n'
+		rm -f "$tone"
+		return 1
+	fi
+	aplay -D "$OUTDEV" "$tone" >/dev/null 2>&1 &
+	player=$!
+	# Let the tone actually start before recording, or the capture measures
+	# the silence before playback and repeats the original mistake.
+	sleep 1
+	capture 3 "capture WHILE a 1 kHz tone plays from the device speaker"
+	status=$?
+	wait "$player" 2>/dev/null
+	rm -f "$tone"
+	return "$status"
+}
+acoustic_probe || note_failure "acoustic self-test (tone through the device speaker)"
+echo "READ THIS: a peak well above the quiet-room readings means the microphone"
+echo "path works and the earlier zeros were an empty room, not a broken device."
+echo "A peak that stays at zero WHILE the tone is audible means the capture path"
+echo "is genuinely not carrying audio, and that conclusion no longer depends on"
+echo "anyone speaking. If the tone is inaudible, playback is the broken half and"
+echo "the microphone question is still open - say which you heard."
 
 echo
 echo "=== phase 2: live wake attempt"
