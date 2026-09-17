@@ -42,6 +42,11 @@
       "pre_roll": "300ms"
     }
   },
+  "feedback": {
+    "light": "auto",
+    "sound": "chime",
+    "volume": 0.35
+  },
   "stt": {
     "name": "whisper.cpp",
     "command": [

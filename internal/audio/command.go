@@ -7,11 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strconv"
 	"sync"
 
+	"github.com/jerryfane/voice/internal/hid"
 	"github.com/jerryfane/voice/internal/proc"
 )
 
@@ -22,16 +22,17 @@ type CommandRecorder struct {
 	device       string
 	format       Format
 	frameSamples int
-	telephonyHID string
+	telephony    *hid.Telephony
 }
 
 // NewCommandRecorder builds a recorder. frameSamples controls the size of each
-// emitted buffer; 20 ms frames are a good VAD default.
-func NewCommandRecorder(argv []string, device string, f Format, frameSamples int, telephonyHID string) *CommandRecorder {
+// emitted buffer; 20 ms frames are a good VAD default. tel may be nil when the
+// input needs no telephony handshake.
+func NewCommandRecorder(argv []string, device string, f Format, frameSamples int, tel *hid.Telephony) *CommandRecorder {
 	if frameSamples <= 0 {
 		frameSamples = f.SampleRate / 50
 	}
-	return &CommandRecorder{argv: argv, device: device, format: f, frameSamples: frameSamples, telephonyHID: telephonyHID}
+	return &CommandRecorder{argv: argv, device: device, format: f, frameSamples: frameSamples, telephony: tel}
 }
 
 func (r *CommandRecorder) Format() Format { return r.format }
@@ -40,22 +41,27 @@ func (r *CommandRecorder) Describe() string {
 }
 
 // setOffHook sends the standard USB HID telephony output report used by
-// speakerphones such as the Anker PowerConf. The report is cleared when capture
-// ends. A udev rule should grant the Voice service access to the hidraw node.
+// speakerphones such as the Anker PowerConf: without it they stream digital
+// silence. The report is cleared when capture ends. A udev rule should grant
+// the Voice service access to the hidraw node.
+//
+// The write goes through hid.Telephony, which retains the whole report, so the
+// listening indicator can share report 2 without clearing the off-hook bit.
 func (r *CommandRecorder) setOffHook(on bool) error {
-	if r.telephonyHID == "" {
+	if r.telephony == nil {
 		return nil
 	}
-	f, err := os.OpenFile(r.telephonyHID, os.O_WRONLY, 0)
+	done, err := r.telephony.Set(hid.PageLED, hid.LEDOffHook, on)
 	if err != nil {
-		return fmt.Errorf("open telephony HID %s: %w (install the Voice udev rule)", r.telephonyHID, err)
+		return fmt.Errorf("set telephony off-hook=%v: %w", on, err)
 	}
-	defer f.Close()
-	v := byte(0)
-	if on {
-		v = 1 // report 2, LED Off-Hook bit
+	if done {
+		return nil
 	}
-	if _, err := f.Write([]byte{2, v, 0}); err != nil {
+	// The descriptor did not advertise the LED, which happens when sysfs is
+	// unreadable. Fall back to the standard headset report, which states its
+	// own length so the write is not short.
+	if err := r.telephony.SetReportBit(hid.StandardOffHook, on); err != nil {
 		return fmt.Errorf("set telephony off-hook=%v: %w", on, err)
 	}
 	return nil

@@ -1,0 +1,218 @@
+package hid
+
+import (
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+)
+
+// powerConfDescriptor is the HID report descriptor of the Anker PowerConf
+// (USB 291a:3301) installed on the Pi, read from
+// /sys/class/hidraw/hidraw5/device/report_descriptor (191 bytes). Report 2
+// carries the telephony LEDs Voice drives, in a two-byte payload.
+var powerConfDescriptor = []byte{
+	0x05, 0x0c, 0x09, 0x01, 0xa1, 0x01, 0x85, 0x01, 0x15, 0x00, 0x25, 0x01,
+	0x09, 0xe9, 0x09, 0xea, 0x09, 0xe2, 0x09, 0xcd, 0x09, 0xb5, 0x09, 0xb6,
+	0x09, 0xb3, 0x09, 0xb7, 0x75, 0x01, 0x95, 0x08, 0x81, 0x42, 0xc0, 0x05,
+	0x0b, 0x09, 0x05, 0xa1, 0x01, 0x85, 0x02, 0x05, 0x0b, 0x15, 0x00, 0x25,
+	0x01, 0x09, 0x20, 0x09, 0x97, 0x75, 0x01, 0x95, 0x02, 0x81, 0x23, 0x09,
+	0x2f, 0x09, 0x21, 0x09, 0x70, 0x09, 0x50, 0x75, 0x01, 0x95, 0x04, 0x81,
+	0x07, 0x09, 0x06, 0xa1, 0x02, 0x19, 0xb0, 0x29, 0xbb, 0x15, 0x00, 0x25,
+	0x0c, 0x75, 0x04, 0x95, 0x01, 0x81, 0x40, 0xc0, 0x09, 0x07, 0x15, 0x00,
+	0x25, 0x01, 0x05, 0x09, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02, 0x75, 0x01,
+	0x95, 0x05, 0x81, 0x01, 0x05, 0x08, 0x15, 0x00, 0x25, 0x01, 0x09, 0x17,
+	0x09, 0x09, 0x09, 0x18, 0x09, 0x20, 0x09, 0x21, 0x75, 0x01, 0x95, 0x05,
+	0x91, 0x22, 0x05, 0x0b, 0x15, 0x00, 0x25, 0x01, 0x09, 0x9e, 0x75, 0x01,
+	0x95, 0x01, 0x91, 0x22, 0x75, 0x01, 0x95, 0x0a, 0x91, 0x01, 0xc0, 0x06,
+	0x00, 0xff, 0x09, 0x01, 0xa1, 0x01, 0x85, 0x03, 0x09, 0x01, 0x15, 0x00,
+	0x26, 0xff, 0x00, 0x95, 0x3f, 0x75, 0x08, 0x81, 0x02, 0x09, 0x01, 0x15,
+	0x00, 0x26, 0xff, 0x00, 0x95, 0x3f, 0x75, 0x08, 0x91, 0x02, 0xc0,
+}
+
+func TestPowerConfLEDsDecodeToReportTwo(t *testing.T) {
+	outs, err := ParseOutputs(powerConfDescriptor)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, c := range []struct {
+		name  string
+		usage uint16
+		mask  byte
+	}{
+		{"off-hook", LEDOffHook, 1 << 0},
+		{"mute", LEDMute, 1 << 1},
+		{"ring", LEDRing, 1 << 2},
+		{"hold", LEDHold, 1 << 3},
+		{"mic", LEDMic, 1 << 4},
+	} {
+		bit, ok := outs.Bit(PageLED, c.usage)
+		if !ok {
+			t.Fatalf("%s LED missing from parsed outputs", c.name)
+		}
+		if bit.ReportID != 2 || bit.Byte != 0 || bit.Mask != c.mask {
+			t.Errorf("%s LED: got report %d byte %d mask %#02x, want report 2 byte 0 mask %#02x",
+				c.name, bit.ReportID, bit.Byte, bit.Mask, c.mask)
+		}
+	}
+	// Input items must not leak into the output map: the hook switch and phone
+	// mute keys are buttons the device reports, not controls Voice may drive.
+	if _, ok := outs.Bit(PageTelephony, TelHookSwitch); ok {
+		t.Error("telephony hook switch input was indexed as an output")
+	}
+	// Report 2 packs the five LEDs, the telephony ringer bit and ten padding
+	// bits, so a valid write carries two payload bytes.
+	if got := outs.PayloadBytes(2); got != 2 {
+		t.Errorf("report 2 payload = %d bytes, want 2", got)
+	}
+}
+
+func TestParseOutputsReportsDevicesWithNoOutputs(t *testing.T) {
+	// A consumer-control-only device: input items only.
+	inputOnly := []byte{
+		0x05, 0x0c, 0x09, 0x01, 0xa1, 0x01, 0x85, 0x01, 0x15, 0x00, 0x25, 0x01,
+		0x09, 0xe9, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02, 0xc0,
+	}
+	if _, err := ParseOutputs(inputOnly); err != ErrNoOutputs {
+		t.Fatalf("got %v, want ErrNoOutputs", err)
+	}
+}
+
+func TestParseOutputsRejectsTruncatedDescriptor(t *testing.T) {
+	if _, err := ParseOutputs([]byte{0x05}); err == nil {
+		t.Fatal("truncated descriptor accepted")
+	}
+}
+
+// A second writer must never clear the first writer's bits: the off-hook bit
+// keeps the PowerConf microphone un-gated for the whole session, so an
+// indicator write that dropped it would silence capture.
+func TestIndicatorWriteKeepsOffHookBit(t *testing.T) {
+	outs, err := ParseOutputs(powerConfDescriptor)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "hidraw-fake")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dev := &Telephony{path: path, outs: outs, state: map[byte][]byte{}}
+
+	if ok, err := dev.Set(PageLED, LEDOffHook, true); err != nil || !ok {
+		t.Fatalf("off-hook: ok=%v err=%v", ok, err)
+	}
+	if got := read(t, path); string(got) != string([]byte{2, 0x01, 0x00}) {
+		t.Fatalf("off-hook report = % x, want 02 01 00", got)
+	}
+	if ok, err := dev.Set(PageLED, LEDMic, true); err != nil || !ok {
+		t.Fatalf("mic LED: ok=%v err=%v", ok, err)
+	}
+	if got := read(t, path); string(got) != string([]byte{2, 0x11, 0x00}) {
+		t.Fatalf("mic LED report = % x, want 02 11 00 (off-hook retained)", got)
+	}
+	if ok, err := dev.Set(PageLED, LEDMic, false); err != nil || !ok {
+		t.Fatalf("mic LED off: ok=%v err=%v", ok, err)
+	}
+	if got := read(t, path); string(got) != string([]byte{2, 0x01, 0x00}) {
+		t.Fatalf("mic LED cleared report = % x, want 02 01 00 (off-hook retained)", got)
+	}
+}
+
+func TestSetReportsUnadvertisedUsageWithoutWriting(t *testing.T) {
+	outs, err := ParseOutputs(powerConfDescriptor)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "hidraw-fake")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dev := &Telephony{path: path, outs: outs, state: map[byte][]byte{}}
+	// Message-waiting (0x19) is not advertised by this device.
+	ok, err := dev.Set(PageLED, 0x19, true)
+	if ok || err != nil {
+		t.Fatalf("got ok=%v err=%v, want false, nil", ok, err)
+	}
+	if got := read(t, path); len(got) != 0 {
+		t.Fatalf("wrote % x for an unadvertised usage", got)
+	}
+}
+
+func read(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// A device whose descriptor cannot be read still has to be taken off hook, and
+// firmware treats a short report as a different report: an undersized off-hook
+// write leaves the microphone gated. The fallback must therefore carry the
+// standard two-byte payload even with no parsed descriptor.
+func TestFallbackOffHookWritesFullStandardReport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hidraw-fake")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dev := &Telephony{path: path, state: map[byte][]byte{}} // outs nil: descriptor unreadable
+	if dev.Has(PageLED, LEDOffHook) {
+		t.Fatal("a device with no parsed descriptor must advertise nothing")
+	}
+	if err := dev.SetReportBit(StandardOffHook, true); err != nil {
+		t.Fatalf("fallback off-hook: %v", err)
+	}
+	if got := read(t, path); string(got) != string([]byte{2, 0x01, 0x00}) {
+		t.Fatalf("fallback off-hook report = % x, want 02 01 00", got)
+	}
+	if err := dev.SetReportBit(StandardOffHook, false); err != nil {
+		t.Fatalf("fallback clear: %v", err)
+	}
+	if got := read(t, path); string(got) != string([]byte{2, 0x00, 0x00}) {
+		t.Fatalf("fallback cleared report = % x, want 02 00 00", got)
+	}
+}
+
+// The capture path and the feedback path write the same report from different
+// goroutines. Every write must be a whole, correctly sized report, and the
+// off-hook bit capture depends on must survive all of them.
+func TestConcurrentWritersNeverEmitATornReport(t *testing.T) {
+	outs, err := ParseOutputs(powerConfDescriptor)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "hidraw-fake")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dev := &Telephony{path: path, outs: outs, state: map[byte][]byte{}}
+	if ok, err := dev.Set(PageLED, LEDOffHook, true); !ok || err != nil {
+		t.Fatalf("off-hook: ok=%v err=%v", ok, err)
+	}
+
+	var wg sync.WaitGroup
+	for _, usage := range []uint16{LEDMic, LEDRing, LEDMute, LEDHold} {
+		for range 25 {
+			wg.Add(1)
+			go func(u uint16) {
+				defer wg.Done()
+				if _, err := dev.Set(PageLED, u, true); err != nil {
+					t.Error(err)
+				}
+				if _, err := dev.Set(PageLED, u, false); err != nil {
+					t.Error(err)
+				}
+			}(usage)
+		}
+	}
+	wg.Wait()
+
+	got := read(t, path)
+	if len(got) != 3 || got[0] != 2 {
+		t.Fatalf("final report = % x, want a three-byte report 2", got)
+	}
+	if got[1]&0x01 == 0 {
+		t.Fatalf("final report = % x: indicator writes cleared the off-hook bit", got)
+	}
+}

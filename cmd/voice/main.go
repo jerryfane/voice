@@ -184,6 +184,7 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 	check("text-to-speech", ok, a.TTS.Name()+": "+d)
 	ok, d = a.Brain.Available()
 	check("brain", ok, a.Brain.Name()+": "+d)
+	fmt.Printf("%-12s %-4s %s\n", "wake feedback", "INFO", a.Feedback.Describe())
 	if c.Input.TelephonyHID != "" {
 		f, e := os.OpenFile(c.Input.TelephonyHID, os.O_WRONLY, 0)
 		if e == nil {
