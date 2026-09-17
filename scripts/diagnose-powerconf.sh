@@ -19,6 +19,26 @@ set -u
 
 HIDRAW=${HIDRAW:-/dev/hidraw5}
 CARD=${CARD:-2}
+# SOUND_OK gates every step that makes AUDIBLE NOISE. The tone arms play a
+# 1 kHz sine out of a speakerphone that lives in someone's home, and running
+# them unattended meant the owner heard test tones late at night. A diagnostic
+# that wakes the household is a defect in the diagnostic, so the noisy arms do
+# not run unless someone has said it is a reasonable hour.
+SOUND_OK=${SOUND_OK:-0}
+skipped=0
+
+# quiet_hours reports true when the noisy arms must not run, and says so where
+# the result is read, so a skipped arm is never mistaken for a measured one.
+quiet_hours() {
+	if [ "$SOUND_OK" = "1" ]; then
+		return 1
+	fi
+	skipped=$((skipped + 1))
+	printf '    SKIPPED, would play an audible tone: %s\n' "$1"
+	printf '    Re-run with SOUND_OK=1 when making noise is acceptable.\n'
+	return 0
+}
+
 failures=0
 # A capture that never ran is not a capture that recorded silence. Every
 # failure increments this, the run ends with an explicit verdict, and the exit
@@ -355,7 +375,11 @@ TONE
 	rm -f "$tone"
 	return "$status"
 }
-acoustic_probe || note_failure "acoustic self-test (tone through the device speaker)"
+if quiet_hours "the 1 kHz acoustic self-test"; then
+	:
+else
+	acoustic_probe || note_failure "acoustic self-test (tone through the device speaker)"
+fi
 echo "HOW TO READ THE SUBSTREAM LINES: state RUNNING with hw_ptr advancing on"
 echo "the PLAYBACK substream proves frames reached the device, so a capture peak"
 echo "of zero is then a real microphone-path result rather than an untested"
@@ -488,7 +512,11 @@ offhook_tone_capture() {
 	rm -f "$tone"
 	return "$status"
 }
-offhook_tone_capture || note_failure "off-hook held with tone playing"
+if quiet_hours "the decisive off-hook-plus-tone arm"; then
+	:
+else
+	offhook_tone_capture || note_failure "off-hook held with tone playing"
+fi
 if [ -n "${LOOPDEV:-}" ]; then
 	capture 3 "loopback control AFTER the decisive arm" "$LOOPDEV" \
 		|| note_failure "loopback control after the decisive arm"
@@ -629,8 +657,14 @@ if [ "$DRY_RUN" = "1" ]; then
 	echo "hardware and produced either a measurement or a named failure, so the"
 	echo "instrument is fit to put in front of a person."
 fi
+if [ "$skipped" -gt 0 ]; then
+	printf '=== %s step(s) were SKIPPED because they make audible noise.\n' "$skipped"
+	echo "Those steps produced no measurement and must not be quoted as results."
+	echo "The decisive off-hook-plus-tone arm is among them unless SOUND_OK=1,"
+	echo "so #9 stays open until it runs at an hour when noise is acceptable."
+fi
 if [ "$failures" -eq 0 ]; then
-	echo "=== every capture step produced a measurement (peak and frame count)."
+	echo "=== every capture step that RAN produced a measurement (peak, frames, bytes)."
 else
 	printf '=== %s capture step(s) PRODUCED NO MEASUREMENT.\n' "$failures"
 	echo "Those steps say nothing about what the microphone heard. Do not quote"
