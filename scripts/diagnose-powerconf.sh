@@ -132,7 +132,12 @@ if not frames:
 samples = array.array("h")
 samples.frombytes(frames)
 peak = max(abs(s) for s in samples)
-print(f"    {label}: peak={peak} frames={len(samples)} device={dev}")
+import os
+
+print(
+    f"    {label}: peak={peak} frames={len(samples)} "
+    f"bytes={os.path.getsize(path)} device={dev}"
+)
 PY
 	status=$?
 	rm -f "$wav"
@@ -293,6 +298,66 @@ echo "A peak that stays at zero WHILE the tone is audible means the capture path
 echo "is genuinely not carrying audio, and that conclusion no longer depends on"
 echo "anyone speaking. If the tone is inaudible, playback is the broken half and"
 echo "the microphone question is still open - say which you heard."
+
+echo
+echo "=== phase 1d: capture with OFF-HOOK HELD - the only arm that can answer #9"
+echo "The coordinator found the flaw in the two arms above, and it is decisive:"
+echo "with the service ACTIVE it holds the capture device, so there is no"
+echo "measurement; with the service STOPPED nothing holds the telephony"
+echo "off-hook bit, and this repo's own issue #8 work established that capture"
+echo "holds off-hook for the whole session because otherwise the PowerConf"
+echo "streams digital silence. So 'service stopped' is exactly the condition in"
+echo "which a WORKING microphone is expected to return zeros. Both arms were"
+echo "uninformative by construction, and peak 0 from either says nothing about"
+echo "the hardware."
+echo "This arm removes both confounds: the service stays stopped so nothing"
+echo "contends, and the probe itself holds the off-hook report open on the"
+echo "hidraw node for the whole capture."
+offhook_capture() {
+	# The descriptor is held OPEN across the capture. Writing the report and
+	# closing - which is what hid() does - is not the same thing: the device
+	# can drop back to idle the moment the owner of the node goes away, which
+	# is the difference between this arm and the held-descriptor runs that
+	# predate the frame-count fix and are void.
+	if ! exec 9>"$HIDRAW"; then
+		printf '    SETUP FAILED, cannot open %s for the held-open report\n' "$HIDRAW"
+		return 1
+	fi
+	if ! printf '\x02\x01\x00' >&9; then
+		printf '    SETUP FAILED, cannot write the off-hook report to %s\n' "$HIDRAW"
+		exec 9>&-
+		return 1
+	fi
+	printf '    off-hook report written and descriptor HELD OPEN (fd 9)\n'
+	sleep 1
+	capture 3 "capture with off-hook HELD (loopback control follows)"
+	status=$?
+	# Prove the descriptor was still open at the end rather than assuming it.
+	if printf '\x02\x01\x00' >&9 2>/dev/null; then
+		printf '    off-hook descriptor still writable AFTER the capture: held\n'
+	else
+		printf '    WARNING: off-hook descriptor was NOT writable after the capture,\n'
+		printf '    so this arm did not hold what it claims and proves nothing\n'
+		status=1
+	fi
+	exec 9>&-
+	return "$status"
+}
+offhook_capture || note_failure "capture with off-hook held"
+# The loopback control answers the one question this arm cannot: whether the
+# reading code can report a nonzero peak at all on this host, right now.
+if [ -n "${LOOPDEV:-}" ]; then
+	capture 3 "loopback control AFTER the off-hook arm" "$LOOPDEV" \
+		|| note_failure "loopback control after the off-hook arm"
+else
+	echo "    (set LOOPDEV to run the loopback control beside this arm)"
+fi
+echo "HOW TO READ THIS ARM, and it is the only arm whose result is evidence:"
+echo "nonzero peak means capture WORKS and every historical zero is explained"
+echo "by method rather than hardware. Real frames at peak zero, WITH the"
+echo "off-hook descriptor proven held either side and the loopback control"
+echo "nonzero, is the first genuine evidence of a hardware or firmware mute -"
+echo "and only then is the owner's mute-button press worth his time."
 
 echo
 echo "=== phase 2: live wake attempt"
