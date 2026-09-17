@@ -26,7 +26,14 @@ if ! command -v whisper-cli >/dev/null 2>&1; then
   src="$CACHE/whisper.cpp-$WHISPER_VERSION"
   rm -rf "$src"
   git clone --depth 1 --branch "$WHISPER_VERSION" https://github.com/ggml-org/whisper.cpp.git "$src"
-  cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+  # BUILD_SHARED_LIBS=OFF is load-bearing: whisper.cpp defaults to shared
+  # libraries, and installing only the binary leaves it looking for
+  # libwhisper.so.1 in loader paths it was never installed into. That shipped
+  # a speech engine that could not start, and because the failure happens at
+  # exec time the service logged it once per utterance and transcribed
+  # nothing. Linking statically means there is one file to install.
+  cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
   cmake --build "$src/build" --config Release -j "$(nproc)"
   install -m 0755 "$src/build/bin/whisper-cli" "$BIN/whisper-cli"
 fi
@@ -54,7 +61,50 @@ for ext in onnx onnx.json; do
   fi
 done
 
+# Verify by running each engine and checking its exit status. The previous
+# version piped --help into sed, so the pipeline succeeded whatever the engine
+# did: an engine that could not load its own libraries reported as installed.
+check_engine() {
+  name=$1
+  path=$2
+  # Capture the status explicitly. `if out=$(...); then ... fi` followed by
+  # $? reports the status of the if-compound, which is 0 when neither branch
+  # body ran - so the previous version printed "(exit 0)" for every failure,
+  # including a 127. An unfailable check is what this function exists to
+  # replace; getting its own diagnostics wrong was the same mistake one layer
+  # in.
+  status=0
+  out=$("$path" --help 2>&1) || status=$?
+
+  # Only a loader failure is fatal. Engines disagree about the exit status of
+  # --help, so a non-zero exit with real output is not evidence of anything -
+  # the same rule the Go-side probe applies, and it has to match or the two
+  # checks disagree about what a working engine looks like.
+  case "$out" in
+    *"error while loading shared libraries"*)
+      printf '%s cannot start: %s\n' "$name" "$(printf '%s' "$out" | sed -n '1p')" >&2
+      printf 'It was built against shared libraries that are not installed.\n' >&2
+      return 1
+      ;;
+  esac
+  if [ "$status" -eq 127 ]; then
+    printf '%s cannot start (exit 127):\n%s\n' "$name" "$out" >&2
+    return 1
+  fi
+  if [ -z "$out" ] && [ "$status" -ne 0 ]; then
+    printf '%s failed to run (exit %s) with no output\n' "$name" "$status" >&2
+    return 1
+  fi
+  printf '%s: %s\n' "$name" "$(printf '%s' "$out" | sed -n '1p')"
+  return 0
+}
+
 echo "Speech engines installed:"
-"$BIN/whisper-cli" --help 2>&1 | sed -n '1p'
-"$BIN/piper" --help 2>&1 | sed -n '1p'
+failed=0
+check_engine whisper-cli "$BIN/whisper-cli" || failed=1
+check_engine piper "$BIN/piper" || failed=1
+if [ "$failed" -ne 0 ]; then
+  echo "Speech setup did not produce working engines; Voice would log a failure per utterance and transcribe nothing." >&2
+  exit 1
+fi
 echo "Models: $MODELS"

@@ -93,6 +93,13 @@ func (a *Assistant) Run(ctx context.Context) error {
 	// Run exits: cancellation, shutdown or a spoken "turn off".
 	a.Feedback.Restore()
 	defer a.Feedback.Restore()
+	// Each stage of the pipeline logs its own outcome. A device that hears
+	// nothing and a device whose transcriber cannot start produced the
+	// identical journal - one log line after a *successful* transcription and
+	// nothing before it - which is how a broken speech engine masqueraded as a
+	// dead microphone for a whole boot. Silence should now name the stage that
+	// stopped: capture, segment, transcribe, or wake.
+	a.logf("stage=capture state=starting device=%q", a.Recorder.Describe())
 	pcm, recErr := a.Recorder.Stream(ctx)
 	utterances := a.VAD.Run(ctx, pcm, a.Recorder.Format())
 	var fired <-chan timer.Timer
@@ -116,6 +123,7 @@ func (a *Assistant) Run(ctx context.Context) error {
 			return nil
 		case err, ok := <-recErr:
 			if ok && err != nil {
+				a.logf("stage=capture state=failed err=%v", err)
 				return err
 			}
 			recErr = nil
@@ -123,22 +131,29 @@ func (a *Assistant) Run(ctx context.Context) error {
 			a.announceFired(ctx, t)
 		case u, ok := <-utterances:
 			if !ok {
+				a.logf("stage=segment state=closed")
 				return nil
 			}
+			ms := len(u.PCM) * 1000 / max(u.Format.SampleRate, 1)
+			a.logf("stage=segment state=ok samples=%d ms=%d peak=%.4f truncated=%v",
+				len(u.PCM), ms, u.Peak, u.Truncated)
 			text, err := a.STT.Transcribe(ctx, u.PCM, u.Format)
 			if err != nil {
-				a.logf("transcribe: %v", err)
+				a.logf("stage=transcribe state=failed err=%v", err)
 				continue
 			}
 			text = strings.TrimSpace(text)
 			if text == "" {
+				a.logf("stage=transcribe state=empty peak=%.4f", u.Peak)
 				continue
 			}
-			a.logf("heard=%q peak=%.4f", text, u.Peak)
+			a.logf("stage=transcribe state=ok heard=%q peak=%.4f", text, u.Peak)
 			matched, command, _ := wake.Match(text, a.WakePhrases, a.WakeFuzz)
 			if !matched {
+				a.logf("stage=wake state=nomatch")
 				continue
 			}
+			a.logf("stage=wake state=matched command=%q", command)
 			if stop := a.accepted(ctx, command); stop {
 				return nil
 			}

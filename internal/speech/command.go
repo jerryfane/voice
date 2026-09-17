@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -51,8 +52,54 @@ func (t *CommandTranscriber) Available() (bool, string) {
 			return false, fmt.Sprintf("model %s: %v", t.Model, err)
 		}
 	}
-	return true, p
+	return runnable(p)
 }
+
+// runnable reports whether an engine binary can actually start. Checking that
+// a file exists on PATH is not the same question: a binary built against
+// shared libraries that were never installed passes every static check and
+// then fails at exec time, once per utterance, transcribing nothing. That
+// shipped, and `voice doctor` called it OK.
+//
+// Only a loader failure is treated as fatal. Engines disagree about the exit
+// status of --help, so a non-zero exit with sensible output is not evidence of
+// anything.
+func runnable(path string) (bool, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "--help")
+	// The context kills the direct child only. A launcher that backgrounds a
+	// descendant and exits leaves that descendant holding the output pipe, and
+	// CombinedOutput then blocks for as long as the grandchild lives - five
+	// seconds of timeout became thirty in the reviewer's reproduction. WaitDelay
+	// forces the pipes closed shortly after the context is done, so the probe
+	// returns on time whatever the engine spawned.
+	cmd.WaitDelay = time.Second
+	out, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(string(out))
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return false, path + ": did not respond to --help within 5s"
+	}
+	if strings.Contains(text, "error while loading shared libraries") {
+		return false, path + ": " + firstLine(text)
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 127 {
+		return false, fmt.Sprintf("%s: exit 127, cannot start: %s", path, firstLine(text))
+	}
+	if err != nil && text == "" {
+		return false, fmt.Sprintf("%s: %v", path, err)
+	}
+	return true, path
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
 func (t *CommandTranscriber) Transcribe(ctx context.Context, pcm []int16, f audio.Format) (string, error) {
 	tmp, err := os.CreateTemp("", "voice-*.wav")
 	if err != nil {
@@ -116,7 +163,7 @@ func (s *CommandSynthesizer) Available() (bool, string) {
 			return false, fmt.Sprintf("model %s: %v", s.Model, err)
 		}
 	}
-	return true, p
+	return runnable(p)
 }
 func (s *CommandSynthesizer) Synthesize(ctx context.Context, text string) ([]byte, error) {
 	out, err := os.CreateTemp("", "voice-tts-*.wav")
