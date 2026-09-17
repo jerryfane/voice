@@ -96,8 +96,9 @@ Hey Voice
 Voice only calls the agent when a transcript starts with the wake phrase and
 includes the request in the same utterance. Ambient speech, noise segments, and
 standalone wake phrases never reach the LLM. A standalone wake phrase is still
-*accepted*: it lights the indicator, plays the acknowledgement sound, and asks
-for the request, all locally. Only the model call is withheld.
+*accepted*: it lights the indicator if one is configured, plays the
+acknowledgement sound, and asks for the request, all locally. Only the model
+call is withheld.
 
 Say `Hey Voice, turn off` to stop the listener without an LLM call; run
 `voice on` to start it again.
