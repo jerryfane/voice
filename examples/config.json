@@ -1,0 +1,96 @@
+{
+  "input": {
+    "device": "default",
+    "command": [
+      "arecord",
+      "-D",
+      "{device}",
+      "-q",
+      "-f",
+      "S16_LE",
+      "-r",
+      "{rate}",
+      "-c",
+      "{channels}",
+      "-t",
+      "raw",
+      "-"
+    ],
+    "sample_rate": 16000
+  },
+  "output": {
+    "device": "default",
+    "command": [
+      "aplay",
+      "-D",
+      "{device}",
+      "-q",
+      "-"
+    ]
+  },
+  "wake": {
+    "phrases": [
+      "hey herdr",
+      "hey herder",
+      "hey herd",
+      "a herder",
+      "hey hurdr",
+      "hey hurder"
+    ],
+    "fuzz": 0.25,
+    "follow_up": "8s",
+    "detector": "stt",
+    "vad": {
+      "threshold": 0,
+      "min_speech": "250ms",
+      "silence": "700ms",
+      "max_utterance": "12s",
+      "pre_roll": "300ms"
+    }
+  },
+  "stt": {
+    "name": "whisper.cpp",
+    "command": [
+      "whisper-cli",
+      "-m",
+      "{model}",
+      "-f",
+      "{file}",
+      "--no-timestamps",
+      "--no-prints",
+      "-t",
+      "3",
+      "-l",
+      "en"
+    ],
+    "model": "models/ggml-tiny.en.bin",
+    "timeout": "30s"
+  },
+  "tts": {
+    "name": "piper",
+    "command": [
+      "piper",
+      "--model",
+      "{model}",
+      "--output_file",
+      "-"
+    ],
+    "model": "models/en_US-amy-medium.onnx",
+    "timeout": "30s"
+  },
+  "brain": {
+    "mode": "plan",
+    "command": [
+      "omp",
+      "-p",
+      "--no-session",
+      "--no-tools",
+      "{prompt}"
+    ],
+    "timeout": "1m0s",
+    "persona": "You are herdr, a terse voice assistant. Answer in one or two spoken sentences. Never use markdown, lists, or emoji: every word you produce is read aloud.",
+    "rules": true
+  },
+  "lights": [],
+  "tvs": []
+}
