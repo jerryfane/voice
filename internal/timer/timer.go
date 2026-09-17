@@ -60,7 +60,9 @@ func (s Store) Load() ([]Timer, error) {
 }
 
 // Save writes the timers atomically: a truncated write during a power cut
-// would lose every timer, so the file is replaced by rename.
+// would lose every timer, so the file is written, synced, and put in place by
+// rename, and the directory entry is synced too - a rename that is not durable
+// leaves the old set behind after a power cut.
 func (s Store) Save(ts []Timer) error {
 	if s.Path == "" {
 		return nil
@@ -91,7 +93,15 @@ func (s Store) Save(ts []Timer) error {
 	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), s.Path)
+	if err := os.Rename(tmp.Name(), s.Path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(s.Path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 // Scheduler owns the live timer set. It is safe for concurrent use: the
@@ -164,17 +174,19 @@ func sortTimers(ts []Timer) {
 // the same place it speaks everything else.
 func (s *Scheduler) Fired() <-chan Timer { return s.fired }
 
-// Add schedules a timer and persists the set.
+// Add schedules a timer and persists the set. Persistence happens under the
+// same lock as the mutation, so two writers cannot reorder on the way to disk
+// and leave the file describing a set that no longer exists.
 func (s *Scheduler) Add(d time.Duration, label string) (Timer, error) {
 	s.mu.Lock()
 	t := Timer{ID: s.nextID, Label: label, Duration: d, Deadline: s.now().Add(d)}
 	s.nextID++
 	s.timers = append(s.timers, t)
 	sortTimers(s.timers)
-	snapshot := append([]Timer(nil), s.timers...)
+	err := s.store.Save(s.timers)
 	s.mu.Unlock()
 	s.notify()
-	return t, s.store.Save(snapshot)
+	return t, err
 }
 
 // List returns the live timers, earliest first.
@@ -197,13 +209,16 @@ func (s *Scheduler) Cancel(match func(Timer) bool) ([]Timer, error) {
 		kept = append(kept, t)
 	}
 	s.timers = kept
-	snapshot := append([]Timer(nil), s.timers...)
+	var err error
+	if len(removed) > 0 {
+		err = s.store.Save(s.timers)
+	}
 	s.mu.Unlock()
 	if len(removed) == 0 {
 		return nil, nil
 	}
 	s.notify()
-	return removed, s.store.Save(snapshot)
+	return removed, err
 }
 
 func (s *Scheduler) notify() {
@@ -262,12 +277,15 @@ func (s *Scheduler) emitDue() {
 		kept = append(kept, t)
 	}
 	s.timers = kept
-	snapshot := append([]Timer(nil), s.timers...)
+	if len(due) > 0 {
+		// Persisting before the send means a crash between firing and
+		// announcing loses the announcement, not the state.
+		_ = s.store.Save(s.timers)
+	}
 	s.mu.Unlock()
 	if len(due) == 0 {
 		return
 	}
-	_ = s.store.Save(snapshot)
 	for _, t := range due {
 		s.fired <- t
 	}

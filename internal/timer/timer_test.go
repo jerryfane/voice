@@ -294,3 +294,48 @@ func TestSaveReplacesFileAtomically(t *testing.T) {
 		t.Errorf("%d files left in the state directory, want only timers.json", len(entries))
 	}
 }
+
+// Persisted state must always describe the live set: a concurrent add and
+// cancel storm must not leave the file describing timers that no longer exist,
+// or missing ones that do.
+func TestPersistedStateMatchesLiveSetUnderConcurrency(t *testing.T) {
+	c := newClock()
+	path := filepath.Join(t.TempDir(), "timers.json")
+	s, _, _ := scheduler(t, path, c)
+
+	var wg sync.WaitGroup
+	for i := range 40 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			d := time.Duration(i+1) * time.Minute
+			if _, err := s.Add(d, Spoken(d)); err != nil {
+				t.Error(err)
+			}
+			if i%2 == 0 {
+				if _, err := s.Cancel(func(x Timer) bool { return x.Duration == d }); err != nil {
+					t.Error(err)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	live := s.List()
+	persisted, err := Store{Path: path}.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(persisted) != len(live) {
+		t.Fatalf("persisted %d timers, live set has %d", len(persisted), len(live))
+	}
+	liveIDs := map[int]bool{}
+	for _, x := range live {
+		liveIDs[x.ID] = true
+	}
+	for _, p := range persisted {
+		if !liveIDs[p.ID] {
+			t.Errorf("persisted timer %d (%v) is not live", p.ID, p.Duration)
+		}
+	}
+}
