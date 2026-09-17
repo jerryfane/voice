@@ -3,6 +3,7 @@ package speech
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,8 +49,7 @@ func (t *CommandTranscriber) Transcribe(ctx context.Context, pcm []int16, f audi
 	name := tmp.Name()
 	defer os.Remove(name)
 	if _, err = tmp.Write(audio.EncodeWAV(pcm, f)); err != nil {
-		tmp.Close()
-		return "", err
+		return "", errors.Join(err, tmp.Close())
 	}
 	if err = tmp.Close(); err != nil {
 		return "", err
@@ -100,7 +100,11 @@ func (s *CommandSynthesizer) Synthesize(ctx context.Context, text string) ([]byt
 		return nil, err
 	}
 	outName := out.Name()
-	out.Close()
+	// The engine writes this file itself, so Voice only needed the name; a
+	// failure to close the empty placeholder still means a leaked descriptor.
+	if err := out.Close(); err != nil {
+		return nil, err
+	}
 	defer os.Remove(outName)
 	vars := map[string]string{"model": s.Model, "text": text, "out": outName}
 	argv := proc.Expand(s.Argv, vars)

@@ -196,7 +196,7 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 	if c.Input.TelephonyHID != "" {
 		f, e := os.OpenFile(c.Input.TelephonyHID, os.O_WRONLY, 0)
 		if e == nil {
-			f.Close()
+			e = f.Close()
 		}
 		check("telephony HID", e == nil, c.Input.TelephonyHID+": "+errText(e))
 	}

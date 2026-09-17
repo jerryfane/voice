@@ -43,7 +43,11 @@ func timerAssistant(t *testing.T, texts ...string) (*Assistant, *recordingSynthe
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("closing the timer store: %v", err)
+		}
+	})
 	sched, missed, err := timer.New(store, faults.Discard)
 	if err != nil {
 		t.Fatal(err)

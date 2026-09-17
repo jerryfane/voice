@@ -84,7 +84,11 @@ func store(t *testing.T, path string) *Store {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("closing the store: %v", err)
+		}
+	})
 	return st
 }
 

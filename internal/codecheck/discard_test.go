@@ -85,31 +85,104 @@ type offence struct {
 	line int
 }
 
-// discards finds assignments whose left-hand side is entirely blank and whose
-// right-hand side calls something.
+// mustHandle names calls whose result is an error worth handling even when
+// the call is written as a bare statement. A syntactic check cannot know a
+// call's return type without type information, and type-checking the module's
+// dependency tree would cost more than this guard is worth, so the list is
+// explicit: these are the operations whose silent failure has actually cost
+// something in this repository.
+var mustHandle = map[string]bool{
+	"Close": true, "Save": true, "Sync": true, "Flush": true,
+	"Write": true, "SetDeadline": true, "Remove": true, "Chmod": true,
+	"Rename": true, "Speak": true, "Exec": true,
+}
+
+// discards finds three shapes: an assignment whose left side is entirely
+// blank, a short declaration that drops a value into a blank, and a bare call
+// statement to something whose error matters.
 func discards(fset *token.FileSet, file *ast.File, justified map[int]bool) []offence {
 	var found []offence
-	ast.Inspect(file, func(n ast.Node) bool {
-		assign, ok := n.(*ast.AssignStmt)
-		if !ok || assign.Tok != token.ASSIGN {
-			return true
+	report := func(pos token.Position) {
+		if !justified[pos.Line] {
+			found = append(found, offence{file: pos.Filename, line: pos.Line})
 		}
-		for _, lhs := range assign.Lhs {
-			if ident, ok := lhs.(*ast.Ident); !ok || ident.Name != "_" {
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch stmt := n.(type) {
+		case *ast.AssignStmt:
+			if !callsSomething(stmt.Rhs) {
 				return true
 			}
+			blanks, named := 0, 0
+			for _, lhs := range stmt.Lhs {
+				if ident, ok := lhs.(*ast.Ident); ok && ident.Name == "_" {
+					blanks++
+					continue
+				}
+				named++
+			}
+			switch {
+			case blanks == 0:
+				return true
+			case stmt.Tok == token.ASSIGN && named == 0:
+				// `_ = f()` and `_, _ = f()`: every result thrown away.
+			case blanks > 0 && trailingBlank(stmt.Lhs) && callsMustHandle(stmt.Rhs):
+				// `v, _ := save()` drops the error just as quietly. Only the
+				// trailing position is checked, since that is where Go puts
+				// an error, and only for the named calls - without type
+				// information a blank could be discarding a bool.
+			default:
+				return true
+			}
+			report(fset.Position(stmt.Pos()))
+		case *ast.ExprStmt:
+			// A bare call: nothing is assigned, so any result is dropped.
+			call, ok := stmt.X.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || !mustHandle[sel.Sel.Name] {
+				return true
+			}
+			report(fset.Position(stmt.Pos()))
 		}
-		if !callsSomething(assign.Rhs) {
-			return true
-		}
-		pos := fset.Position(assign.Pos())
-		if justified[pos.Line] {
-			return true
-		}
-		found = append(found, offence{file: pos.Filename, line: pos.Line})
 		return true
 	})
 	return found
+}
+
+// trailingBlank reports whether the last assigned name is blank, which is
+// where a Go call puts its error.
+func trailingBlank(lhs []ast.Expr) bool {
+	if len(lhs) == 0 {
+		return false
+	}
+	ident, ok := lhs[len(lhs)-1].(*ast.Ident)
+	return ok && ident.Name == "_"
+}
+
+// callsMustHandle reports whether any call in these expressions is one of the
+// named operations whose failure matters.
+func callsMustHandle(exprs []ast.Expr) bool {
+	for _, e := range exprs {
+		named := false
+		ast.Inspect(e, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && mustHandle[sel.Sel.Name] {
+				named = true
+				return false
+			}
+			return true
+		})
+		if named {
+			return true
+		}
+	}
+	return false
 }
 
 func callsSomething(exprs []ast.Expr) bool {
@@ -170,4 +243,40 @@ func moduleRoot(t *testing.T) string {
 		}
 		dir = parent
 	}
+}
+
+// The guard must catch the shapes a reviewer found it blind to, so those
+// shapes are exercised against the checker itself rather than trusted to a
+// reading of it.
+func TestCheckerCatchesEveryDiscardShape(t *testing.T) {
+	for name, src := range map[string]string{
+		"blank assign":          "package p\nfunc f() error { return nil }\nfunc g() { _ = f() }\n",
+		"two blanks":            "package p\nfunc f() (int, error) { return 0, nil }\nfunc g() { _, _ = f() }\n",
+		"bare call":             "package p\nimport \"os\"\nfunc g(f *os.File) { f.Close() }\n",
+		"trailing blank define": "package p\nimport \"os\"\nfunc g(f *os.File) { x, _ := f.Write(nil); _ = x }\n",
+	} {
+		if got := offencesIn(t, name+".go", src); got != 1 {
+			t.Errorf("%s: checker found %d offences, want 1", name, got)
+		}
+	}
+	for name, src := range map[string]string{
+		"justified":      "package p\nfunc f() error { return nil }\nfunc g() {\n\t// discard: nothing can fail\n\t_ = f()\n}\n",
+		"handled":        "package p\nfunc f() error { return nil }\nfunc g() error { return f() }\n",
+		"void bare call": "package p\nimport \"fmt\"\nfunc g() { fmt.Print(\"x\") }\n",
+		"bool discarded": "package p\nfunc f() (int, bool) { return 0, true }\nfunc g() { v, _ := f(); _ = v }\n",
+	} {
+		if got := offencesIn(t, name+".go", src); got != 0 {
+			t.Errorf("%s: checker found %d offences, want 0", name, got)
+		}
+	}
+}
+
+func offencesIn(t *testing.T, name, src string) int {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, name, src, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	return len(discards(fset, file, justifiedLines(fset, file)))
 }

@@ -60,8 +60,7 @@ func Open(path string) (*Store, error) {
 	// its own lock around every save.
 	db.SetMaxOpenConns(1)
 	if err := prepare(db, path); err != nil {
-		db.Close()
-		return nil, err
+		return nil, errors.Join(err, db.Close())
 	}
 	return &Store{Path: path, db: db}, nil
 }
