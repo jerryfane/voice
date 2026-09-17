@@ -24,13 +24,16 @@ jobs:
       # never enters go.mod and never reaches the shipped binary, which keeps
       # the single static CGO_ENABLED=0 build intact.
       #
-      # -blank is on and there is no PROJECT exclude file, on purpose. Note
-      # what that does not mean: errcheck ships DefaultExcludedSymbols, so
-      # fmt printing and similar are still excluded by the tool itself.
-      # Running with -excludeonly (nothing excluded at all) adds only
-      # fmt.Print/Fprint calls writing to stdout and stderr in cmd/voice,
-      # whose errors a CLI cannot act on, so the bundled list is accepted and
-      # named here rather than described as "nothing excluded".
+      # -blank and -excludeonly, with an explicit checked-in exclude file.
+      # -excludeonly matters: without it errcheck merges about nineteen
+      # bundled DefaultExcludedSymbols, so an earlier version of this job ran
+      # against an invisible type-level exclude list while its own comment
+      # claimed nothing was hidden. That is the false-comfort shape this
+      # invariant exists to remove, and the bundled set silences the
+      # fmt.Print family, where a broken pipe is a genuine failure.
+      #
+      # .errcheck-excludes is therefore the complete exclusion set, carries a
+      # reason per entry, and contains only provably infallible symbols.
       #
       # Four rounds of
       # review each enumerated a shape or a name, and the next real defect
@@ -45,7 +48,7 @@ jobs:
       # Tests are skipped here; internal/codecheck covers the test tree, and
       # its comment stays honest that it is name-scoped rather than complete.
       - name: Unhandled errors (errcheck, CI only)
-        run: go run github.com/kisielk/errcheck@v1.9.0 -ignoretests -blank ./...
+        run: go run github.com/kisielk/errcheck@v1.9.0 -ignoretests -blank -excludeonly -exclude .errcheck-excludes ./...
       - name: Static binaries
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/voice-amd64 ./cmd/voice

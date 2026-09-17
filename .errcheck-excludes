@@ -1,0 +1,22 @@
+# Symbols errcheck may ignore, with the reason each cannot fail. Passed with
+# -excludeonly, so THIS FILE IS THE COMPLETE EXCLUSION SET: errcheck's own
+# ~19 bundled DefaultExcludedSymbols do not apply. That is the point - a
+# bundled list nobody can see is the false comfort this invariant exists to
+# remove, and it silenced the fmt.Print family where a broken pipe is a real
+# failure.
+#
+# Only provably infallible symbols belong here. If a symbol can fail on any
+# reachable path, handle it instead of listing it.
+
+# (*bytes.Buffer).Write never fails: it grows the buffer or panics on
+# allocation failure, which is fatal either way.
+(*bytes.Buffer).Write
+(*bytes.Buffer).WriteByte
+(*bytes.Buffer).WriteString
+
+# (*strings.Builder) is documented never to return an error from its Write
+# methods, for the same reason: it grows or it panics.
+(*strings.Builder).Write
+(*strings.Builder).WriteByte
+(*strings.Builder).WriteRune
+(*strings.Builder).WriteString
