@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/jerryfane/voice/internal/faults"
 	"github.com/jerryfane/voice/internal/hid"
 	"github.com/jerryfane/voice/internal/proc"
 )
@@ -23,16 +24,19 @@ type CommandRecorder struct {
 	format       Format
 	frameSamples int
 	telephony    *hid.Telephony
+	faults       faults.Reporter
 }
 
 // NewCommandRecorder builds a recorder. frameSamples controls the size of each
 // emitted buffer; 20 ms frames are a good VAD default. tel may be nil when the
-// input needs no telephony handshake.
-func NewCommandRecorder(argv []string, device string, f Format, frameSamples int, tel *hid.Telephony) *CommandRecorder {
+// input needs no telephony handshake. report receives failures that happen
+// after Stream has returned - notably clearing the off-hook report when
+// capture ends, which has no caller left to tell.
+func NewCommandRecorder(argv []string, device string, f Format, frameSamples int, tel *hid.Telephony, report faults.Reporter) *CommandRecorder {
 	if frameSamples <= 0 {
 		frameSamples = f.SampleRate / 50
 	}
-	return &CommandRecorder{argv: argv, device: device, format: f, frameSamples: frameSamples, telephony: tel}
+	return &CommandRecorder{argv: argv, device: device, format: f, frameSamples: frameSamples, telephony: tel, faults: report}
 }
 
 func (r *CommandRecorder) Format() Format { return r.format }
@@ -81,7 +85,14 @@ func (r *CommandRecorder) Stream(ctx context.Context) (<-chan []int16, <-chan er
 			errCh <- err
 			return
 		}
-		defer func() { _ = r.setOffHook(false) }()
+		// Clearing off-hook happens as capture unwinds, when nothing is left
+		// to return an error to: a silent failure here leaves the
+		// speakerphone off hook with its light on.
+		defer func() {
+			if err := r.setOffHook(false); err != nil && r.faults != nil {
+				r.faults.Report(err)
+			}
+		}()
 
 		vars := map[string]string{
 			"device": r.device, "rate": strconv.Itoa(r.format.SampleRate),
@@ -189,21 +200,25 @@ func (p *CommandPlayer) Stop() error {
 func EncodeWAV(pcm []int16, f Format) []byte {
 	var b bytes.Buffer
 	dataLen := len(pcm) * 2
-	_ = binary.Write(&b, binary.LittleEndian, [4]byte{'R', 'I', 'F', 'F'})
-	_ = binary.Write(&b, binary.LittleEndian, uint32(36+dataLen))
-	_ = binary.Write(&b, binary.LittleEndian, [4]byte{'W', 'A', 'V', 'E'})
-	_ = binary.Write(&b, binary.LittleEndian, [4]byte{'f', 'm', 't', ' '})
-	_ = binary.Write(&b, binary.LittleEndian, uint32(16))
-	_ = binary.Write(&b, binary.LittleEndian, uint16(1))
-	_ = binary.Write(&b, binary.LittleEndian, uint16(f.Channels))
-	_ = binary.Write(&b, binary.LittleEndian, uint32(f.SampleRate))
-	_ = binary.Write(&b, binary.LittleEndian, uint32(f.SampleRate*f.Channels*2))
-	_ = binary.Write(&b, binary.LittleEndian, uint16(f.Channels*2))
-	_ = binary.Write(&b, binary.LittleEndian, uint16(16))
-	_ = binary.Write(&b, binary.LittleEndian, [4]byte{'d', 'a', 't', 'a'})
-	_ = binary.Write(&b, binary.LittleEndian, uint32(dataLen))
+	// discard: bytes.Buffer never fails a write, so there is no error here to
+	// report or return; one helper keeps that judgement in one place instead
+	// of repeating it on every field below.
+	put := func(v any) { _ = binary.Write(&b, binary.LittleEndian, v) }
+	put([4]byte{'R', 'I', 'F', 'F'})
+	put(uint32(36 + dataLen))
+	put([4]byte{'W', 'A', 'V', 'E'})
+	put([4]byte{'f', 'm', 't', ' '})
+	put(uint32(16))
+	put(uint16(1))
+	put(uint16(f.Channels))
+	put(uint32(f.SampleRate))
+	put(uint32(f.SampleRate * f.Channels * 2))
+	put(uint16(f.Channels * 2))
+	put(uint16(16))
+	put([4]byte{'d', 'a', 't', 'a'})
+	put(uint32(dataLen))
 	for _, s := range pcm {
-		_ = binary.Write(&b, binary.LittleEndian, s)
+		put(s)
 	}
 	return b.Bytes()
 }

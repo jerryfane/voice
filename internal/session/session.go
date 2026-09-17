@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/jerryfane/voice/internal/audio"
 	"github.com/jerryfane/voice/internal/brain"
 	"github.com/jerryfane/voice/internal/device"
 	"github.com/jerryfane/voice/internal/feedback"
 	"github.com/jerryfane/voice/internal/speech"
+	"github.com/jerryfane/voice/internal/timer"
 	"github.com/jerryfane/voice/internal/vad"
 	"github.com/jerryfane/voice/internal/wake"
 )
@@ -28,10 +30,18 @@ type Assistant struct {
 	Devices  *device.Registry
 	// Feedback acknowledges an accepted wake phrase locally. A nil Notifier
 	// disables light and sound without changing command handling.
-	Feedback    *feedback.Notifier
+	Feedback *feedback.Notifier
+	// Timers runs local timers. A nil Scheduler means the timer vocabulary
+	// falls through to the planner, as it did before timers existed.
+	Timers *timer.Scheduler
+	// Missed are timers that came due while Voice was not running; Run
+	// reports them once at startup.
+	Missed      []timer.Timer
 	WakePhrases []string
 	WakeFuzz    float64
-	Logger      *log.Logger
+	// Now is the clock used for timer arithmetic. Nil means time.Now.
+	Now    func() time.Time
+	Logger *log.Logger
 }
 
 func (a *Assistant) logf(f string, v ...any) {
@@ -85,16 +95,32 @@ func (a *Assistant) Run(ctx context.Context) error {
 	defer a.Feedback.Restore()
 	pcm, recErr := a.Recorder.Stream(ctx)
 	utterances := a.VAD.Run(ctx, pcm, a.Recorder.Format())
+	var fired <-chan timer.Timer
+	if a.Timers != nil {
+		done := make(chan struct{})
+		defer close(done)
+		go a.Timers.Run(done)
+		fired = a.Timers.Fired()
+		a.announceMissed(ctx, a.Missed)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
+			// Capture's cleanup runs as its goroutine unwinds: it clears the
+			// speakerphone's off-hook report, which is the difference between
+			// a device left lit with its microphone held open and one that is
+			// idle. Returning here without waiting lets the process exit
+			// first, so wait for the sample channel to close.
+			a.awaitCaptureStop(pcm)
 			return nil
 		case err, ok := <-recErr:
 			if ok && err != nil {
 				return err
 			}
 			recErr = nil
+		case t := <-fired:
+			a.announceFired(ctx, t)
 		case u, ok := <-utterances:
 			if !ok {
 				return nil
@@ -120,6 +146,33 @@ func (a *Assistant) Run(ctx context.Context) error {
 	}
 }
 
+// captureStopTimeout bounds the wait for capture to unwind at shutdown. A
+// stuck capture command must not keep the service from exiting; systemd's
+// stop timeout would kill it anyway, and this way the delay is ours and
+// explained rather than a hang.
+const captureStopTimeout = 2 * time.Second
+
+// awaitCaptureStop drains samples until the recorder closes the channel, which
+// it does only after its deferred cleanup has run.
+func (a *Assistant) awaitCaptureStop(pcm <-chan []int16) {
+	if pcm == nil {
+		return
+	}
+	deadline := time.NewTimer(captureStopTimeout)
+	defer deadline.Stop()
+	for {
+		select {
+		case _, ok := <-pcm:
+			if !ok {
+				return
+			}
+		case <-deadline.C:
+			a.logf("capture did not stop within %s; exiting without its cleanup", captureStopTimeout)
+			return
+		}
+	}
+}
+
 // accepted handles one utterance that passed the wake gate. All local feedback
 // happens here and nowhere else, so ambient noise, an embedded mention or an
 // approximate phrase can never produce a light or a sound.
@@ -132,6 +185,9 @@ func (a *Assistant) accepted(ctx context.Context, command string) (stop bool) {
 		}
 		return false
 	}
+	if a.timerControl(ctx, command) {
+		return false
+	}
 	if reply, stop, handled := localControl(command); handled {
 		if err := a.Speak(ctx, reply); err != nil {
 			a.logf("speak: %v", err)
@@ -141,7 +197,7 @@ func (a *Assistant) accepted(ctx context.Context, command string) (stop bool) {
 	p, err := a.HandleText(ctx, command)
 	if err != nil {
 		a.logf("command %q: %v", command, err)
-		_ = a.Speak(ctx, "I couldn't do that.")
+		a.say(ctx, "I couldn't do that.")
 		return false
 	}
 	if err := a.Speak(ctx, p.Speak); err != nil {

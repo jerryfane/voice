@@ -48,8 +48,13 @@ func (m *MagicHome) roundTrip(ctx context.Context, p []byte, n int) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(m.Timeout))
+	// discard: the controller's reply has already been read by the time this
+	// runs, and TCP gives no delivery guarantee at close that Write did not
+	// already give.
+	defer func() { _ = c.Close() }()
+	if err := c.SetDeadline(time.Now().Add(m.Timeout)); err != nil {
+		return nil, err
+	}
 	if _, err = c.Write(p); err != nil {
 		return nil, err
 	}

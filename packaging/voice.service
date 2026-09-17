@@ -14,6 +14,10 @@ Restart=on-failure
 RestartSec=3
 Environment=HOME=/home/voice-agent
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# Timers and other mutable state live here; systemd creates it as the service
+# user and Voice resolves $XDG_STATE_HOME/voice for its state files.
+StateDirectory=voice
+Environment=XDG_STATE_HOME=/var/lib
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=6

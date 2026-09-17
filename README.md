@@ -132,6 +132,45 @@ reports what was selected and why, and commands keep working.
 `sound` is a generated waveform, not a bundled asset: `chime`, `blip`,
 `two-up`, or `none`. `volume` scales it between 0 and 1.
 
+## Timers
+
+Timers are local. "Hey Voice, set a timer for ten minutes" is parsed,
+scheduled, and announced by the session layer, so a timer can be set and can
+still fire when the model, the network, or the speech engines are unavailable —
+the announcement is the only part that needs text-to-speech. Ask "how long is
+left on my timer", cancel by duration ("cancel the ten minute timer") or in
+bulk ("cancel all timers"). Anything the timer vocabulary does not recognise
+goes to the agent unchanged.
+
+```json
+"timers": {
+  "enabled": true
+}
+```
+
+Deadlines are wall-clock, so a slow or suspended host does not shift when a
+timer fires, and the set is persisted after every change. A timer set before a
+restart still fires at its original time; one that came due while Voice was off
+is reported as expired, with how long ago, exactly once.
+
+State lives in the SQLite database `timers.db` under `$XDG_STATE_HOME/voice`,
+falling back to `~/.local/state/voice`. The service unit sets
+`StateDirectory=voice`, which puts it in `/var/lib/voice` owned by the
+`voice-agent` account; `timers.file` overrides the path. Each save replaces the
+set in one transaction, so a crash mid-write leaves the previous set rather
+than half of the new one. A database that cannot be opened disables timers with
+an explanation in the log instead of accepting requests it cannot keep.
+
+The driver is `modernc.org/sqlite`, which is pure Go: the release binaries are
+still `CGO_ENABLED=0` static builds for `amd64` and `arm64`. It is the only
+third-party dependency, and it is not free — the static `arm64` binary grows
+from 4.9 MB to 10.7 MB. That buys a transactional store the scheduler shares
+with alarms and reminders instead of each of them reimplementing durable
+replacement.
+
+Because `voice off` stops the listener, it silences announcements without
+destroying timers; `voice on` brings them back with the correct remaining time.
+
 ## Devices
 
 Magic Home/LEDENET lights use their local TCP protocol on port 5577. HDMI-CEC TVs use the Linux CEC device. The OMP agent does not directly access hardware: it returns structured device actions, which Voice validates against configured IDs and capabilities before execution.

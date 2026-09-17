@@ -40,6 +40,8 @@ type Config struct {
 	// Feedback is the local acknowledgement played and shown when the wake
 	// gate accepts a phrase. It never involves the model.
 	Feedback Feedback `json:"feedback"`
+	// Timers configures local spoken timers, which also never involve it.
+	Timers Timers `json:"timers"`
 	// STT is speech-to-text.
 	STT Engine `json:"stt"`
 	// TTS is text-to-speech.
@@ -69,6 +71,19 @@ type Feedback struct {
 	Sound string `json:"sound"`
 	// Volume scales the earcon between 0 (silent) and 1 (full scale).
 	Volume float64 `json:"volume"`
+}
+
+// Timers configures local spoken timers.
+type Timers struct {
+	// Enabled answers "set a timer for ten minutes" in the session layer.
+	// Disabling it sends the request to the agent instead, which cannot
+	// deliver an announcement when the model or network is unavailable.
+	Enabled bool `json:"enabled"`
+	// File is the SQLite database holding the timer set across restarts.
+	// Empty uses $XDG_STATE_HOME/voice/timers.db, or
+	// ~/.local/state/voice/timers.db.
+	// The directory must be writable by the account Voice runs as.
+	File string `json:"file,omitempty"`
 }
 
 // Input describes audio capture.
@@ -244,6 +259,7 @@ func Default() Config {
 			Sound:  audio.EarconChime,
 			Volume: 0.35,
 		},
+		Timers: Timers{Enabled: true},
 		STT: Engine{
 			Name:    "whisper.cpp",
 			Model:   "models/ggml-base.en.bin",
@@ -288,6 +304,20 @@ func Path() (string, error) {
 		return "", fmt.Errorf("cannot locate home directory: %w", err)
 	}
 	return filepath.Join(home, ".config", "voice", "config.json"), nil
+}
+
+// StatePath returns where mutable runtime state lives, honouring
+// XDG_STATE_HOME before falling back to ~/.local/state/voice. The service unit
+// points XDG_STATE_HOME at its systemd StateDirectory.
+func StatePath(name string) (string, error) {
+	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
+		return filepath.Join(x, "voice", name), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot locate home directory: %w", err)
+	}
+	return filepath.Join(home, ".local", "state", "voice", name), nil
 }
 
 // Load reads the config at path, or at the default location when path is empty.

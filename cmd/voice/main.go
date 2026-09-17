@@ -87,7 +87,10 @@ func run(args []string) error {
 	case "tv":
 		return commandDevice(ctx, a, "tv", args[1:])
 	case "config":
-		b, _ := json.MarshalIndent(cfg, "", "  ")
+		b, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			return fmt.Errorf("rendering the effective config: %w", err)
+		}
 		fmt.Println(string(b))
 		return nil
 	default:
@@ -185,10 +188,18 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 	ok, d = a.Brain.Available()
 	check("brain", ok, a.Brain.Name()+": "+d)
 	fmt.Printf("%-12s %-4s %s\n", "wake feedback", "INFO", a.Feedback.Describe())
+	if c.Timers.Enabled {
+		if a.Timers == nil {
+			check("timers", false, "enabled but no scheduler was built")
+		} else {
+			check("timers", true, fmt.Sprintf("%d running, %d expired while offline",
+				len(a.Timers.List()), len(a.Missed)))
+		}
+	}
 	if c.Input.TelephonyHID != "" {
 		f, e := os.OpenFile(c.Input.TelephonyHID, os.O_WRONLY, 0)
 		if e == nil {
-			f.Close()
+			e = f.Close()
 		}
 		check("telephony HID", e == nil, c.Input.TelephonyHID+": "+errText(e))
 	}
@@ -254,7 +265,10 @@ func commandDevice(ctx context.Context, a *session.Assistant, kind string, args 
 	if err != nil {
 		return err
 	}
-	b, _ := json.Marshal(s)
+	b, err := json.Marshal(s)
+	if err != nil {
+		return fmt.Errorf("rendering device state: %w", err)
+	}
 	fmt.Println(string(b))
 	return nil
 }

@@ -35,7 +35,12 @@ func (e *External) Available() (bool, string) {
 	return true, p
 }
 func (e *External) Plan(ctx context.Context, transcript string, inventory []device.Info) (Plan, error) {
-	inv, _ := json.Marshal(inventory)
+	inv, err := json.Marshal(inventory)
+	if err != nil {
+		// The planner would otherwise be asked to act on an empty inventory
+		// and confidently report that no such device exists.
+		return Plan{}, fmt.Errorf("encoding the device inventory: %w", err)
+	}
 	prompt := e.prompt(transcript, string(inv))
 	argv := proc.Expand(e.Argv, map[string]string{"prompt": prompt})
 	stdin := []byte(nil)
