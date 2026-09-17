@@ -20,6 +20,18 @@ jobs:
       - run: go test ./...
       - run: go vet ./...
       - run: test -z "$(gofmt -l .)"
+      # Type-aware unhandled-error check. Run with `go run pkg@version` so it
+      # never enters go.mod and never reaches the shipped binary, which keeps
+      # the single static CGO_ENABLED=0 build intact. The in-suite check in
+      # internal/codecheck covers the other half - errors assigned to a blank
+      # with a written justification, which errcheck cannot express - and says
+      # in its own comment that it is name-scoped rather than complete.
+      #
+      # No exclude file: production code is clean in errcheck's default mode.
+      # Tests are skipped because their discards are fake fixtures that the
+      # in-suite check already covers site by site, with reasons.
+      - name: Unhandled errors (errcheck, CI only)
+        run: go run github.com/kisielk/errcheck@v1.9.0 -ignoretests ./...
       - name: Static binaries
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/voice-amd64 ./cmd/voice

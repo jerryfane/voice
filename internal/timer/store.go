@@ -129,7 +129,7 @@ func (s *Store) Load() ([]Timer, error) {
 	}
 	// discard: rows.Err below reports anything that went wrong with this
 	// query; closing a finished read adds no failure of its own.
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var ts []Timer
 	for rows.Next() {
 		var (
@@ -161,7 +161,10 @@ func (s *Store) Save(ts []Timer) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	// discard: the standard transaction idiom - after a successful Commit this
+	// rollback returns sql.ErrTxDone, which is the expected outcome, and any
+	// real failure surfaces from Commit itself.
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec(`DELETE FROM timers`); err != nil {
 		return err
 	}
@@ -171,7 +174,7 @@ func (s *Store) Save(ts []Timer) error {
 	}
 	// discard: the statement is scoped to the transaction, and tx.Commit is
 	// what decides whether this save happened.
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 	for _, t := range ts {
 		if _, err := stmt.Exec(t.ID, t.Label, int64(t.Duration), t.Deadline.UTC().Format(time.RFC3339Nano)); err != nil {
 			return err

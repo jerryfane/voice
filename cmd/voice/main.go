@@ -87,7 +87,10 @@ func run(args []string) error {
 	case "tv":
 		return commandDevice(ctx, a, "tv", args[1:])
 	case "config":
-		b, _ := json.MarshalIndent(cfg, "", "  ")
+		b, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			return fmt.Errorf("rendering the effective config: %w", err)
+		}
 		fmt.Println(string(b))
 		return nil
 	default:
@@ -262,7 +265,10 @@ func commandDevice(ctx context.Context, a *session.Assistant, kind string, args 
 	if err != nil {
 		return err
 	}
-	b, _ := json.Marshal(s)
+	b, err := json.Marshal(s)
+	if err != nil {
+		return fmt.Errorf("rendering device state: %w", err)
+	}
 	fmt.Println(string(b))
 	return nil
 }

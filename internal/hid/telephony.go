@@ -95,10 +95,9 @@ func descriptorSize(devPath string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	// discard: this descriptor is opened read-only to ask the kernel for the
-	// report-descriptor length; nothing is written, so a close failure cannot
-	// lose anything.
-	defer f.Close()
+	// discard: opened read-only to ask the kernel for the report-descriptor
+	// length; nothing is written, so a close failure cannot lose anything.
+	defer func() { _ = f.Close() }()
 	var n int32
 	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), hidiocgrdescsize, uintptr(unsafe.Pointer(&n))); errno != 0 {
 		return 0, fmt.Errorf("HIDIOCGRDESCSIZE on %s: %w", devPath, errno)
