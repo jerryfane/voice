@@ -22,11 +22,18 @@ import (
 
 var version = "0.1.0-dev"
 
-// out and errOut remember the first write failure instead of discarding it.
-// A CLI whose output went nowhere - a closed pipe, a full disk - should exit
-// non-zero rather than report success for work nobody received. Every write
-// below goes through these, so there is one place that decides what a failed
-// write means and no site where the error is silently dropped.
+// stdout and stderr remember the first write failure instead of discarding it,
+// so a command whose output went nowhere exits non-zero rather than reporting
+// success for work nobody received. Every write goes through them, so one
+// place decides what a failed write means and no site drops the error.
+//
+// What this does NOT catch, stated because the first version of this comment
+// claimed it did: a closed pipe. Go's runtime raises SIGPIPE for writes to
+// file descriptors 1 and 2 and lets the default disposition kill the process,
+// which is what `voice version | true` does - exit 141, no error to report and
+// nothing to report it to. That is correct Unix behaviour for a CLI and is
+// deliberately not overridden here. What the printer catches is the rest: a
+// full disk, an I/O error, a redirect to a file that cannot be written.
 var (
 	stdout = &printer{w: os.Stdout}
 	stderr = &printer{w: os.Stderr}
@@ -61,7 +68,9 @@ func (p *printer) print(a ...any) {
 func main() {
 	err := run(os.Args[1:])
 	// A failed write is a failure of the command, not a detail: report it if
-	// nothing worse happened first.
+	// nothing worse happened first. Piped-and-closed output never reaches
+	// here - SIGPIPE has already ended the process - so this is the full-disk
+	// and bad-redirect path.
 	if err == nil {
 		err = errors.Join(stdout.err, stderr.err)
 	}

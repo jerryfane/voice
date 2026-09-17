@@ -4,10 +4,10 @@
 // call whose error was assigned to the blank identifier, so a failure to
 // persist a fired timer or to clear a speakerphone's off-hook report vanished.
 //
-// CI runs `errcheck -blank -ignoretests` with no project exclude file, which
-// is the real guarantee for production code: it is type-aware and enumerates
-// nothing of ours. errcheck's own DefaultExcludedSymbols still apply, covering
-// fmt printing whose errors a CLI cannot act on. This
+// CI runs `errcheck -blank -ignoretests -excludeonly` against an explicit
+// checked-in exclude file, which is the real guarantee for production code: it
+// is type-aware, and -excludeonly means errcheck's own ~19 bundled exclusions
+// do not silently apply, so the checked-in file is the complete set. This
 // check covers the test tree that CI skips, and it fails fast in the suite
 // people actually run. It is name-scoped by design - a syntactic pass cannot
 // know a call returns an error - so it is a fast regression guard, not a
@@ -315,11 +315,30 @@ func justifiedLines(fset *token.FileSet, file *ast.File, src []byte) map[int]boo
 		for l := first; l <= last; l++ {
 			lines[l] = true
 		}
-		if ownLine(src, start.Offset) {
+		// Extend to the statement below only when the comment occupies its
+		// lines exclusively. A block comment that opens on its own line but
+		// CLOSES on a code line - /* discard: why */ _ = f() - shares that
+		// line with a discard, so treating it as own-line excused the next,
+		// unrelated one.
+		if ownLine(src, start.Offset) && endsLine(src, fset.Position(group.End()).Offset) {
 			lines[last+1] = true
 		}
 	}
 	return lines
+}
+
+// endsLine reports whether only whitespace follows the byte at off on its line.
+func endsLine(src []byte, off int) bool {
+	for i := off; i < len(src); i++ {
+		switch src[i] {
+		case '\n':
+			return true
+		case ' ', '\t', '\r':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // ownLine reports whether only whitespace precedes the byte at off on its line.
@@ -429,5 +448,22 @@ func TestTrailingJustificationDoesNotCoverTheNextLine(t *testing.T) {
 	own := "package p\n\nfunc f() error { return nil }\n\nfunc g() {\n\t_ = f() // discard: this one is fine\n}\n"
 	if got := offencesIn(t, "own.go", own); got != 0 {
 		t.Errorf("offences = %d, want 0: a trailing justification covers its own line", got)
+	}
+}
+
+// A block comment that opens on its own line but closes on a code line shares
+// that line with a discard, so it must not also excuse the line below. This is
+// the same leak as a trailing line comment, wearing a different syntax.
+func TestBlockJustificationClosingOnCodeDoesNotCoverTheNextLine(t *testing.T) {
+	src := "package p\n\nfunc f() error { return nil }\n\nfunc g() {\n\t/* discard: this one\n\t   spans lines */ _ = f()\n\t_ = f()\n}\n"
+	if got := offencesIn(t, "block.go", src); got != 1 {
+		t.Errorf("offences = %d, want 1: only the first discard is justified", got)
+	}
+
+	// A block comment that both opens and closes on its own lines still
+	// covers the statement beneath it.
+	own := "package p\n\nfunc f() error { return nil }\n\nfunc g() {\n\t/* discard: this one\n\t   spans lines */\n\t_ = f()\n}\n"
+	if got := offencesIn(t, "own-block.go", own); got != 0 {
+		t.Errorf("offences = %d, want 0", got)
 	}
 }

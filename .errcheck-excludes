@@ -2,8 +2,13 @@
 # -excludeonly, so THIS FILE IS THE COMPLETE EXCLUSION SET: errcheck's own
 # ~19 bundled DefaultExcludedSymbols do not apply. That is the point - a
 # bundled list nobody can see is the false comfort this invariant exists to
-# remove, and it silenced the fmt.Print family where a broken pipe is a real
-# failure.
+# remove, and it silenced the fmt.Print family, whose write errors are handled
+# in cmd/voice instead.
+#
+# errcheck does NOT treat '#' as a comment: it would load every line here as a
+# literal symbol that matches nothing. CI therefore strips comments and blank
+# lines before handing the file over, so the tool receives exactly the symbols
+# below and this file can still say why each one is here.
 #
 # Only provably infallible symbols belong here. If a symbol can fail on any
 # reachable path, handle it instead of listing it.
