@@ -1,9 +1,9 @@
-// Package proc runs the external programs voiced delegates to (audio capture,
+// Package proc runs the external programs Voice delegates to (audio capture,
 // speech engines, the agent CLI) and expands the placeholders used in
 // user-supplied command templates.
 //
-// Every externally configurable command in voiced is an argv slice, never a
-// shell string. There is no shell interpolation anywhere in voiced, so a device
+// Every externally configurable command in Voice is an argv slice, never a
+// shell string. There is no shell interpolation anywhere in Voice, so a device
 // name or a transcript containing quotes, semicolons or backticks can never
 // become executable. Placeholders are substituted after argv splitting, which
 // makes injection structurally impossible rather than merely filtered.

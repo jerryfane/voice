@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+if [ "$(id -un)" != "voice-agent" ]; then
+  exec sudo -n -H -u voice-agent /usr/local/bin/voice-agent-run "$@"
+fi
+
+workspace=${VOICE_AGENT_WORKSPACE:-"$HOME/voice-workspace"}
+sessions=${VOICE_AGENT_SESSIONS:-"$HOME/.local/share/voice/sessions"}
+marker=$sessions/.initialized
+omp=${VOICE_AGENT_OMP:-/usr/local/libexec/voice-omp}
+
+mkdir -p "$workspace" "$sessions"
+cd "$workspace"
+exec 9>"$sessions/.lock"
+flock 9
+
+invoke() {
+  "$omp" -p --cwd "$workspace" --session-dir "$sessions" --auto-approve --no-title "$@"
+}
+
+if [ -f "$marker" ]; then
+  exec "$omp" -p --continue --cwd "$workspace" --session-dir "$sessions" --auto-approve --no-title "$1"
+fi
+
+if output=$(invoke "$1"); then
+  touch "$marker"
+  printf '%s\n' "$output"
+  exit 0
+fi
+status=$?
+printf '%s\n' "$output"
+exit "$status"

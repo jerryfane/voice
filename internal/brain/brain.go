@@ -2,12 +2,10 @@
 //
 // Two modes exist, and the distinction matters:
 //
-//   - "plan": the transcript plus a device inventory go to the model, which
-//     returns a strict JSON Plan. voiced executes the actions itself. Fast,
-//     predictable, and the model never gets shell access.
-//   - "agent": the transcript is handed to a full agent session (omp/claude)
-//     that may use its own tools, including the voiced CLI. Slower, unbounded
-//     capability. Use when you want "figure it out", not "do this".
+//   - "plan": the transcript plus a device inventory go to a stateless model,
+//     which returns a strict JSON Plan.
+//   - "agent": the transcript goes to a persistent, tool-capable agent session.
+//     Voice still validates and executes configured local-device actions itself.
 //
 // Before either runs, a rules pass answers trivial local questions (time,
 // date, "stop", "cancel") with no model call at all. Round-tripping a model
@@ -17,7 +15,7 @@ package brain
 import (
 	"context"
 
-	"github.com/jerryfane/herdr-voice/internal/device"
+	"github.com/jerryfane/voice/internal/device"
 )
 
 // Action is one device command the planner wants executed.
@@ -29,7 +27,7 @@ type Action struct {
 
 // Plan is the planner's complete response to one utterance.
 type Plan struct {
-	// Speak is what voiced says back. Empty means stay silent.
+	// Speak is what Voice says back. Empty means stay silent.
 	Speak string `json:"speak"`
 	// Actions run in order, after Speak is queued.
 	Actions []Action `json:"actions,omitempty"`

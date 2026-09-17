@@ -1,7 +1,7 @@
 // Package device defines the contract every controllable thing implements:
 // lights, televisions, and anything added later.
 //
-// Drivers are pure Go and speak the real local protocol of the device. voiced
+// Drivers are pure Go and speak the real local protocol of the device. Voice
 // deliberately avoids cloud APIs: every driver in tree talks directly to
 // hardware on the LAN or on a local bus, so the assistant keeps working with
 // no internet connection.
@@ -57,7 +57,7 @@ type Device interface {
 	Apply(ctx context.Context, c Command) (State, error)
 	// Read returns current state without changing anything.
 	Read(ctx context.Context) (State, error)
-	// Describe is a one-line identity for `voiced doctor` and discovery output.
+	// Describe is a one-line identity for `voice doctor` and discovery output.
 	Describe() string
 }
 

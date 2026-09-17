@@ -10,7 +10,7 @@ package vad
 import (
 	"context"
 
-	"github.com/jerryfane/herdr-voice/internal/audio"
+	"github.com/jerryfane/voice/internal/audio"
 )
 
 // Utterance is one detected span of speech.

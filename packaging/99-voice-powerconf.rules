@@ -1,0 +1,4 @@
+# Allow the restricted voice-agent account to send USB HID telephony off-hook
+# reports to Anker PowerConf speakerphones. Audio capture otherwise streams
+# digital silence even when ALSA reports the microphone as unmuted.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="291a", ATTRS{idProduct}=="3301", GROUP="voice-agent", MODE="0660"

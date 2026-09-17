@@ -1,15 +1,15 @@
 // Package audio defines the microphone/speaker contract.
 //
-// voiced never links an audio library. Capture and playback are delegated to
+// Voice never links an audio library. Capture and playback are delegated to
 // whatever command the user configures (arecord/aplay by default, but ffmpeg,
 // sox, pw-record or a remote shell work equally well). That keeps the binary
 // CGO-free and statically linkable, and means ANY input or output device the
-// host OS exposes is usable without a voiced code change.
+// host OS exposes is usable without a Voice code change.
 package audio
 
 import "context"
 
-// Format is the PCM shape voiced works in end to end: signed 16-bit
+// Format is the PCM shape Voice works in end to end: signed 16-bit
 // little-endian mono. Every engine (VAD, STT, TTS) assumes this.
 type Format struct {
 	SampleRate int // samples per second, e.g. 16000
@@ -29,7 +29,7 @@ type Recorder interface {
 	Stream(ctx context.Context) (<-chan []int16, <-chan error)
 	// Format reports the PCM shape the recorder emits.
 	Format() Format
-	// Describe returns a human-readable device identity for `voiced doctor`.
+	// Describe returns a human-readable device identity for `voice doctor`.
 	Describe() string
 }
 
@@ -47,7 +47,7 @@ type Player interface {
 	Describe() string
 }
 
-// Device is an enumerated input or output endpoint, used by `voiced devices audio`
+// Device is an enumerated input or output endpoint, used by `voice devices audio`
 // so users can discover the exact name to put in their config.
 type Device struct {
 	ID       string // value to use in config, e.g. "plughw:2,0" or "default"

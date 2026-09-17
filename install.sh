@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 
-repo=${VOICED_REPO:-jerryfane/herdr-voice}
-version=${VOICED_VERSION:-latest}
-bin_dir=${VOICED_BIN_DIR:-"$HOME/.local/bin"}
+repo=${VOICE_REPO:-jerryfane/voice}
+version=${VOICE_VERSION:-latest}
+bin_dir=${VOICE_BIN_DIR:-"$HOME/.local/bin"}
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 arch=$(uname -m)
@@ -15,16 +15,16 @@ esac
 case "$os" in linux|darwin) ;; *) echo "unsupported OS: $os" >&2; exit 1 ;; esac
 
 if [ "$version" = latest ]; then
-  url="https://github.com/$repo/releases/latest/download/voiced_${os}_${arch}.tar.gz"
+  url="https://github.com/$repo/releases/latest/download/voice_${os}_${arch}.tar.gz"
 else
-  url="https://github.com/$repo/releases/download/$version/voiced_${os}_${arch}.tar.gz"
+  url="https://github.com/$repo/releases/download/$version/voice_${os}_${arch}.tar.gz"
 fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
-curl -fL "$url" -o "$tmp/voiced.tar.gz"
-tar -xzf "$tmp/voiced.tar.gz" -C "$tmp"
+curl -fL "$url" -o "$tmp/voice.tar.gz"
+tar -xzf "$tmp/voice.tar.gz" -C "$tmp"
 mkdir -p "$bin_dir"
-install -m 0755 "$tmp/voiced" "$bin_dir/voiced"
-echo "Installed $bin_dir/voiced"
-"$bin_dir/voiced" version
+install -m 0755 "$tmp/voice" "$bin_dir/voice"
+echo "Installed $bin_dir/voice"
+"$bin_dir/voice" version

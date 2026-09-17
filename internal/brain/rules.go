@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/herdr-voice/internal/device"
+	"github.com/jerryfane/voice/internal/device"
 )
 
 // Rules handles deterministic common commands without an LLM round-trip and

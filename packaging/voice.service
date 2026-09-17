@@ -1,0 +1,27 @@
+[Unit]
+Description=Voice persistent local agent
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voice-agent
+Group=voice-agent
+SupplementaryGroups=audio video
+WorkingDirectory=/home/voice-agent/voice-workspace
+ExecStart=/usr/local/bin/voice --config /etc/voice/config.json listen
+Restart=on-failure
+RestartSec=3
+Environment=HOME=/home/voice-agent
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/voice-agent /var/cache/voice
+
+[Install]
+WantedBy=multi-user.target

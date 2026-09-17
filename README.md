@@ -1,149 +1,127 @@
-# Herdr Voice
+# Voice
 
-A local, open-source voice runtime for agent harnesses. The installed command and service are named `voiced`; `herdr` is intentionally reserved for the separate Herdr terminal-workspace federation.
-
-Say a wake phrase, speak a command, let an agent reason, hear the answer, and control local devices. Voiced is one statically linked Go binary. It does not own your microphone, speaker, speech model, or agent provider: each boundary is configurable, so any device or engine that exposes a command-line interface works.
+A persistent, tool-capable voice agent for Linux. Say “Hey Voice,” speak a request, and continue one long-lived OMP conversation with its own workspace and memory.
 
 ```
-microphone → VAD → speech-to-text → wake phrase → rules / OMP → actions
-                                                               ├─ Magic Home lights
-                                                               ├─ HDMI-CEC television
-                                                               └─ spoken reply → TTS → speaker
+microphone → VAD → local Whisper → “Hey Voice” → persistent OMP agent
+                                                      ├─ shell and files
+                                                      ├─ browser and web search
+                                                      ├─ Magic Home lights
+                                                      ├─ HDMI-CEC television
+                                                      └─ local Piper speech
 ```
 
-## Properties
+## Agent model
 
-- **One binary:** pure Go, no CGO, no Node or Python runtime.
-- **Any audio hardware:** capture/playback are argv templates. Defaults use ALSA `arecord` and `aplay`; PipeWire, FFmpeg, remote audio, or custom programs work too.
-- **Any agent:** defaults to `omp -p`; replace it with Claude, a local model, an HTTP wrapper, or a script.
-- **Any speech engine:** defaults to whisper.cpp and Piper, both local. Engines are external and replaceable.
-- **Local-first devices:** Magic Home/LEDENET lights use TCP 5577 directly. TVs use Linux HDMI-CEC. Neither requires a cloud account.
-- **Fast path:** time, date, common power/color/volume commands bypass the model.
-- **Safe actions:** the model returns a strict JSON plan. Voiced validates every device ID and capability before execution. Configured commands are argv arrays, never shell strings.
+Nontrivial requests run in one persistent OMP session. The session:
+
+- works in `/home/voice-agent/voice-workspace`;
+- retains conversation history across voice requests;
+- keeps durable facts in `MEMORY.md`;
+- follows the dedicated account’s OMP default model;
+- can use shell, read/write, browser, and web-search tools;
+- runs as the restricted `voice-agent` OS account, not as your login account;
+- cannot read the `pi` account’s private files or authenticated browser profile.
+
+Raw audio never goes to the model. Recording, VAD, Whisper transcription, wake matching, Piper synthesis, and device execution remain local. After a wake match, the recognized text and configured device inventory are sent to the OMP model.
 
 ## Install
 
-Download the latest release:
+Install speech dependencies and the restricted system service from source:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jerryfane/herdr-voice/main/install.sh | sh
-voiced init
-voiced doctor
-```
-
-Or build from source (Go 1.24+):
-
-```sh
-go build -trimpath -ldflags='-s -w' -o ~/.local/bin/voiced ./cmd/voiced
 ./scripts/setup-speech.sh
-voiced init
+./scripts/install-local.sh
 ```
 
-`setup-speech.sh` builds whisper.cpp and installs Piper plus the default English models under `~/.local/share/voiced/models`. They are not linked into Voiced; edit the JSON config to use other engines.
+The installer creates `voice-agent`, installs the system services, copies OMP into the restricted runtime, configures its credential-broker connection, and starts Voice.
 
-Configuration defaults to `~/.config/voiced/config.json`. Override it with `VOICED_CONFIG` or `--config PATH`.
-
-### Upgrading from v0.1
-
-v0.1 incorrectly installed the voice runtime as `~/.local/bin/herdr`. Restore the federation binary before upgrading, then install v0.2 or newer as `voiced`. Move only the voice file `~/.config/herdr/config.json` to `~/.config/voiced/config.json`; do not move or delete the surrounding `~/.config/herdr` directory because the Herdr federation owns its other files. Move voice models from `~/.local/share/herdr` to `~/.local/share/voiced`, update absolute model paths, and replace the old voice unit with `voiced.service`.
-
-## Configure audio
-
-List ALSA devices:
+Release binary only:
 
 ```sh
-arecord -l   # microphones
-aplay -l     # speakers
+curl -fsSL https://raw.githubusercontent.com/jerryfane/voice/main/install.sh | sh
+voice init
+voice doctor
 ```
 
-Set `input.device` and `output.device`, for example:
+The release installer only installs the `voice` binary. A persistent restricted agent deployment requires `scripts/install-local.sh` from the repository.
 
-```json
-{
-  "input": {
-    "device": "plughw:2,0",
-    "sample_rate": 16000,
-    "telephony_hid": "/dev/hidraw5"
-  },
-  "output": { "device": "plughw:2,0" }
-}
-```
+## Runtime layout
 
-The optional `telephony_hid` handles USB speakerphones that stream silence until the host reports an active call. `packaging/99-voiced-powerconf.rules` grants the service permission for Anker PowerConf (`291a:3301`). Other microphones omit it.
+| Purpose | Path |
+|---|---|
+| Executable | `/usr/local/bin/voice` |
+| System service | `voice.service` |
+| Live configuration | `/etc/voice/config.json` |
+| Agent account | `voice-agent` |
+| Agent workspace | `/home/voice-agent/voice-workspace` |
+| Persistent OMP sessions | `/home/voice-agent/.local/share/voice/sessions` |
+| Speech models | `/var/lib/voice/models` |
+| Credential broker | `voice-auth-broker@<owner>.service` |
 
-Commands may use placeholders documented in `internal/config/config.go`: `{device}`, `{rate}`, `{channels}`, `{file}`, `{model}`, `{text}`, `{out}`, and `{prompt}`.
-
-## Configure devices
-
-Magic Home/LEDENET light:
-
-```json
-"lights": [
-  { "id": "bedroom", "host": "192.168.1.50", "protocol": "9byte" }
-]
-```
-
-Give controllers static DHCP leases. The protocol is local TCP port 5577.
-
-HDMI-CEC television:
-
-```json
-"tvs": [
-  { "id": "tv", "adapter": "/dev/cec0", "logical_address": 0 }
-]
-```
-
-Check the bus with `cec-ctl -d /dev/cec0 --playback --to 0 --give-device-power-status`.
+User-mode configuration defaults to `~/.config/voice/config.json`; override it with `VOICE_CONFIG` or `--config PATH`.
 
 ## Use
 
 ```sh
-voiced doctor
-voiced devices
-voiced ask 'turn the bedroom light purple'
-voiced light bedroom white 60
-voiced tv tv off
-voiced say 'Herdr is ready.'
-voiced listen
+voice doctor
+voice devices
+voice ask 'remember that I prefer concise answers'
+voice ask 'what preference did I tell you?'
+voice ask 'research the latest Raspberry Pi release in the browser'
+voice light bedroom white 60
+voice tv tv off
+voice say 'Voice is ready.'
 ```
 
-Default wake spellings include “hey herdr”, “hey herder”, and likely STT variants. Recognition is fuzzy and configurable. The default detector transcribes only VAD-accepted speech segments; custom wake engines can be substituted without changing the binary.
-
-## Agent skill
-
-`skills/voiced/SKILL.md` packages the runtime as an agentskills.io-compatible skill. Agents should call deterministic CLI operations directly (`voiced light`, `voiced tv`, `voiced devices`) and use `voiced ask` only for natural-language planning.
-
-## Service
+The long-running listener is managed by systemd:
 
 ```sh
-mkdir -p ~/.config/systemd/user
-cp packaging/voiced.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now voiced
+sudo systemctl status voice
+sudo systemctl restart voice
+sudo journalctl -u voice -f
 ```
 
-Install the optional PowerConf udev rule as root, then replug the device:
+## Audio and wake phrase
+
+The default wake phrase is exactly:
+
+```text
+Hey Voice
+```
+
+ALSA capture and playback are configurable argv templates. The current Pi deployment uses an Anker PowerConf. `packaging/99-voice-powerconf.rules` grants only `voice-agent` permission to send the USB telephony off-hook report required by that microphone.
+
+Speech engines and models are external. `scripts/setup-speech.sh` installs whisper.cpp, Piper, and their default English models under `~/.local/share/voice`; the restricted installer copies them to `/var/lib/voice`.
+
+## Devices
+
+Magic Home/LEDENET lights use their local TCP protocol on port 5577. HDMI-CEC TVs use the Linux CEC device. The OMP agent does not directly access hardware: it returns structured device actions, which Voice validates against configured IDs and capabilities before execution.
 
 ```sh
-sudo cp packaging/99-voiced-powerconf.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules
-sudo udevadm trigger
+voice light <id> on
+voice light <id> off
+voice light <id> color purple
+voice light <id> brightness 50
+voice tv <id> on
+voice tv <id> off
+voice tv <id> volume-up
+voice tv <id> volume-down
+voice tv <id> mute
 ```
 
-## Status
+## Security boundary
 
-Supported today:
+A spoken command can cause shell or browser activity. Isolation is therefore an OS boundary, not merely a prompt instruction:
 
-- Linux audio through command adapters
-- energy VAD with ambient auto-calibration
-- whisper.cpp STT and Piper TTS adapters
-- fuzzy wake-phrase matching and follow-up window
-- OMP-backed JSON planning and no-model local rules
-- Magic Home RGB(W) lights
-- HDMI-CEC TV power, mute, and volume
-- Anker PowerConf USB telephony handshake
+- the agent has its own Unix account and home;
+- its writable filesystem is limited by ordinary ownership plus systemd hardening;
+- its browser uses a separate profile;
+- it receives OMP credentials through a loopback credential broker;
+- it cannot attach to an existing terminal or agent session;
+- local-device actions are validated and executed by Voice.
 
-Planned drivers should implement `internal/device.Device`; planned engines implement the contracts under `internal/speech` or `internal/audio`.
+Anyone who can speak near the microphone may still exercise the authority available to `voice-agent`. Do not grant that account secrets or host permissions you would not expose to nearby speakers.
 
 ## License
 

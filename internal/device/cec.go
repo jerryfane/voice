@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jerryfane/herdr-voice/internal/proc"
+	"github.com/jerryfane/voice/internal/proc"
 )
 
 // The kernel CEC adapter has one logical-address allocation. Concurrent

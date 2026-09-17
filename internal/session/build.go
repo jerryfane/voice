@@ -4,12 +4,12 @@ import (
 	"log"
 	"os"
 
-	"github.com/jerryfane/herdr-voice/internal/audio"
-	"github.com/jerryfane/herdr-voice/internal/brain"
-	"github.com/jerryfane/herdr-voice/internal/config"
-	"github.com/jerryfane/herdr-voice/internal/device"
-	"github.com/jerryfane/herdr-voice/internal/speech"
-	"github.com/jerryfane/herdr-voice/internal/vad"
+	"github.com/jerryfane/voice/internal/audio"
+	"github.com/jerryfane/voice/internal/brain"
+	"github.com/jerryfane/voice/internal/config"
+	"github.com/jerryfane/voice/internal/device"
+	"github.com/jerryfane/voice/internal/speech"
+	"github.com/jerryfane/voice/internal/vad"
 )
 
 // Build wires a complete assistant from config.
@@ -33,5 +33,5 @@ func Build(c config.Config) *Assistant {
 		return n
 	}
 	seg := vad.NewEnergy(vad.Params{Threshold: c.Wake.VAD.Threshold, MinSpeech: frames(c.Wake.VAD.MinSpeech), Silence: frames(c.Wake.VAD.Silence), MaxUtterance: frames(c.Wake.VAD.MaxUtterance), PreRoll: frames(c.Wake.VAD.PreRoll), FrameSize: frame})
-	return &Assistant{Recorder: rec, Player: player, VAD: seg, STT: stt, TTS: tts, Brain: planner, Devices: device.Build(c), WakePhrases: c.Wake.Phrases, WakeFuzz: c.Wake.Fuzz, FollowUp: c.Wake.FollowUp.D(), Logger: log.New(os.Stderr, "voiced: ", log.LstdFlags)}
+	return &Assistant{Recorder: rec, Player: player, VAD: seg, STT: stt, TTS: tts, Brain: planner, Devices: device.Build(c), WakePhrases: c.Wake.Phrases, WakeFuzz: c.Wake.Fuzz, FollowUp: c.Wake.FollowUp.D(), Logger: log.New(os.Stderr, "voice: ", log.LstdFlags)}
 }

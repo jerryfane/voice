@@ -4,7 +4,7 @@ import (
 	"context"
 	"math"
 
-	"github.com/jerryfane/herdr-voice/internal/audio"
+	"github.com/jerryfane/voice/internal/audio"
 )
 
 // Energy is a low-cost RMS gate with ambient-noise adaptation and hysteresis.

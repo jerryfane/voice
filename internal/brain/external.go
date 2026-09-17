@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/herdr-voice/internal/device"
-	"github.com/jerryfane/herdr-voice/internal/proc"
+	"github.com/jerryfane/voice/internal/device"
+	"github.com/jerryfane/voice/internal/proc"
 )
 
-// External asks an arbitrary CLI model for a strict JSON plan.
+// External asks an arbitrary CLI model for a validated JSON response.
 type External struct {
 	Engine  string
 	Argv    []string
@@ -36,13 +36,7 @@ func (e *External) Available() (bool, string) {
 }
 func (e *External) Plan(ctx context.Context, transcript string, inventory []device.Info) (Plan, error) {
 	inv, _ := json.Marshal(inventory)
-	prompt := fmt.Sprintf(`%s
-
-You are the reasoning core inside a voice assistant. The user said: %q
-Available local devices: %s
-Return ONLY one JSON object with this exact shape:
-{"speak":"short response spoken aloud","actions":[{"device":"configured id","op":"advertised capability","args":{}}]}
-Rules: Use only listed devices and advertised capabilities. Never invent an ID. For color use args {"name":"red"} or integer r/g/b. For brightness use {"level":0..100}. If no local action is needed, actions is []. No markdown.`, e.Persona, transcript, string(inv))
+	prompt := e.prompt(transcript, string(inv))
 	argv := proc.Expand(e.Argv, map[string]string{"prompt": prompt})
 	stdin := []byte(nil)
 	if !has(e.Argv, "{prompt}") {
@@ -79,6 +73,28 @@ Rules: Use only listed devices and advertised capabilities. Never invent an ID. 
 		}
 	}
 	return p, nil
+}
+func (e *External) prompt(transcript, inventory string) string {
+	if e.Mode == "agent" {
+		return fmt.Sprintf(`%s
+
+This is the next turn in your one persistent Voice session.
+The user said: %q
+Available local devices: %s
+
+Use your tools when they help. You may inspect or change files in your workspace, run commands, search the web, and use the browser. Do not call the voice executable to control listed local devices; request those through actions instead.
+
+After completing the work, return ONLY one JSON object with this exact shape:
+{"speak":"short natural response spoken aloud","actions":[{"device":"configured id","op":"advertised capability","args":{}}]}
+Use only listed devices and advertised capabilities. Never invent a device ID. For color use args {"name":"red"} or integer r/g/b. For brightness use {"level":0..100}. If no local device action is needed, actions is []. No markdown outside the JSON.`, e.Persona, transcript, inventory)
+	}
+	return fmt.Sprintf(`%s
+
+You are the reasoning core inside a voice assistant. The user said: %q
+Available local devices: %s
+Return ONLY one JSON object with this exact shape:
+{"speak":"short response spoken aloud","actions":[{"device":"configured id","op":"advertised capability","args":{}}]}
+Rules: Use only listed devices and advertised capabilities. Never invent an ID. For color use args {"name":"red"} or integer r/g/b. For brightness use {"level":0..100}. If no local action is needed, actions is []. No markdown.`, e.Persona, transcript, inventory)
 }
 func has(a []string, s string) bool {
 	for _, v := range a {

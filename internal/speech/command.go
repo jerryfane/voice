@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/herdr-voice/internal/audio"
-	"github.com/jerryfane/herdr-voice/internal/proc"
+	"github.com/jerryfane/voice/internal/audio"
+	"github.com/jerryfane/voice/internal/proc"
 )
 
 // CommandTranscriber adapts any file-oriented STT executable.
@@ -41,7 +41,7 @@ func (t *CommandTranscriber) Available() (bool, string) {
 	return true, p
 }
 func (t *CommandTranscriber) Transcribe(ctx context.Context, pcm []int16, f audio.Format) (string, error) {
-	tmp, err := os.CreateTemp("", "voiced-*.wav")
+	tmp, err := os.CreateTemp("", "voice-*.wav")
 	if err != nil {
 		return "", err
 	}
@@ -95,7 +95,7 @@ func (s *CommandSynthesizer) Available() (bool, string) {
 	return true, p
 }
 func (s *CommandSynthesizer) Synthesize(ctx context.Context, text string) ([]byte, error) {
-	out, err := os.CreateTemp("", "voiced-tts-*.wav")
+	out, err := os.CreateTemp("", "voice-tts-*.wav")
 	if err != nil {
 		return nil, err
 	}

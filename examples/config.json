@@ -30,14 +30,9 @@
   },
   "wake": {
     "phrases": [
-      "hey herdr",
-      "hey herder",
-      "hey herd",
-      "a herder",
-      "hey hurdr",
-      "hey hurder"
+      "hey voice"
     ],
-    "fuzz": 0.25,
+    "fuzz": 0.2,
     "follow_up": "8s",
     "detector": "stt",
     "vad": {
@@ -79,17 +74,14 @@
     "timeout": "30s"
   },
   "brain": {
-    "mode": "plan",
+    "mode": "agent",
     "command": [
-      "omp",
-      "-p",
-      "--no-session",
-      "--no-tools",
+      "voice-agent-run",
       "{prompt}"
     ],
-    "timeout": "1m0s",
-    "persona": "You are herdr, a terse voice assistant. Answer in one or two spoken sentences. Never use markdown, lists, or emoji: every word you produce is read aloud.",
-    "rules": true
+    "timeout": "10m0s",
+    "persona": "You are Voice, a concise personal agent. Complete the user's request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences.",
+    "rules": false
   },
   "lights": [],
   "tvs": []

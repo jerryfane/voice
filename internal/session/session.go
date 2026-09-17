@@ -9,15 +9,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/herdr-voice/internal/audio"
-	"github.com/jerryfane/herdr-voice/internal/brain"
-	"github.com/jerryfane/herdr-voice/internal/device"
-	"github.com/jerryfane/herdr-voice/internal/speech"
-	"github.com/jerryfane/herdr-voice/internal/vad"
-	"github.com/jerryfane/herdr-voice/internal/wake"
+	"github.com/jerryfane/voice/internal/audio"
+	"github.com/jerryfane/voice/internal/brain"
+	"github.com/jerryfane/voice/internal/device"
+	"github.com/jerryfane/voice/internal/speech"
+	"github.com/jerryfane/voice/internal/vad"
+	"github.com/jerryfane/voice/internal/wake"
 )
 
-// Assistant is one configured voiced runtime.
+// Assistant is one configured Voice runtime.
 type Assistant struct {
 	Recorder    audio.Recorder
 	Player      audio.Player
@@ -75,7 +75,7 @@ func (a *Assistant) Speak(ctx context.Context, text string) error {
 }
 
 // Run listens until ctx is cancelled. Wake and command may be in one utterance
-// ("Hey Herdr turn off the TV") or two ("Hey Herdr" / "turn off the TV").
+// ("Hey Voice turn off the TV") or two ("Hey Voice" / "turn off the TV").
 func (a *Assistant) Run(ctx context.Context) error {
 	pcm, recErr := a.Recorder.Stream(ctx)
 	utterances := a.VAD.Run(ctx, pcm, a.Recorder.Format())

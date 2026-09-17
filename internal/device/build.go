@@ -1,6 +1,6 @@
 package device
 
-import "github.com/jerryfane/herdr-voice/internal/config"
+import "github.com/jerryfane/voice/internal/config"
 
 // Build constructs the local device registry from configuration.
 func Build(cfg config.Config) *Registry {

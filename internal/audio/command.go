@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/jerryfane/herdr-voice/internal/proc"
+	"github.com/jerryfane/voice/internal/proc"
 )
 
 // CommandRecorder captures raw signed 16-bit little-endian PCM from an
@@ -41,14 +41,14 @@ func (r *CommandRecorder) Describe() string {
 
 // setOffHook sends the standard USB HID telephony output report used by
 // speakerphones such as the Anker PowerConf. The report is cleared when capture
-// ends. A udev rule should grant the voiced service access to the hidraw node.
+// ends. A udev rule should grant the Voice service access to the hidraw node.
 func (r *CommandRecorder) setOffHook(on bool) error {
 	if r.telephonyHID == "" {
 		return nil
 	}
 	f, err := os.OpenFile(r.telephonyHID, os.O_WRONLY, 0)
 	if err != nil {
-		return fmt.Errorf("open telephony HID %s: %w (install the voiced udev rule)", r.telephonyHID, err)
+		return fmt.Errorf("open telephony HID %s: %w (install the Voice udev rule)", r.telephonyHID, err)
 	}
 	defer f.Close()
 	v := byte(0)

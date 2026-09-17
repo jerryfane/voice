@@ -8,7 +8,7 @@ import (
 
 // Match reports whether transcript contains a configured phrase within the
 // normalised edit-distance tolerance. It returns the remaining command after
-// the wake phrase, so "hey herdr turn off the TV" needs only one utterance.
+// the wake phrase, so "hey voice turn off the TV" needs only one utterance.
 func Match(transcript string, phrases []string, fuzz float64) (matched bool, command string, phrase string) {
 	words := strings.Fields(normalize(transcript))
 	for _, raw := range phrases {

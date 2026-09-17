@@ -32,12 +32,12 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o dist/voiced ./cmd/voiced
-          tar -C dist -czf "voiced_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz" voiced
+          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o dist/voice ./cmd/voice
+          tar -C dist -czf "voice_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz" voice
       - uses: actions/upload-artifact@v5
         with:
-          name: voiced-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: voiced_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
+          name: voice-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: voice_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
 
   publish:
     needs: build
