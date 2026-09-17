@@ -309,16 +309,25 @@ func countBefore(count []string) (int, string, bool) {
 // normalise lowercases, drops punctuation, and turns hyphenated numbers into
 // separate words so "twenty-five" parses like "twenty five".
 func normalise(text string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(text) {
+	lower := strings.ToLower(text)
+	// A byte slice rather than a strings.Builder: every rune this keeps is
+	// ASCII and every other rune becomes a space, so the result is ASCII by
+	// construction and appending needs no error-returning writer. That is the
+	// point - strings.Builder's writers return an error that is always nil,
+	// which is exactly the kind of call that gets discarded with a blank and
+	// then needs a CI exclusion to defend. Avoiding the writer means the
+	// package holds no discarded result at all, so errcheck -blank passes
+	// with nothing excluded.
+	out := make([]byte, 0, len(lower))
+	for _, r := range lower {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
+			out = append(out, byte(r))
 		default:
-			b.WriteRune(' ')
+			out = append(out, ' ')
 		}
 	}
-	return strings.Join(strings.Fields(b.String()), " ")
+	return strings.Join(strings.Fields(string(out)), " ")
 }
 
 // Spoken renders a duration the way a person says it, for confirmations and

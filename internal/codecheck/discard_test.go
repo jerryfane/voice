@@ -4,10 +4,11 @@
 // call whose error was assigned to the blank identifier, so a failure to
 // persist a fired timer or to clear a speakerphone's off-hook report vanished.
 //
-// CI runs `errcheck -blank -ignoretests -excludeonly` against an explicit
-// checked-in exclude file, which is the real guarantee for production code: it
-// is type-aware, and -excludeonly means errcheck's own ~19 bundled exclusions
-// do not silently apply, so the checked-in file is the complete set. This
+// CI runs `errcheck -blank -ignoretests -excludeonly` with NO exclude file,
+// which is the real guarantee for production code: it is type-aware, and
+// -excludeonly means errcheck's own ~19 bundled exclusions do not apply
+// either, so the invariant is that production discards nothing at all - no
+// list of shapes or names to keep current. This
 // check covers the test tree that CI skips, and it fails fast in the suite
 // people actually run. It is name-scoped by design - a syntactic pass cannot
 // know a call returns an error - so it is a fast regression guard, not a

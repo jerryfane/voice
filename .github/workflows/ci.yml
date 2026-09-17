@@ -32,10 +32,11 @@ jobs:
       # invariant exists to remove, and the bundled set silences the
       # fmt.Print family, where a broken pipe is a genuine failure.
       #
-      # .errcheck-excludes is therefore the complete exclusion set, carries a
-      # reason per entry, and contains only provably infallible symbols. It is
-      # stripped to bare symbols before use because errcheck has no comment
-      # syntax and would otherwise load each reason as an inert entry.
+      # -excludeonly with NO exclude file: errcheck's own ~19 bundled
+      # exclusions do not apply and this repo adds none, so the invariant is
+      # that production contains no discarded call result at all - checkable
+      # without enumerating a single shape or name, which is what four rounds
+      # of enumerating them failed to achieve.
       #
       # Four rounds of
       # review each enumerated a shape or a name, and the next real defect
@@ -50,12 +51,7 @@ jobs:
       # Tests are skipped here; internal/codecheck covers the test tree, and
       # its comment stays honest that it is name-scoped rather than complete.
       - name: Unhandled errors (errcheck, CI only)
-        run: |
-          # errcheck has no comment syntax, so the reasoned file is stripped to
-          # bare symbols here rather than shipping 13 inert entries to the tool.
-          sed 's/#.*//' .errcheck-excludes | sed '/^[[:space:]]*$/d' > /tmp/errcheck-excludes
-          echo "excluding exactly:"; cat /tmp/errcheck-excludes
-          go run github.com/kisielk/errcheck@v1.9.0 -ignoretests -blank -excludeonly -exclude /tmp/errcheck-excludes ./...
+        run: go run github.com/kisielk/errcheck@v1.9.0 -ignoretests -blank -excludeonly ./...
       - name: Static binaries
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/voice-amd64 ./cmd/voice
