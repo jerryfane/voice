@@ -40,6 +40,47 @@ DWELL=${DWELL:-8}
 
 hid() { printf "$1" >"$HIDRAW"; }
 
+# make_tone PATH writes a 4 s 1 kHz sine at half amplitude. In-process, so
+# there is no fixture file and no dependency.
+make_tone() {
+	python3 - "$1" <<'TONE'
+import array
+import math
+import sys
+import wave
+
+rate = 48000
+samples = array.array(
+    "h",
+    (int(16000 * math.sin(2 * math.pi * 1000 * n / rate)) for n in range(rate * 4)),
+)
+with wave.open(sys.argv[1], "wb") as w:
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(rate)
+    w.writeframes(samples.tobytes())
+TONE
+	[ -s "$1" ]
+}
+
+# card_of DEVICE extracts the ALSA card number from a plughw/hw device string.
+card_of() {
+	printf '%s' "$1" | sed -n 's/.*hw:\([0-9][0-9]*\).*/\1/p'
+}
+
+# sample_streams CARD prints the playback and capture substream status, which
+# is how this script knows whether audio actually moved rather than assuming
+# it. state RUNNING with hw_ptr advancing on playback is the proof that a
+# capture peak of zero is a real result and not an untested assumption.
+sample_streams() {
+	printf '    playback substream:\n'
+	sed -n '1,4p' "/proc/asound/card$1/pcm0p/sub0/status" 2>/dev/null | sed 's/^/      /' \
+		|| printf '      (no playback substream status available)\n'
+	printf '    capture substream:\n'
+	sed -n '1,4p' "/proc/asound/card$1/pcm0c/sub0/status" 2>/dev/null | sed 's/^/      /' \
+		|| printf '      (no capture substream status available)\n'
+}
+
 # DRY_RUN=1 executes every automated phase with the human steps stubbed, so
 # the instrument can be proven on the real hardware BEFORE a person is asked to
 # stand at the speaker. Two sessions have now died on defects in this script,
@@ -358,6 +399,70 @@ echo "by method rather than hardware. Real frames at peak zero, WITH the"
 echo "off-hook descriptor proven held either side and the loopback control"
 echo "nonzero, is the first genuine evidence of a hardware or firmware mute -"
 echo "and only then is the owner's mute-button press worth his time."
+
+echo
+echo "=== phase 1e: OFF-HOOK HELD **AND** A KNOWN SOUND - the decisive arm"
+echo "Phases 1c and 1d are each confounded on their own, and saying so is the"
+echo "point: 1d held off-hook but nothing was playing, and a quiet room reads as"
+echo "zero whether or not the microphone works; 1c played a tone but held no"
+echo "off-hook, and without off-hook this device streams digital silence by"
+echo "design. Neither result is evidence about the hardware. This arm holds the"
+echo "off-hook report open AND plays the tone AND prints the substream state, so"
+echo "all three confounds are closed at once."
+offhook_tone_capture() {
+	tone=$(mktemp /tmp/powerconf-tone-XXXXXX.wav)
+	if ! make_tone "$tone"; then
+		printf '    SETUP FAILED, could not generate the tone\n'
+		rm -f "$tone"
+		return 1
+	fi
+	if ! exec 9>"$HIDRAW"; then
+		printf '    SETUP FAILED, cannot open %s\n' "$HIDRAW"
+		rm -f "$tone"
+		return 1
+	fi
+	if ! printf '\x02\x01\x00' >&9; then
+		printf '    SETUP FAILED, cannot write off-hook to %s\n' "$HIDRAW"
+		exec 9>&-
+		rm -f "$tone"
+		return 1
+	fi
+	printf '    off-hook written, descriptor HELD OPEN on fd 9\n'
+	card=$(card_of "$OUTDEV")
+	[ -n "$card" ] || card=0
+	aplay -D "$OUTDEV" "$tone" >/dev/null 2>&1 &
+	player=$!
+	( sleep 2; sample_streams "$card" ) &
+	sampler=$!
+	sleep 1
+	capture 3 "capture with OFF-HOOK HELD AND the tone playing"
+	status=$?
+	wait "$player" 2>/dev/null
+	wait "$sampler" 2>/dev/null
+	if printf '\x02\x01\x00' >&9 2>/dev/null; then
+		printf '    off-hook descriptor still writable AFTER the capture: held\n'
+	else
+		printf '    WARNING: off-hook was NOT held through the capture; this arm\n'
+		printf '    proves nothing and its reading must be discarded\n'
+		status=1
+	fi
+	exec 9>&-
+	rm -f "$tone"
+	return "$status"
+}
+offhook_tone_capture || note_failure "off-hook held with tone playing"
+if [ -n "${LOOPDEV:-}" ]; then
+	capture 3 "loopback control AFTER the decisive arm" "$LOOPDEV" \
+		|| note_failure "loopback control after the decisive arm"
+fi
+echo "HOW TO READ THE DECISIVE ARM - all four conditions must hold before any"
+echo "conclusion about the hardware is warranted: off-hook reported held BEFORE"
+echo "and AFTER, playback substream RUNNING with hw_ptr advancing, a nonzero"
+echo "loopback control proving the measurement path reports peaks at all, and a"
+echo "real frame and byte count. With all four: a peak at or near zero is the"
+echo "first genuine evidence that the PowerConf capture path carries silence -"
+echo "and only then is the owner's mute-button press worth his time. If any one"
+echo "of the four is missing, this arm is as uninformative as the two before it."
 
 echo
 echo "=== phase 2: live wake attempt"
