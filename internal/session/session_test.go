@@ -357,3 +357,29 @@ func TestShutdownGivesUpOnAStuckCapture(t *testing.T) {
 		t.Errorf("shutdown took %v with a stuck capture, want about %v", waited, captureStopTimeout)
 	}
 }
+
+// A bare wake phrase is accepted: it acknowledges locally and asks for the
+// request, without reaching the planner. The README says so, and nothing
+// asserted it until now.
+func TestBareWakePhraseAsksAndSkipsThePlanner(t *testing.T) {
+	a, ind, player := feedbackAssistant(t, &countingPlanner{}, "hey voice")
+	planner := a.Brain.(*countingPlanner)
+	tts := &recordingSynthesizer{}
+	a.TTS = tts
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if planner.calls != 0 {
+		t.Errorf("planner called %d times for a bare wake phrase", planner.calls)
+	}
+	if !saidContaining(tts.spoken(), "followed by your request") {
+		t.Errorf("did not ask for the request: %q", tts.spoken())
+	}
+	if player.pcm != 1 {
+		t.Errorf("acknowledgement sound played %d times, want 1", player.pcm)
+	}
+	want := []feedback.State{feedback.Idle, feedback.Listening, feedback.Idle}
+	if got := transitions(ind.states); !equal(got, want) {
+		t.Errorf("indicator transitions = %v, want %v", got, want)
+	}
+}
