@@ -30,12 +30,23 @@ const (
 // can neither be taken off hook nor show an indicator.
 var ErrNoOutputs = errors.New("device advertises no single-bit HID output controls")
 
-// Bit locates one boolean output inside a report.
+// Bit locates one boolean output inside a report. Payload carries the report's
+// full payload length so every writer emits a report of the length the device
+// declared: a short write is a different report as far as firmware is
+// concerned, which is how an undersized off-hook report can leave a
+// speakerphone microphone gated.
 type Bit struct {
 	ReportID byte
 	Byte     int  // index into the report payload, excluding the report ID
 	Mask     byte // bit within that byte
+	Payload  int  // report payload length in bytes, excluding the report ID
 }
+
+// StandardOffHook is the telephony off-hook output that USB speakerphones
+// implement at a fixed location: report 2, first payload bit, two payload
+// bytes. Voice uses it only when a device's own descriptor is unreadable, so
+// capture still un-gates the microphone on hosts where sysfs is unavailable.
+var StandardOffHook = Bit{ReportID: 2, Byte: 0, Mask: 1, Payload: 2}
 
 // Outputs is the set of single-bit output controls a device advertises,
 // discovered by parsing its report descriptor rather than assuming a layout.
@@ -94,13 +105,15 @@ const (
 	tagPop           = 0xb4
 )
 
-// Descriptors come from device firmware, so a malformed one must fail fast
-// instead of making Voice walk a four-billion-field report item. Real reports
-// are orders of magnitude smaller than these ceilings.
+// A descriptor is firmware input, so the parser's work must be bounded by the
+// bytes it was handed rather than by numbers those bytes claim. Two bounds do
+// that: iteration only ever walks usages the descriptor actually declares (at
+// most one per two bytes), and a report's bit budget is capped by what the
+// hidraw transport can carry, so no declared count can make the parser loop or
+// allocate beyond the input it came from.
 const (
-	maxFieldBits  = 32
-	maxFieldCount = 1024
-	maxReportBits = 1 << 16
+	maxReportBytes = 4096               // hidraw rejects larger reports than this
+	maxIndexedBits = maxReportBytes * 8 // single-bit outputs Voice will index at all
 )
 
 // ParseOutputs walks a HID report descriptor and records every one-bit output
@@ -112,17 +125,24 @@ func ParseOutputs(desc []byte) (*Outputs, error) {
 		return nil, errors.New("empty report descriptor")
 	}
 	o := &Outputs{bits: map[uint32]Bit{}, sizes: map[byte]int{}}
-	var (
+	// HID Push/Pop snapshot the whole global item state, not just the usage
+	// page, so the parser keeps them together.
+	type globals struct {
 		page        uint16
 		reportSize  uint32
 		reportCount uint32
 		reportID    byte
-		usages      []uint32 // packed page|usage, in declaration order
-		rangeMin    uint32
-		rangeMax    uint32
-		haveRange   bool
-		offsets     = map[byte]int{} // report ID -> next free output bit
-		pushed      []uint16
+	}
+	var (
+		g         globals
+		usages    []uint32 // packed page|usage, in declaration order
+		rangeMin  uint32
+		rangeMax  uint32
+		haveRange bool
+		offsets   = map[byte]uint64{} // report ID -> next free output bit
+		pushed    []globals
+		depth     int // open collections; a truncated dump never closes them
+		indexed   int // single-bit outputs indexed so far
 	)
 	clearLocals := func() { usages, haveRange = nil, false }
 	for i := 0; i < len(desc); {
@@ -147,59 +167,102 @@ func ParseOutputs(desc []byte) (*Outputs, error) {
 		}
 		switch b & 0xfc {
 		case tagUsagePage:
-			page = uint16(v)
+			g.page = uint16(v)
 		case tagReportSize:
-			reportSize = v
+			g.reportSize = v
 		case tagReportCount:
-			reportCount = v
+			g.reportCount = v
 		case tagReportID:
-			reportID = byte(v)
+			g.reportID = byte(v)
 		case tagUsage:
-			usages = append(usages, packUsage(page, v, size))
+			usages = append(usages, packUsage(g.page, v, size))
 		case tagUsageMin:
-			rangeMin, haveRange = packUsage(page, v, size), true
+			rangeMin, haveRange = packUsage(g.page, v, size), true
 		case tagUsageMax:
-			rangeMax, haveRange = packUsage(page, v, size), true
+			rangeMax, haveRange = packUsage(g.page, v, size), true
 		case tagOutput:
-			if reportSize > maxFieldBits || reportCount > maxFieldCount {
-				return nil, fmt.Errorf("implausible output item at byte %d: %d fields of %d bits", i, reportCount, reportSize)
+			// Check the report's bit budget before walking anything, so a
+			// declared count can never drive work the transport could not
+			// carry in the first place.
+			start := offsets[g.reportID]
+			end := start + uint64(g.reportSize)*uint64(g.reportCount)
+			bytes := (end + 7) / 8
+			if bytes > maxReportBytes {
+				return nil, fmt.Errorf("output report %d declares %d bytes, more than the %d hidraw carries", g.reportID, bytes, maxReportBytes)
 			}
-			start := offsets[reportID]
-			if reportSize == 1 {
-				for n := range int(reportCount) {
+			offsets[g.reportID] = end
+			if int(bytes) > o.sizes[g.reportID] {
+				o.sizes[g.reportID] = int(bytes)
+			}
+			if g.reportSize == 1 {
+				fields := named(usages, rangeMin, rangeMax, haveRange, g.reportCount)
+				indexed += fields
+				if indexed > maxIndexedBits {
+					return nil, fmt.Errorf("report descriptor names more than %d single-bit outputs", maxIndexedBits)
+				}
+				for n := range fields {
 					u, ok := usageAt(usages, rangeMin, rangeMax, haveRange, n)
 					if !ok {
 						continue // constant padding: occupies bits, names nothing
 					}
-					bit := start + n
-					o.bits[u] = Bit{ReportID: reportID, Byte: bit / 8, Mask: 1 << (bit % 8)}
+					bit := start + uint64(n)
+					o.bits[u] = Bit{ReportID: g.reportID, Byte: int(bit / 8), Mask: 1 << (bit % 8)}
 				}
 			}
-			offsets[reportID] = start + int(reportSize*reportCount)
-			if offsets[reportID] > maxReportBits {
-				return nil, fmt.Errorf("output report %d exceeds %d bits", reportID, maxReportBits)
-			}
-			if sz := (offsets[reportID] + 7) / 8; sz > o.sizes[reportID] {
-				o.sizes[reportID] = sz
+			clearLocals()
+		case tagCollection:
+			depth++
+			clearLocals()
+		case tagEndCollection:
+			depth--
+			if depth < 0 {
+				return nil, fmt.Errorf("unbalanced end-collection at byte %d", i)
 			}
 			clearLocals()
-		case tagInput, tagFeature, tagCollection, tagEndCollection:
+		case tagInput, tagFeature:
 			// Input and feature bits live in their own report space, so only
 			// the local usage state has to be reset.
 			clearLocals()
 		case tagPush:
-			pushed = append(pushed, page)
+			pushed = append(pushed, g)
 		case tagPop:
 			if n := len(pushed); n > 0 {
-				page, pushed = pushed[n-1], pushed[:n-1]
+				g, pushed = pushed[n-1], pushed[:n-1]
 			}
 		}
 		i += 1 + size
+	}
+	if depth != 0 {
+		return nil, fmt.Errorf("truncated report descriptor: %d collection(s) never closed in %d bytes", depth, len(desc))
+	}
+	// A report's payload length is only final once every item for that report
+	// has been seen, so stamp it onto each bit at the end: writers must never
+	// have to ask a second object how long the report is.
+	for u, bit := range o.bits {
+		bit.Payload = o.sizes[bit.ReportID]
+		o.bits[u] = bit
 	}
 	if len(o.bits) == 0 {
 		return o, ErrNoOutputs
 	}
 	return o, nil
+}
+
+// named reports how many fields of a main item the descriptor actually names.
+// It is the floor of the declared count and the declared usages, so a hostile
+// or corrupt count cannot drive iteration: the usage list and the usage range
+// both come from bytes the caller supplied.
+func named(usages []uint32, min, max uint32, haveRange bool, count uint32) int {
+	n := len(usages)
+	if haveRange && max >= min {
+		if span := int(max-min) + 1; span > n {
+			n = span
+		}
+	}
+	if int64(count) < int64(n) {
+		n = int(count)
+	}
+	return n
 }
 
 // packUsage applies the current usage page, unless the item is a 4-byte

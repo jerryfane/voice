@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
+	"unsafe"
 )
 
 // Telephony owns one hidraw node. Output reports pack several controls into the
@@ -25,9 +27,11 @@ type Telephony struct {
 // itself is opened per write: these reports are rare, and holding a writable
 // descriptor open for the life of the service is not worth it.
 //
-// A descriptor that cannot be read is not fatal: fallback reports the usages
-// Voice has always assumed for USB telephony devices, so capture keeps working
-// on hosts where sysfs is not reachable.
+// A descriptor that cannot be read, cannot be trusted, or does not parse is
+// not fatal: the handle falls back to StandardOffHook so capture still
+// un-gates the microphone, and it advertises no indicator. It never retains a
+// partially parsed map, because half a descriptor maps bits with confidence it
+// has not earned.
 func Open(path string) (*Telephony, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("no hidraw path configured")
@@ -36,27 +40,66 @@ func Open(path string) (*Telephony, error) {
 		return nil, fmt.Errorf("hidraw %s: %w (install the Voice udev rule)", path, err)
 	}
 	t := &Telephony{path: path, state: map[byte][]byte{}}
-	desc, err := ReadDescriptor(path)
-	if err != nil {
-		return t, fmt.Errorf("read report descriptor for %s: %w", path, err)
+	desc, readErr := ReadDescriptor(path)
+	if len(desc) == 0 {
+		return t, fmt.Errorf("read report descriptor for %s: %w", path, readErr)
 	}
 	outs, err := ParseOutputs(desc)
-	t.outs = outs
 	if err != nil {
 		return t, fmt.Errorf("parse report descriptor for %s: %w", path, err)
+	}
+	t.outs = outs
+	if readErr != nil {
+		return t, fmt.Errorf("report descriptor for %s parsed but unverified: %w", path, readErr)
 	}
 	return t, nil
 }
 
-// ReadDescriptor reads the HID report descriptor that sysfs exports for a
-// hidraw node, for example /dev/hidraw5 ->
-// /sys/class/hidraw/hidraw5/device/report_descriptor.
+// hidiocgrdescsize is HIDIOCGRDESCSIZE: _IOR('H', 0x01, int). The kernel is
+// the only authority on how long a device's report descriptor is, so Voice
+// asks it rather than trusting the number of bytes a read happened to yield.
+const hidiocgrdescsize = 0x80044801
+
+// ReadDescriptor reads the HID report descriptor sysfs exports for a hidraw
+// node, for example /dev/hidraw5 ->
+// /sys/class/hidraw/hidraw5/device/report_descriptor, and cross-checks its
+// length against the kernel's.
+//
+// A length mismatch returns no descriptor at all: a short read is a different
+// descriptor, and a prefix of a descriptor can parse cleanly while describing
+// a device that does not exist. When the length cannot be checked the
+// descriptor is returned with an error, so callers can use it and say it is
+// unverified.
 func ReadDescriptor(devPath string) ([]byte, error) {
 	name := filepath.Base(devPath)
 	if !strings.HasPrefix(name, "hidraw") {
 		return nil, fmt.Errorf("%s is not a hidraw node", devPath)
 	}
-	return os.ReadFile(filepath.Join("/sys/class/hidraw", name, "device", "report_descriptor"))
+	desc, err := os.ReadFile(filepath.Join("/sys/class/hidraw", name, "device", "report_descriptor"))
+	if err != nil {
+		return nil, err
+	}
+	size, err := descriptorSize(devPath)
+	if err != nil {
+		return desc, fmt.Errorf("cannot confirm descriptor length, read %d bytes: %w", len(desc), err)
+	}
+	if size != len(desc) {
+		return nil, fmt.Errorf("short descriptor read: kernel reports %d bytes, read %d", size, len(desc))
+	}
+	return desc, nil
+}
+
+func descriptorSize(devPath string) (int, error) {
+	f, err := os.Open(devPath)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	var n int32
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), hidiocgrdescsize, uintptr(unsafe.Pointer(&n))); errno != 0 {
+		return 0, fmt.Errorf("HIDIOCGRDESCSIZE on %s: %w", devPath, errno)
+	}
+	return int(n), nil
 }
 
 // Describe names the device and the controls it advertises.
@@ -118,8 +161,13 @@ func (t *Telephony) SetReportBit(bit Bit, on bool) error {
 	return t.write(bit, on)
 }
 
+// write serialises both the retained report state and the physical write. The
+// lock is held across the I/O on purpose: the capture path and the feedback
+// path write the same report, and releasing the lock before the write would
+// let a stale snapshot land on the device after a newer one.
 func (t *Telephony) write(bit Bit, on bool) error {
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	payload := t.payload(bit)
 	if on {
 		payload[bit.Byte] |= bit.Mask
@@ -129,7 +177,6 @@ func (t *Telephony) write(bit Bit, on bool) error {
 	report := make([]byte, 0, len(payload)+1)
 	report = append(report, bit.ReportID)
 	report = append(report, payload...)
-	t.mu.Unlock()
 
 	f, err := os.OpenFile(t.path, os.O_WRONLY, 0)
 	if err != nil {
@@ -142,11 +189,14 @@ func (t *Telephony) write(bit Bit, on bool) error {
 	return nil
 }
 
-// payload returns the retained bytes for a report, sized from the descriptor
-// when known and from the touched bit otherwise. Callers hold t.mu.
+// payload returns the retained bytes for a report, sized from the length the
+// Bit carries. Firmware treats a short report as a different report, so the
+// length must not depend on whether the descriptor happened to parse: a
+// descriptor-derived Bit and StandardOffHook both state their own length.
+// Callers hold t.mu.
 func (t *Telephony) payload(bit Bit) []byte {
 	p := t.state[bit.ReportID]
-	want := t.outs.PayloadBytes(bit.ReportID)
+	want := bit.Payload
 	if want <= bit.Byte {
 		want = bit.Byte + 1
 	}

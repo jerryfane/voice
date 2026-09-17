@@ -3,6 +3,7 @@ package hid
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -144,4 +145,74 @@ func read(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// A device whose descriptor cannot be read still has to be taken off hook, and
+// firmware treats a short report as a different report: an undersized off-hook
+// write leaves the microphone gated. The fallback must therefore carry the
+// standard two-byte payload even with no parsed descriptor.
+func TestFallbackOffHookWritesFullStandardReport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hidraw-fake")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dev := &Telephony{path: path, state: map[byte][]byte{}} // outs nil: descriptor unreadable
+	if dev.Has(PageLED, LEDOffHook) {
+		t.Fatal("a device with no parsed descriptor must advertise nothing")
+	}
+	if err := dev.SetReportBit(StandardOffHook, true); err != nil {
+		t.Fatalf("fallback off-hook: %v", err)
+	}
+	if got := read(t, path); string(got) != string([]byte{2, 0x01, 0x00}) {
+		t.Fatalf("fallback off-hook report = % x, want 02 01 00", got)
+	}
+	if err := dev.SetReportBit(StandardOffHook, false); err != nil {
+		t.Fatalf("fallback clear: %v", err)
+	}
+	if got := read(t, path); string(got) != string([]byte{2, 0x00, 0x00}) {
+		t.Fatalf("fallback cleared report = % x, want 02 00 00", got)
+	}
+}
+
+// The capture path and the feedback path write the same report from different
+// goroutines. Every write must be a whole, correctly sized report, and the
+// off-hook bit capture depends on must survive all of them.
+func TestConcurrentWritersNeverEmitATornReport(t *testing.T) {
+	outs, err := ParseOutputs(powerConfDescriptor)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "hidraw-fake")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dev := &Telephony{path: path, outs: outs, state: map[byte][]byte{}}
+	if ok, err := dev.Set(PageLED, LEDOffHook, true); !ok || err != nil {
+		t.Fatalf("off-hook: ok=%v err=%v", ok, err)
+	}
+
+	var wg sync.WaitGroup
+	for _, usage := range []uint16{LEDMic, LEDRing, LEDMute, LEDHold} {
+		for range 25 {
+			wg.Add(1)
+			go func(u uint16) {
+				defer wg.Done()
+				if _, err := dev.Set(PageLED, u, true); err != nil {
+					t.Error(err)
+				}
+				if _, err := dev.Set(PageLED, u, false); err != nil {
+					t.Error(err)
+				}
+			}(usage)
+		}
+	}
+	wg.Wait()
+
+	got := read(t, path)
+	if len(got) != 3 || got[0] != 2 {
+		t.Fatalf("final report = % x, want a three-byte report 2", got)
+	}
+	if got[1]&0x01 == 0 {
+		t.Fatalf("final report = % x: indicator writes cleared the off-hook bit", got)
+	}
 }

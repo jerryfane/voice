@@ -59,8 +59,9 @@ func (r *CommandRecorder) setOffHook(on bool) error {
 		return nil
 	}
 	// The descriptor did not advertise the LED, which happens when sysfs is
-	// unreadable. Fall back to the standard headset report layout.
-	if err := r.telephony.SetReportBit(hid.Bit{ReportID: 2, Byte: 0, Mask: 1}, on); err != nil {
+	// unreadable. Fall back to the standard headset report, which states its
+	// own length so the write is not short.
+	if err := r.telephony.SetReportBit(hid.StandardOffHook, on); err != nil {
 		return fmt.Errorf("set telephony off-hook=%v: %w", on, err)
 	}
 	return nil
