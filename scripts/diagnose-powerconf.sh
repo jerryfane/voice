@@ -189,6 +189,31 @@ human_only "a second mute button press" \
 capture 3 "capture after second toggle" || note_failure "capture after second toggle"
 
 echo
+echo "=== phase 1b: does the RUNNING SERVICE contend for the capture device"
+echo "Every capture in phase 1 was taken with voice stopped. If the running"
+echo "service holds the device exclusively, then any capture taken while it ran"
+echo "was competing with it - and any conclusion drawn from such a capture is"
+echo "void, whatever number it produced. This measures both states so the"
+echo "difference is on the record instead of assumed."
+echo "Noted against myself: this check existed only in my instructions to the"
+echo "device seat for three rounds, which is why it kept not happening. It is"
+echo "in the script now."
+if ! systemctl start voice >/dev/null 2>&1; then
+	note_failure "could not start voice for the contention test"
+else
+	sleep 3
+	printf '    service state: %s\n' "$(systemctl is-active voice)"
+	capture 3 "capture with the service ACTIVE" || note_failure "capture with the service ACTIVE"
+fi
+systemctl stop voice >/dev/null 2>&1
+sleep 1
+printf '    service state: %s\n' "$(systemctl is-active voice)"
+capture 3 "capture with the service STOPPED" || note_failure "capture with the service STOPPED"
+echo "READ THIS: if ACTIVE fails or reads differently from STOPPED, the service"
+echo "and this script cannot both hold the microphone, and every earlier"
+echo "reading taken with voice running is void for that reason alone. If both"
+echo "read the same, contention is ruled out and that is worth knowing too."
+
 echo "=== phase 1c: does the microphone hear a KNOWN SOUND (no human needed)"
 echo "Every capture so far was taken in a quiet room with nobody speaking, so"
 echo "peak=0 was the EXPECTED result and proves nothing about the microphone."
