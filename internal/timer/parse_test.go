@@ -20,6 +20,12 @@ func TestParseSetsTimersFromSpokenDurations(t *testing.T) {
 		{"set a timer for one hour thirty minutes", 90 * time.Minute},
 		{"set a timer for 90 seconds", 90 * time.Second},
 		{"start a 3 minute timer", 3 * time.Minute},
+		// Bare forms with no leading verb, and verbs the first intent gate
+		// missed. All four were rejected by the previous revision.
+		{"ten minute timer", 10 * time.Minute},
+		{"10 minute timer", 10 * time.Minute},
+		{"add a 10 minute timer", 10 * time.Minute},
+		{"put a timer on for 10 minutes", 10 * time.Minute},
 	} {
 		c := Parse(tc.said)
 		if c.Kind != Set || c.Duration != tc.want {
@@ -66,6 +72,14 @@ func TestParseLeavesOtherSpeechToThePlanner(t *testing.T) {
 		"how does a timer work",
 		"my timer app crashed",
 		"the timer on the oven is broken",
+		// A set verb leading a sentence that is about something else. These
+		// were intercepted and answered with "how long should the timer be?".
+		"start the timer app",
+		"start dinner while the timer runs",
+		"begin recording when the timer for the oven goes off",
+		"run to the store before the timer for the oven ends",
+		"set the timer for the oven aside",
+		"give me the remote near the timer for the microwave",
 	} {
 		if c := Parse(said); c.Kind != None {
 			t.Errorf("Parse(%q) = %+v, want None", said, c)
@@ -82,6 +96,13 @@ func TestParseReadsOneContiguousDurationOnly(t *testing.T) {
 	}{
 		{"set a timer for 10 minutes i have been on hold for 20 minutes already", 10 * time.Minute},
 		{"set a 10 minute timer after this 5 minute video", 10 * time.Minute},
+		// A duration mentioned earlier, for something else, must not replace
+		// the requested one: the duration has to be anchored to the word
+		// "timer", not merely be the first one in the sentence.
+		{"i have been on hold 20 minutes set a timer for 10 minutes", 10 * time.Minute},
+		{"my break was 20 minutes long set a timer for 10 minutes now", 10 * time.Minute},
+		{"the movie is 20 minutes long set a timer for 10 minutes", 10 * time.Minute},
+		{"set a timer for 10 minutes plus wait 5 minutes", 10 * time.Minute},
 		{"set a timer for one hour thirty minutes", 90 * time.Minute},
 		{"set a timer for one hour and thirty minutes", 90 * time.Minute},
 	} {
@@ -93,9 +114,11 @@ func TestParseReadsOneContiguousDurationOnly(t *testing.T) {
 
 // "set a timer" with no duration must ask, not invent a length.
 func TestParseTimerWithoutDurationAsks(t *testing.T) {
-	c := Parse("set a timer")
-	if c.Kind != Set || c.Duration != 0 {
-		t.Fatalf("got %+v, want Set with no duration", c)
+	for _, said := range []string{"set a timer", "start a timer please", "set me a new timer"} {
+		c := Parse(said)
+		if c.Kind != Set || c.Duration != 0 {
+			t.Errorf("Parse(%q) = %+v, want Set with no duration", said, c)
+		}
 	}
 }
 
