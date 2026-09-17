@@ -162,7 +162,11 @@ than half of the new one. A database that cannot be opened disables timers with
 an explanation in the log instead of accepting requests it cannot keep.
 
 The driver is `modernc.org/sqlite`, which is pure Go: the release binaries are
-still `CGO_ENABLED=0` static builds for `amd64` and `arm64`.
+still `CGO_ENABLED=0` static builds for `amd64` and `arm64`. It is the only
+third-party dependency, and it is not free — the static `arm64` binary grows
+from 4.9 MB to 10.7 MB. That buys a transactional store the scheduler shares
+with alarms and reminders instead of each of them reimplementing durable
+replacement.
 
 Because `voice off` stops the listener, it silences announcements without
 destroying timers; `voice on` brings them back with the correct remaining time.
