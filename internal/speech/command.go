@@ -67,7 +67,15 @@ func (t *CommandTranscriber) Available() (bool, string) {
 func runnable(path string) (bool, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "--help").CombinedOutput()
+	cmd := exec.CommandContext(ctx, path, "--help")
+	// The context kills the direct child only. A launcher that backgrounds a
+	// descendant and exits leaves that descendant holding the output pipe, and
+	// CombinedOutput then blocks for as long as the grandchild lives - five
+	// seconds of timeout became thirty in the reviewer's reproduction. WaitDelay
+	// forces the pipes closed shortly after the context is done, so the probe
+	// returns on time whatever the engine spawned.
+	cmd.WaitDelay = time.Second
+	out, err := cmd.CombinedOutput()
 	text := strings.TrimSpace(string(out))
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return false, path + ": did not respond to --help within 5s"

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A binary that cannot start must be reported as unusable. `voice doctor`
@@ -42,5 +43,28 @@ func TestRunnableRejectsABinaryThatCannotStart(t *testing.T) {
 	}
 	if ok, detail := runnable(grumpy); !ok {
 		t.Errorf("an engine that exits 1 on --help was rejected: %s", detail)
+	}
+}
+
+// The context kills the direct child only. A launcher that backgrounds a
+// descendant and exits leaves that descendant holding the output pipe, which
+// blocked the probe for as long as the grandchild lived - five seconds of
+// timeout became thirty. `voice doctor` is the reachable caller, and this
+// package adapts any user-configured executable, so wrapper engines are real.
+func TestRunnableReturnsOnTimeEvenIfTheEngineSpawnsALingeringChild(t *testing.T) {
+	dir := t.TempDir()
+	launcher := filepath.Join(dir, "launcher-engine")
+	script := "#!/bin/sh\nsleep 30 &\necho 'usage: launcher-engine'\nexit 0\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	ok, detail := runnable(launcher)
+	elapsed := time.Since(start)
+	if elapsed > 10*time.Second {
+		t.Errorf("probe took %v; it must not wait on a descendant holding the pipe (%s)", elapsed, detail)
+	}
+	if !ok {
+		t.Logf("engine reported unusable after %v: %s", elapsed, detail)
 	}
 }

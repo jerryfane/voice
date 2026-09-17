@@ -67,20 +67,36 @@ done
 check_engine() {
   name=$1
   path=$2
-  if out=$("$path" --help 2>&1); then
-    printf '%s: %s\n' "$name" "$(printf '%s' "$out" | sed -n '1p')"
-    return 0
-  fi
-  status=$?
-  # 127 and the loader's own message are the signature of a binary that
-  # cannot find its shared libraries.
-  printf '%s failed to run (exit %s):\n%s\n' "$name" "$status" "$out" >&2
+  # Capture the status explicitly. `if out=$(...); then ... fi` followed by
+  # $? reports the status of the if-compound, which is 0 when neither branch
+  # body ran - so the previous version printed "(exit 0)" for every failure,
+  # including a 127. An unfailable check is what this function exists to
+  # replace; getting its own diagnostics wrong was the same mistake one layer
+  # in.
+  status=0
+  out=$("$path" --help 2>&1) || status=$?
+
+  # Only a loader failure is fatal. Engines disagree about the exit status of
+  # --help, so a non-zero exit with real output is not evidence of anything -
+  # the same rule the Go-side probe applies, and it has to match or the two
+  # checks disagree about what a working engine looks like.
   case "$out" in
     *"error while loading shared libraries"*)
-      printf 'The engine was built against shared libraries that are not installed.\n' >&2
+      printf '%s cannot start: %s\n' "$name" "$(printf '%s' "$out" | sed -n '1p')" >&2
+      printf 'It was built against shared libraries that are not installed.\n' >&2
+      return 1
       ;;
   esac
-  return 1
+  if [ "$status" -eq 127 ]; then
+    printf '%s cannot start (exit 127):\n%s\n' "$name" "$out" >&2
+    return 1
+  fi
+  if [ -z "$out" ] && [ "$status" -ne 0 ]; then
+    printf '%s failed to run (exit %s) with no output\n' "$name" "$status" >&2
+    return 1
+  fi
+  printf '%s: %s\n' "$name" "$(printf '%s' "$out" | sed -n '1p')"
+  return 0
 }
 
 echo "Speech engines installed:"
