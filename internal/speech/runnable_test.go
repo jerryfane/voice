@@ -3,6 +3,7 @@ package speech
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -49,7 +50,7 @@ func TestRunnableRejectsABinaryThatCannotStart(t *testing.T) {
 	}
 }
 
-// The probe must leave nothing running. A launcher that backgrounds a
+// The probe must leave nothing running IN ITS PROCESS GROUP. A launcher that backgrounds a
 // descendant and exits used to leave that descendant alive after `voice
 // doctor` returned - one orphan per invocation - and the earlier fix hid it:
 // WaitDelay unblocked the caller, so the probe returned in about a second
@@ -57,7 +58,7 @@ func TestRunnableRejectsABinaryThatCannotStart(t *testing.T) {
 //
 // This asserts the descendant is GONE, not that the probe was quick. A
 // timing-only assertion is precisely what let the leak through review.
-func TestRunnableLeavesNoDescendantRunning(t *testing.T) {
+func TestRunnableLeavesNoDescendantInItsProcessGroup(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "descendant.pid")
 	launcher := filepath.Join(dir, "launcher-engine")
@@ -100,8 +101,155 @@ func TestRunnableLeavesNoDescendantRunning(t *testing.T) {
 			if kerr := syscall.Kill(pid, syscall.SIGKILL); kerr != nil {
 				t.Logf("cleanup kill of %d failed: %v", pid, kerr)
 			}
-			t.Fatalf("descendant %d is still running %v after the probe returned; WaitDelay only unblocks the caller, the process group must be killed", pid, elapsed)
+			t.Fatalf("descendant %d is still running %v after the probe returned; WaitDelay only unblocks the caller, the process group must be cleaned up", pid, elapsed)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// The boundary, proven by the reviewer rather than assumed by me: a descendant
+// that calls setsid has LEFT the probe's process group and cannot be reached
+// through it, so it survives. The first version of this fix was titled as
+// though no descendant could survive at all, which was an overclaim.
+//
+// This test pins the boundary so the claim and the code cannot drift apart: if
+// a later change does reach detached descendants, this test fails and must be
+// rewritten, which is the correct way to find out that the guarantee widened.
+func TestRunnableDoesNotReachASetsidDetachedDescendant(t *testing.T) {
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("setsid not available")
+	}
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "detached.pid")
+	launcher := filepath.Join(dir, "detaching-engine")
+	script := "#!/bin/sh\nsetsid sh -c 'echo $$ > " + pidFile + "; exec sleep 45' &\necho 'usage: detaching-engine'\nexit 0\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if ok, detail := runnable(launcher); !ok {
+		t.Logf("engine reported unusable: %s", detail)
+	}
+
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Skipf("shim did not record a detached pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 0 {
+		t.Skipf("unusable detached pid %q", raw)
+	}
+	t.Cleanup(func() {
+		if kerr := syscall.Kill(pid, syscall.SIGKILL); kerr != nil && !errors.Is(kerr, syscall.ESRCH) {
+			t.Logf("cleanup kill of %d failed: %v", pid, kerr)
+		}
+	})
+
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Skipf("detached descendant %d already gone (%v); the shim may not have detached, so this proves nothing", pid, err)
+	}
+	t.Logf("documented boundary holds: detached descendant %d survives the probe, as the code says it does", pid)
+}
+
+// groupMembers is the mechanism the survivor check depends on: kill(2) on a
+// negative pid reports success when any one member was signalable, so the
+// group has to be re-read to know it is empty. If the enumeration is wrong,
+// the verification it feeds is decorative.
+func TestGroupMembersSeesLiveMembersAndForgetsDeadOnes(t *testing.T) {
+	cmd := exec.Command("sleep", "45")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := cmd.Process.Pid
+
+	members, err := groupMembers(pgid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) != 1 || members[0] != pgid {
+		t.Fatalf("groupMembers(%d) = %v, want exactly [%d]", pgid, members, pgid)
+	}
+
+	if err := killGroup(pgid); err != nil {
+		t.Fatalf("killGroup on a group we own failed: %v", err)
+	}
+	if werr := cmd.Wait(); werr == nil {
+		t.Error("expected a signal error from Wait after the group was killed")
+	}
+	if members, err := groupMembers(pgid); err != nil || len(members) != 0 {
+		t.Errorf("after killGroup, groupMembers(%d) = %v (err %v), want empty", pgid, members, err)
+	}
+}
+
+// A zombie stays in the group listing but cannot run, so reporting it as a
+// survivor would be a false warning from the function whose whole purpose is
+// to stop false reports.
+func TestGroupMembersIgnoresZombies(t *testing.T) {
+	// A shell that forks a child, lets it exit, and then sleeps without
+	// reaping leaves exactly one zombie in its own process group.
+	cmd := exec.Command("sh", "-c", "sh -c 'exit 0' & exec sleep 3")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := cmd.Process.Pid
+	t.Cleanup(func() {
+		if kerr := killGroup(pgid); kerr != nil {
+			t.Logf("cleanup killGroup: %v", kerr)
+		}
+		if werr := cmd.Wait(); werr != nil {
+			t.Logf("cleanup wait: %v", werr)
+		}
+	})
+
+	// Give the child time to exit and become a zombie.
+	time.Sleep(300 * time.Millisecond)
+	members, err := groupMembers(pgid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pid := range members {
+		stat, rerr := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+		if rerr != nil {
+			continue
+		}
+		after := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+1:]))
+		if len(after) > 0 && after[0] == "Z" {
+			t.Errorf("groupMembers reported zombie %d as a survivor", pid)
+		}
+	}
+}
+
+// The finding this guards: kill(2) on a negative pid succeeds when any one
+// member was signalable, so a group holding a descendant that changed
+// credentials reported complete success while that descendant kept running -
+// and the caller's warning was gated on the error that never came.
+//
+// A real kill cannot express that here, because the test runs as root and
+// every signal lands. A kill that claims success and does nothing can, and it
+// is the same observable the setuid case produces.
+func TestKillGroupReportsASurvivorWhenTheSignalLies(t *testing.T) {
+	cmd := exec.Command("sleep", "45")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := cmd.Process.Pid
+	t.Cleanup(func() {
+		if kerr := killGroup(pgid); kerr != nil {
+			t.Logf("cleanup killGroup: %v", kerr)
+		}
+		if werr := cmd.Wait(); werr != nil {
+			t.Logf("cleanup wait: %v", werr)
+		}
+	})
+
+	lying := func(int) error { return nil } // reports success, kills nothing
+	err := killGroupWith(pgid, lying)
+	if err == nil {
+		t.Fatal("killGroup reported success while a group member was still running; the survivor check is not verifying anything")
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(pgid)) {
+		t.Errorf("error does not name the group: %v", err)
 	}
 }

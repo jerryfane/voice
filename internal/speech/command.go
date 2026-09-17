@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -70,39 +71,34 @@ func runnable(path string) (bool, string) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, "--help")
 	// The probe runs in its own process group so a wrapper engine's
-	// descendants can be killed with it. Without this, cancelling reaches the
-	// direct child only: a launcher that backgrounds work and exits left that
-	// descendant running after `voice doctor` returned, one orphan per
+	// descendants can be cleaned up with it. Without this, cancelling reaches
+	// the direct child only: a launcher that backgrounds work and exits left
+	// that descendant running after `voice doctor` returned, one orphan per
 	// invocation. WaitDelay fixed the symptom - the probe returned on time,
 	// because forcing the pipes closed unblocks the caller - while the process
-	// it was waiting on stayed alive, which is why the fix looked complete.
+	// it was waiting on stayed alive, which is why that fix looked complete.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// Cancel therefore signals the GROUP, negative pid, rather than the child.
-	// Kill, not terminate: this is a --help probe with no state to flush, and a
-	// wrapper that ignores SIGTERM is exactly the case that leaked.
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			// ESRCH means it exited first, which is the common, healthy path.
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
+		return killGroup(cmd.Process.Pid)
 	}
-	// Kept as a backstop: if a descendant escapes the group by calling
-	// setsid itself, the pipes still close and the probe still returns.
+	// Kept as a backstop: a descendant that calls setsid leaves the group
+	// entirely and cannot be signalled through it, but the pipes still close
+	// and the probe still returns. See killGroup for what that does and does
+	// not guarantee.
 	cmd.WaitDelay = time.Second
 	out, err := cmd.CombinedOutput()
-	// The group is killed here, not only in Cancel, because Cancel runs ONLY
-	// when the context ends. The leak this fixes happens on the healthy path:
-	// the launcher exits immediately, the deadline never fires, Wait returns
-	// once WaitDelay closes the pipes, and the backgrounded descendant is
-	// still running. Cancel alone would have left it exactly as it was.
-	groupErr := killGroup(cmd.Process)
+	// Cleaned up here, not only in Cancel, because Cancel runs ONLY when the
+	// context ends. The leak this fixes happens on the healthy path: the
+	// launcher exits immediately, the deadline never fires, Wait returns once
+	// WaitDelay closes the pipes, and the backgrounded descendant is still
+	// running. Cancel alone would have left it exactly as it was.
+	var groupErr error
+	if cmd.Process != nil {
+		groupErr = killGroup(cmd.Process.Pid)
+	}
 	text := strings.TrimSpace(string(out))
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return false, path + ": did not respond to --help within 5s"
@@ -126,24 +122,102 @@ func runnable(path string) (bool, string) {
 	return true, path
 }
 
-// killGroup signals the probe's whole process group. A wrapper engine that
-// backgrounds a descendant and exits is the reachable case: the descendant
-// inherits the group, so one signal reaches it without the caller needing to
-// know it exists.
-func killGroup(p *os.Process) error {
-	if p == nil {
-		return nil
-	}
-	err := syscall.Kill(-p.Pid, syscall.SIGKILL)
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, syscall.ESRCH):
-		// Nothing left in the group: the common, healthy outcome.
-		return nil
-	default:
+// killGroup terminates whatever remains of the probe's process group and
+// VERIFIES the group is empty afterwards, rather than trusting the kill's
+// return value.
+//
+// The distinction is load-bearing and was a review finding: kill(2) on a
+// negative pid succeeds when at least ONE member was signalable, so a group
+// holding a descendant that changed credentials - a setuid wrapper engine is
+// not hypothetical for a user-configured executable - reported complete
+// success while that member kept running. The caller's warning about a
+// surviving group was therefore blind to precisely the survivor class it
+// existed to report.
+//
+// So members are enumerated from /proc, signalled individually, and the group
+// is re-read until empty or the deadline passes. Enumerating first also means
+// no signal is ever sent to a group id with no observed members, which keeps
+// this away from the pid-reuse race that os.Process guards internally.
+//
+// What this does NOT cover, stated because the fix's own test name overclaimed
+// it once: a descendant that calls setsid has LEFT the group and cannot be
+// reached through it. That process survives the probe.
+func killGroup(pgid int) error {
+	return killGroupWith(pgid, func(pid int) error { return syscall.Kill(pid, syscall.SIGKILL) })
+}
+
+// killGroupWith takes the signal function so the survivor check can be tested
+// for the case that matters: a signal that REPORTS SUCCESS while a member
+// keeps running. Running as root, every real kill succeeds, so a test using
+// the real one cannot tell verification from blind trust - which is how the
+// first version of this function passed its own tests.
+func killGroupWith(pgid int, kill func(int) error) error {
+	members, err := groupMembers(pgid)
+	if err != nil {
 		return err
 	}
+	for _, pid := range members {
+		if kerr := kill(pid); kerr != nil && !errors.Is(kerr, syscall.ESRCH) {
+			return fmt.Errorf("kill %d in group %d: %w", pid, pgid, kerr)
+		}
+	}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		remaining, err := groupMembers(pgid)
+		if err != nil {
+			return err
+		}
+		if len(remaining) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("process group %d still has %d member(s): %v", pgid, len(remaining), remaining)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// groupMembers reads /proc for processes whose process group is pgid. It sees
+// members regardless of their credentials, which is the point: a survivor that
+// cannot be signalled is exactly the one a kill's return value hides.
+func groupMembers(pgid int) ([]int, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, fmt.Errorf("read /proc: %w", err)
+	}
+	var members []int
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue // not a process directory
+		}
+		stat, err := os.ReadFile(filepath.Join("/proc", e.Name(), "stat"))
+		if err != nil {
+			continue // exited between the listing and the read
+		}
+		// comm can contain spaces and parentheses, so fields are counted from
+		// after the final ')': pgrp is the third of those.
+		close := bytes.LastIndexByte(stat, ')')
+		if close < 0 {
+			continue
+		}
+		fields := strings.Fields(string(stat[close+1:]))
+		if len(fields) < 3 {
+			continue
+		}
+		// fields[0] is the state, fields[2] the process group. A zombie is
+		// still listed with its group but cannot run and holds nothing, so
+		// counting it as a survivor would warn about a process that is
+		// already dead - a false report in a function that exists to stop
+		// false reports.
+		if fields[0] == "Z" {
+			continue
+		}
+		if fields[2] == strconv.Itoa(pgid) {
+			members = append(members, pid)
+		}
+	}
+	return members, nil
 }
 
 func firstLine(s string) string {
