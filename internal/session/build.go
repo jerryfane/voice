@@ -61,7 +61,8 @@ func Build(c config.Config) *Assistant {
 			path = p
 		}
 		var err error
-		timers, missed, err = timer.New(timer.Store{Path: path})
+		timers, missed, err = timer.New(timer.Store{Path: path},
+			timer.WithErrorHandler(func(err error) { logger.Printf("timers: %v", err) }))
 		if err != nil {
 			// A scheduler is still returned: unreadable saved state costs the
 			// old timers, not the ability to set new ones.

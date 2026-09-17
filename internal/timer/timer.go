@@ -35,6 +35,15 @@ func (t Timer) Remaining(now time.Time) time.Duration {
 	return 0
 }
 
+// Saver is how the scheduler persists and recovers its set. Store is the
+// production implementation; the interface exists so the scheduler can be
+// exercised against a store that fails, which is the only way to test that
+// such a failure is reported rather than swallowed.
+type Saver interface {
+	Load() ([]Timer, error)
+	Save([]Timer) error
+}
+
 // Store persists the timer set as JSON.
 type Store struct{ Path string }
 
@@ -107,7 +116,7 @@ func (s Store) Save(ts []Timer) error {
 // Scheduler owns the live timer set. It is safe for concurrent use: the
 // session loop reads and cancels while the scheduler goroutine fires.
 type Scheduler struct {
-	store Store
+	store Saver
 	now   func() time.Time
 	after func(time.Duration) <-chan time.Time
 
@@ -117,6 +126,7 @@ type Scheduler struct {
 
 	fired   chan Timer
 	changed chan struct{}
+	onError func(error)
 }
 
 // Option configures a Scheduler. Tests inject a clock; production uses none.
@@ -128,10 +138,18 @@ func WithClock(now func() time.Time, after func(time.Duration) <-chan time.Time)
 	return func(s *Scheduler) { s.now, s.after = now, after }
 }
 
+// WithErrorHandler reports failures the scheduler cannot return to a caller.
+// Firing happens on its own goroutine, so a failure to persist the set after a
+// timer fires has nowhere to go: without this it would be discarded, and the
+// fired timer could come back after a restart.
+func WithErrorHandler(h func(error)) Option {
+	return func(s *Scheduler) { s.onError = h }
+}
+
 // New loads any persisted timers and returns a scheduler plus the timers that
 // expired while Voice was not running, which the caller should report instead
 // of firing silently.
-func New(store Store, opts ...Option) (*Scheduler, []Timer, error) {
+func New(store Saver, opts ...Option) (*Scheduler, []Timer, error) {
 	s := &Scheduler{
 		store:   store,
 		now:     time.Now,
@@ -221,6 +239,14 @@ func (s *Scheduler) Cancel(match func(Timer) bool) ([]Timer, error) {
 	return removed, err
 }
 
+// fail reports an error the scheduler cannot return. Silence here would mean a
+// fired timer that reappears after a restart with nobody warned.
+func (s *Scheduler) fail(err error) {
+	if s.onError != nil {
+		s.onError(err)
+	}
+}
+
 func (s *Scheduler) notify() {
 	select {
 	case s.changed <- struct{}{}:
@@ -280,7 +306,9 @@ func (s *Scheduler) emitDue() {
 	if len(due) > 0 {
 		// Persisting before the send means a crash between firing and
 		// announcing loses the announcement, not the state.
-		_ = s.store.Save(s.timers)
+		if err := s.store.Save(s.timers); err != nil {
+			s.fail(fmt.Errorf("saving after %d timer(s) fired: %w", len(due), err))
+		}
 	}
 	s.mu.Unlock()
 	if len(due) == 0 {

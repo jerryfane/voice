@@ -62,13 +62,16 @@ func (a *Assistant) cancelTimers(c timer.Command) string {
 			len(live), timer.Spoken(live[0].Duration))
 	}
 	removed, err := a.Timers.Cancel(match)
-	if err != nil {
-		a.logf("timer persist: %v", err)
-	}
-	switch len(removed) {
-	case 0:
+	switch {
+	case len(removed) == 0:
 		return "I don't have a timer for that."
-	case 1:
+	case err != nil:
+		// The timer is gone from the live set but the file still lists it, so
+		// a restart would bring it back. The user has to hear that, for the
+		// same reason a failed save is reported when setting one.
+		a.logf("timer persist: %v", err)
+		return fmt.Sprintf("Cancelled %d timer(s), but I could not save that, so a restart may bring them back.", len(removed))
+	case len(removed) == 1:
 		return fmt.Sprintf("%s timer cancelled.", timer.Spoken(removed[0].Duration))
 	default:
 		return fmt.Sprintf("Cancelled %d timers.", len(removed))

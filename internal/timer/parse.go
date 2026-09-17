@@ -61,11 +61,29 @@ func Parse(text string) Command {
 		strings.Contains(n, "remaining"), strings.HasPrefix(head, "check"):
 		return Command{Kind: List}
 	}
+	// Setting requires an explicit request. Without this gate, any sentence
+	// mentioning a timer ("why did my timer not go off") would be intercepted
+	// and answered with "how long should the timer be?" instead of reaching
+	// the planner, which is the one thing this parser must never do.
+	if !setIntent(n, head) {
+		return Command{}
+	}
 	if d, label, ok := duration(n); ok {
 		return Command{Kind: Set, Duration: d, Label: label}
 	}
 	// "set a timer" with no duration: ask rather than guess a length.
 	return Command{Kind: Set}
+}
+
+// setIntent recognises a request to start a timer: a leading verb, or the
+// "timer for <duration>" form people use without one.
+func setIntent(n, head string) bool {
+	for _, verb := range []string{"set ", "start ", "begin ", "make ", "create ", "give me ", "put on ", "run "} {
+		if strings.HasPrefix(head, verb) {
+			return true
+		}
+	}
+	return strings.Contains(n, " timer for ") || strings.Contains(n, " timer of ")
 }
 
 // units maps spoken unit words to their duration and canonical singular.
@@ -97,35 +115,64 @@ var tensWords = map[string]int{
 	"seventy": 70, "eighty": 80, "ninety": 90,
 }
 
-// duration finds every "<count> <unit>" pair in the sentence and sums them, so
-// "one hour thirty minutes" works as well as "ten minutes". The label is the
-// spoken form, which is what the user will say to address the timer later.
+// duration reads one contiguous duration phrase: the first "<count> <unit>"
+// in the sentence, extended only while the next words continue it, so
+// "one hour thirty minutes" sums but "set a timer for 10 minutes, I have been
+// on hold for 20 minutes already" does not. Summing every pair anywhere in the
+// utterance silently inflates the timer, which is worse than not parsing it.
 func duration(n string) (time.Duration, string, bool) {
 	words := strings.Fields(n)
-	var total time.Duration
-	var parts []string
-	for i, w := range words {
-		u, ok := units[w]
-		if !ok {
-			continue
+	start, total, label, next, ok := -1, time.Duration(0), "", 0, false
+	for i := range words {
+		if d, l, nx, good := phraseAt(words, i); good {
+			start, total, label, next, ok = i, d, l, nx, true
+			break
 		}
-		count, spoken, ok := countBefore(words[:i])
-		if !ok {
-			continue
+	}
+	if !ok {
+		return 0, "", false
+	}
+	_ = start
+	for {
+		j := next
+		if j < len(words) && (words[j] == "and" || words[j] == "plus") {
+			j++
 		}
-		// "half an hour" and "half a minute".
-		if spoken == "half" {
-			total += u.d / 2
-			parts = append(parts, "half "+article(u.name)+" "+u.name)
-			continue
+		d, l, nx, good := phraseAt(words, j)
+		if !good || j != next && j != next+1 {
+			break
 		}
-		total += time.Duration(count) * u.d
-		parts = append(parts, fmt.Sprintf("%s %s", spoken, u.name))
+		total += d
+		label += " " + l
+		next = nx
 	}
 	if total <= 0 {
 		return 0, "", false
 	}
-	return total, strings.Join(parts, " "), true
+	return total, label, true
+}
+
+// phraseAt reads "<count> <unit>" starting at index i, accepting a two-word
+// count ("twenty five", "half an"). next is the index after the unit.
+func phraseAt(words []string, i int) (d time.Duration, label string, next int, ok bool) {
+	for _, span := range []int{2, 1} {
+		if i+span >= len(words) {
+			continue
+		}
+		u, isUnit := units[words[i+span]]
+		if !isUnit {
+			continue
+		}
+		count, spoken, good := countBefore(words[i : i+span])
+		if !good {
+			continue
+		}
+		if spoken == "half" {
+			return u.d / 2, "half " + article(u.name) + " " + u.name, i + span + 1, true
+		}
+		return time.Duration(count) * u.d, fmt.Sprintf("%s %s", spoken, u.name), i + span + 1, true
+	}
+	return 0, "", 0, false
 }
 
 func article(unit string) string {

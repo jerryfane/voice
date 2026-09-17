@@ -1,6 +1,7 @@
 package timer
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -338,4 +339,73 @@ func TestPersistedStateMatchesLiveSetUnderConcurrency(t *testing.T) {
 			t.Errorf("persisted timer %d (%v) is not live", p.ID, p.Duration)
 		}
 	}
+}
+
+// A failure to persist after a timer fires has nowhere to return, so it must
+// be reported: silence there means a fired timer can reappear after a restart
+// with nobody warned.
+func TestSaveFailureAfterFiringIsReported(t *testing.T) {
+	c := newClock()
+	var mu sync.Mutex
+	var errs []error
+	store := &flakyStore{}
+	s, _, err := New(store, WithClock(c.Now, c.After),
+		WithErrorHandler(func(e error) { mu.Lock(); errs = append(errs, e); mu.Unlock() }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	defer close(done)
+	go s.Run(done)
+	if _, err := s.Add(time.Minute, "one minute"); err != nil {
+		t.Fatal(err)
+	}
+	store.failFrom(errors.New("disk full"))
+
+	c.Advance(time.Minute)
+	if fired := waitFired(t, s, c); fired.Duration != time.Minute {
+		t.Fatalf("fired %+v", fired)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		mu.Lock()
+		n := len(errs)
+		mu.Unlock()
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("save failure after firing was not reported")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// flakyStore starts healthy and fails every save after failFrom is called.
+type flakyStore struct {
+	mu    sync.Mutex
+	set   []Timer
+	fails error
+}
+
+func (f *flakyStore) failFrom(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fails = err
+}
+
+func (f *flakyStore) Load() ([]Timer, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Timer(nil), f.set...), nil
+}
+
+func (f *flakyStore) Save(ts []Timer) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fails != nil {
+		return f.fails
+	}
+	f.set = append([]Timer(nil), ts...)
+	return nil
 }

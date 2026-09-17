@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -177,3 +178,31 @@ func TestTimerVocabularyWithoutWakePhraseIsIgnored(t *testing.T) {
 		t.Errorf("unwaked speech produced %q", tts.spoken())
 	}
 }
+
+// A cancel that cannot be persisted must be said out loud: the timer is gone
+// from memory but still in the file, so a restart would bring it back.
+func TestCancelReportsAPersistenceFailure(t *testing.T) {
+	a, tts, _ := timerAssistant(t, "hey voice cancel the ten minute timer")
+	sched, _, err := timer.New(failingStore{}, timer.WithErrorHandler(func(error) {}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Timers = sched
+	if _, err := sched.Add(10*time.Minute, "ten minute"); err == nil {
+		t.Fatal("expected the failing store to report the add")
+	}
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !saidContaining(tts.spoken(), "could not save") {
+		t.Errorf("cancel said %q, expected the persistence failure to be reported", tts.spoken())
+	}
+}
+
+// failingStore accepts loads and rejects every save.
+type failingStore struct{}
+
+func (failingStore) Load() ([]timer.Timer, error) { return nil, nil }
+func (failingStore) Save([]timer.Timer) error     { return errStore }
+
+var errStore = errors.New("state directory is read-only")

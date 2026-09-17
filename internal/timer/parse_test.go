@@ -51,7 +51,9 @@ func TestParseRecognisesCancelAndList(t *testing.T) {
 }
 
 // Anything that is not a timer request has to reach the planner: silently
-// mishandling a request is worse than sending it on.
+// mishandling a request is worse than sending it on. The sentences mentioning
+// a timer without asking for one are the dangerous cases - an earlier version
+// intercepted them and replied "how long should the timer be?".
 func TestParseLeavesOtherSpeechToThePlanner(t *testing.T) {
 	for _, said := range []string{
 		"turn on the kitchen light",
@@ -59,9 +61,32 @@ func TestParseLeavesOtherSpeechToThePlanner(t *testing.T) {
 		"how long until dinner",
 		"set the living room lamp to ten percent",
 		"what is a timer",
+		"why did my timer not go off",
+		"is the timer working",
+		"how does a timer work",
+		"my timer app crashed",
+		"the timer on the oven is broken",
 	} {
-		if c := Parse(said); c.Kind != None && said != "what is a timer" {
+		if c := Parse(said); c.Kind != None {
 			t.Errorf("Parse(%q) = %+v, want None", said, c)
+		}
+	}
+}
+
+// An incidental number elsewhere in the sentence must not be added to the
+// timer: a silently inflated timer is worse than an unparsed one.
+func TestParseReadsOneContiguousDurationOnly(t *testing.T) {
+	for _, tc := range []struct {
+		said string
+		want time.Duration
+	}{
+		{"set a timer for 10 minutes i have been on hold for 20 minutes already", 10 * time.Minute},
+		{"set a 10 minute timer after this 5 minute video", 10 * time.Minute},
+		{"set a timer for one hour thirty minutes", 90 * time.Minute},
+		{"set a timer for one hour and thirty minutes", 90 * time.Minute},
+	} {
+		if c := Parse(tc.said); c.Kind != Set || c.Duration != tc.want {
+			t.Errorf("Parse(%q) = kind %v duration %v, want Set %v", tc.said, c.Kind, c.Duration, tc.want)
 		}
 	}
 }
