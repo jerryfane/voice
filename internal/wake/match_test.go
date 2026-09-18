@@ -225,13 +225,56 @@ func TestShortWakeWordsAreNotSubstitutable(t *testing.T) {
 // who set wake.fuzz wondering why it does nothing.
 func TestExactOnlyReportsPhrasesTheToleranceCannotHelp(t *testing.T) {
 	for _, phrase := range []string{"hey", "hi bo", "こんにちは"} {
-		if !ExactOnly(phrase) {
+		if !ExactOnly(phrase, 0.2) {
 			t.Errorf("ExactOnly(%q) = false; this phrase has no word long enough to tolerate", phrase)
 		}
 	}
 	for _, phrase := range []string{"hey voice", "voice", "okay computer"} {
-		if ExactOnly(phrase) {
+		if ExactOnly(phrase, 0.2) {
 			t.Errorf("ExactOnly(%q) = true; this phrase has sound the tolerance can work with", phrase)
 		}
+	}
+}
+
+// The report must answer with the same rule the matcher uses. A fixed cutoff
+// could not: whether a word can be matched approximately depends on the
+// configured tolerance, so at a tolerance too tight to admit one class change
+// the word is exact in practice while a fixed rule still called it tolerant.
+func TestExactOnlyTracksTheConfiguredTolerance(t *testing.T) {
+	// "voice" is five classes, so one change is 0.2: tolerable at 0.2, not at
+	// 0.1, and the report must say so rather than describing a constant.
+	if ExactOnly("hey voice", 0.2) {
+		t.Error("at 0.2 a five-class word admits one change, so the phrase is not exact-only")
+	}
+	if !ExactOnly("hey voice", 0.1) {
+		t.Error("at 0.1 no word in the phrase admits a single change, so it IS exact-only")
+	}
+
+	// And the report must agree with Match at those same tolerances.
+	if matched, _, _ := Match("hey boys", []string{"hey voice"}, 0.2); !matched {
+		t.Error("Match disagrees with the report at 0.2")
+	}
+	if matched, _, _ := Match("hey boys", []string{"hey voice"}, 0.1); matched {
+		t.Error("Match accepted a substitution the report calls impossible at 0.1")
+	}
+}
+
+// A single-word phrase has nothing to anchor it, so it wakes on any
+// sound-alike of that word. The doctor line must say so: calling it plainly
+// tolerant, as an earlier report did, understates the risk.
+func TestAnchorlessNamesSingleWordPhrases(t *testing.T) {
+	for _, phrase := range []string{"voice", " voice ", "VOICE!"} {
+		if !Anchorless(phrase) {
+			t.Errorf("Anchorless(%q) = false; a one-word phrase has no anchor", phrase)
+		}
+	}
+	if Anchorless("hey voice") {
+		t.Error("a two-word phrase has an anchor")
+	}
+
+	// The risk is real, not theoretical: at the shipped tolerance a lone
+	// "voice" answers the first word of an ordinary sentence.
+	if matched, _, _ := Match("boys will be boys", []string{"voice"}, 0.2); !matched {
+		t.Log("note: 'boys will be boys' no longer matches a lone 'voice'; the warning may be overstated")
 	}
 }

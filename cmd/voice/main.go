@@ -249,8 +249,11 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 		mode := fmt.Sprintf("sound-matched, tolerance %v", c.Wake.Fuzz)
 		if c.Wake.Fuzz <= 0 {
 			mode = "exact only (wake.fuzz is 0)"
-		} else if wake.ExactOnly(phrase) {
+		} else if wake.ExactOnly(phrase, c.Wake.Fuzz) {
 			mode = fmt.Sprintf("exact only: too little recognisable sound for tolerance %v", c.Wake.Fuzz)
+		}
+		if wake.Anchorless(phrase) {
+			mode += "; SINGLE WORD, so it wakes on sound-alikes of that word alone"
 		}
 		stdout.printf("%-12s %-4s %q: %s\n", "wake phrase", "INFO", phrase, mode)
 	}

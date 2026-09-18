@@ -55,21 +55,50 @@ func Match(transcript string, phrases []string, fuzz float64) (matched bool, com
 	return false, "", ""
 }
 
-// ExactOnly reports whether a configured phrase has too little recognisable
-// sound for the tolerance to apply, so every word must match exactly. That is
-// true of a non-Latin phrase, whose runes contribute no sound classes, and of
-// a phrase of very short words.
+// wordTolerant reports whether a word of den sound classes can be matched
+// approximately at this tolerance. It is the SINGLE rule used both by Match
+// and by what the doctor reports: I wrote those separately once and the review
+// found the report drifting from the behaviour it claimed to describe.
 //
-// It exists so the degradation is not silent: a user setting wake.fuzz on such
-// a phrase would otherwise see the setting quietly do nothing. Callers report
-// it; see the doctor wake line.
-func ExactOnly(phrase string) bool {
+// Two conditions, for two different reasons. The tolerance must admit at least
+// one class change, or "approximate" means nothing and the word is exact in
+// practice however it is described - a fixed cutoff cannot know that, because
+// it depends on the configured fuzz. And a word of fewer than four classes is
+// never tolerated whatever the tolerance says, because short words collide
+// outright: "he", "hi" and "hey" are all HF, so a generous fuzz would make
+// every two-letter pronoun a wake word.
+func wordTolerant(den int, fuzz float64) bool {
+	if den < 4 {
+		return false
+	}
+	return 1/float64(den) <= fuzz
+}
+
+// ExactOnly reports whether a configured phrase has too little recognisable
+// sound for the tolerance to apply, so every word must match exactly: a
+// non-Latin phrase whose runes contribute no sound classes, a phrase of short
+// words, or one whose words are too short for the configured tolerance to
+// admit a single change.
+//
+// It exists so the degradation is not silent - a user setting wake.fuzz on
+// such a phrase would otherwise see the setting quietly do nothing - and it
+// answers with the same rule Match applies, so the report cannot drift.
+func ExactOnly(phrase string, fuzz float64) bool {
 	for _, w := range strings.Fields(normalize(phrase)) {
-		if len([]rune(skeleton(w))) >= 4 {
+		if wordTolerant(len([]rune(skeleton(w))), fuzz) {
 			return false
 		}
 	}
 	return true
+}
+
+// Anchorless reports whether a phrase is a single word, which makes it wake on
+// any sound-alike of that word alone: a phrase of "voice" answers the first
+// word of "boys will be boys". A multi-word phrase has the rest of itself as
+// an anchor; one word has nothing, and calling that safely tolerant - as an
+// earlier version of the doctor report did - understates the risk.
+func Anchorless(phrase string) bool {
+	return len(strings.Fields(normalize(phrase))) < 2
 }
 
 func normalize(s string) string {
@@ -104,7 +133,7 @@ func wordsSoundAlike(heard, want []string, fuzz float64) bool {
 		// itself is a different problem, and one that should be solved by
 		// configuring the phrase it actually produces rather than by making
 		// every two-letter pronoun a wake word.
-		if den < 4 {
+		if !wordTolerant(den, fuzz) {
 			if heard[i] != want[i] {
 				return false
 			}
