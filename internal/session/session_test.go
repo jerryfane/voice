@@ -398,12 +398,25 @@ func TestEachPipelineStageIsObservable(t *testing.T) {
 	if err := a.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	// Durations are part of the contract: a stage line without a time cannot
+	// answer where an interaction went.
+	for _, want := range []string{"stage=plan state=ok ms=", "stage=speak state=ok ms="} {
+		if !strings.Contains(log.String(), want) {
+			t.Errorf("journal is missing %q, so the stage cannot be timed:\n%s", want, log.String())
+		}
+	}
 	for _, want := range []string{
 		"stage=capture state=starting",
 		"stage=segment state=ok",
 		"stage=transcribe state=ok",
 		"stage=wake state=matched",
 		"stage=wake state=nomatch",
+		// The planner and the speaker: unlogged until a real interaction took
+		// about a minute and the instrumented stages accounted for six
+		// seconds of it. A pipeline where the slowest stage is invisible
+		// cannot be diagnosed, only guessed at.
+		"stage=plan state=ok",
+		"stage=speak state=ok",
 	} {
 		if !strings.Contains(log.String(), want) {
 			t.Errorf("journal is missing %q:\n%s", want, log.String())
