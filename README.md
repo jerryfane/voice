@@ -207,7 +207,10 @@ Two independent guarantees, because one of them is only advice:
   the string `"default"`. So `packaging/spotify/alsa.conf`, selected through
   `ALSA_CONFIG_PATH`, defines what `"default"` *means* for that process: the
   Creative Pebble V3, addressed as `card "V3"` and never as a card number,
-  which shifts with probe order.
+  which shifts with probe order. That file is **self-contained on purpose** -
+  including `/usr/share/alsa/alsa.conf` made it decorative, because that file's
+  trailing `@hooks` load `/etc/alsa/conf.d/*` *after* the root config is parsed
+  and the PipeWire file there redefines `pcm.!default`.
 - **Which devices are reachable at all.** The client runs as `spotify-player`,
   an account that is **not** in the `audio` group. A udev rule grants it access
   to the Pebble's nodes alone, matched by USB vendor and product. Reaching any
