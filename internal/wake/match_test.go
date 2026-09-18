@@ -78,6 +78,23 @@ func TestMatchRejectsOrdinarySpeech(t *testing.T) {
 		"how's school everything's fine",
 		"I see the predator sees",
 		"a voice in the crowd", // the phrase must start the transcript
+
+		// The review's corpus, and it demolished my first design. Ten
+		// ordinary sentences about somebody's voice all matched a configured
+		// "hey voice" at the shipped tolerance, because I compared a single
+		// scalar over the whole joined skeleton: "the voice" and "hey boys"
+		// are BOTH distance 1 over a 7-class skeleton, so no threshold could
+		// accept the transcript we need and reject these.
+		"her voice was shaking when she called",
+		"his voice cracked on the last word",
+		"the voice on the radio said otherwise",
+		"my voice sounds funny on recordings",
+		"we voice our concerns at the meeting",
+		"why voice memos keep failing is a mystery",
+		"their voice carried across the room",
+		"she voiced her objection clearly",
+		"a voice note arrived this morning",
+		"no voice mail today",
 	} {
 		if matched, _, phrase := Match(heard, phrases, 0.2); matched {
 			t.Errorf("%q matched %q; this would wake Voice during ordinary conversation", heard, phrase)
@@ -100,6 +117,14 @@ func TestSkeletonFoldsConfusableSoundsAndSeparatesOthers(t *testing.T) {
 		}
 	}
 	differ := [][2]string{
+		// The zero-distance collision the review found. Folding w with h made
+		// these identical, so "we voice our support" matched at EVERY
+		// tolerance including zero - unfixable by any threshold.
+		{"hey", "we"},
+		{"hey", "why"},
+		{"hey", "the"},
+		{"hey", "her"},
+		{"hey", "my"},
 		{"voice", "buzz"}, // the false accept that vowel classes prevent
 		{"voice", "mum"},
 		{"hey", "there"},
@@ -136,5 +161,36 @@ func TestShippedDefaultWakesOnTheRecordedDeviceTranscript(t *testing.T) {
 	// And it must still refuse ordinary speech with those same defaults.
 	if matched, _, _ := Match("hey buzz light year", c.Wake.Phrases, c.Wake.Fuzz); matched {
 		t.Error("default config wakes on ordinary speech")
+	}
+}
+
+// Tolerance is per word, because a scalar over the joined phrase provably
+// cannot separate the case we must accept from one we must reject: the review
+// measured distance(skeleton("hey boys"), skeleton("hey voice")) == 1 over a
+// 7-class denominator, and distance(skeleton("the voice"), skeleton("hey
+// voice")) == 1 over the same denominator. Identical ratios, opposite
+// required answers.
+func TestToleranceIsJudgedPerWordNotAcrossThePhrase(t *testing.T) {
+	phrases := []string{"hey voice"}
+
+	// The leading word admits no substitution at this tolerance, because its
+	// skeleton is short: one class wrong in two is 0.5.
+	for _, heard := range []string{"the voice", "we voice", "her voice", "my voice", "why voice"} {
+		if matched, _, _ := Match(heard+" tell me something", phrases, 0.2); matched {
+			t.Errorf("%q matched; the wake word must not be substitutable", heard)
+		}
+	}
+
+	// The distinctive word still tolerates what the recogniser does to it.
+	for _, heard := range []string{"hey boys", "hey voise", "hey voic"} {
+		if matched, _, _ := Match(heard+" tell me something", phrases, 0.2); !matched {
+			t.Errorf("%q did not match; the recogniser's spelling of the wake word must not decide this", heard)
+		}
+	}
+
+	// A transcript with fewer or more words in the phrase position is not a
+	// near miss, it is a different utterance.
+	if matched, _, _ := Match("hey", phrases, 0.2); matched {
+		t.Error("a one-word transcript matched a two-word phrase")
 	}
 }

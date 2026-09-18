@@ -39,15 +39,18 @@ func Match(transcript string, phrases []string, fuzz float64) (matched bool, com
 		if fuzz <= 0 {
 			continue
 		}
-		ws := skeleton(want)
-		cs := skeleton(candidate)
-		den := len([]rune(ws))
-		if den == 0 {
+		// Per word, not over the joined phrase. A single scalar on the whole
+		// skeleton cannot work here and the review proved it: "hey boys" and
+		// "the voice" are both distance 1 over a 7-class skeleton, so any
+		// threshold accepting the transcript we must accept also accepts a
+		// sentence about somebody's voice. Judging each word against its own
+		// counterpart keeps the tolerance proportional to that word: a short
+		// leading word like "hey" admits no substitution at 0.2, while
+		// "voice" can still be heard as "boys".
+		if !wordsSoundAlike(words[:len(p)], p, fuzz) {
 			continue
 		}
-		if float64(distance(cs, ws))/float64(den) <= fuzz {
-			return true, strings.TrimSpace(strings.Join(words[len(p):], " ")), raw
-		}
+		return true, strings.TrimSpace(strings.Join(words[len(p):], " ")), raw
 	}
 	return false, "", ""
 }
@@ -59,6 +62,31 @@ func normalize(s string) string {
 		}
 		return ' '
 	}, s)), " "))
+}
+
+// wordsSoundAlike reports whether every word sounds like its counterpart
+// within the tolerance, each judged against its own length.
+func wordsSoundAlike(heard, want []string, fuzz float64) bool {
+	if len(heard) != len(want) {
+		return false
+	}
+	for i := range want {
+		w := skeleton(want[i])
+		den := len([]rune(w))
+		if den == 0 {
+			// Nothing to compare by sound - a non-Latin phrase, for example -
+			// so fall back to the spelling this function cannot judge rather
+			// than silently accepting anything.
+			if heard[i] != want[i] {
+				return false
+			}
+			continue
+		}
+		if float64(distance(skeleton(heard[i]), w))/float64(den) > fuzz {
+			return false
+		}
+	}
+	return true
 }
 
 // skeleton reduces text to the sound classes that survive speech recognition.
@@ -86,8 +114,18 @@ func skeleton(s string) string {
 			class = 'N'
 		case 'l', 'r':
 			class = 'L'
-		case 'h', 'j', 'w':
+		case 'h':
 			class = 'H'
+		case 'j':
+			class = 'J'
+		case 'w':
+			// w is NOT folded with h. Merging them made "we", "why" and "hey"
+			// identical skeletons, so "we voice our support" matched a
+			// configured "hey voice" at every tolerance including zero - a
+			// collision no threshold could fix. That fold was mine, was never
+			// part of the design, and is exactly the kind of undocumented
+			// convenience that turns a matcher into a nuisance.
+			class = 'W'
 		case 'e', 'i', 'y':
 			class = 'F' // front vowels
 		case 'a', 'o', 'u':
