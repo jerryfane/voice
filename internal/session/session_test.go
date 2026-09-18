@@ -36,6 +36,26 @@ func TestRandomTranscriptsNeverReachPlanner(t *testing.T) {
 	}
 }
 
+func TestStreamingWakeSegmentReachesPlannerWithoutWakeText(t *testing.T) {
+	planner := &countingPlanner{}
+	a := &Assistant{
+		Recorder:    testRecorder{},
+		Player:      testPlayer{},
+		VAD:         wakeMatchedSegmenter{},
+		STT:         &queuedTranscriber{texts: []string{"what time is it"}},
+		TTS:         testSynthesizer{},
+		Brain:       planner,
+		Devices:     device.NewRegistry(),
+		WakePhrases: []string{"hey voice"},
+	}
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if planner.calls != 1 {
+		t.Fatalf("planner called %d times, want 1 after local keyword match", planner.calls)
+	}
+}
+
 func TestLocalControlStopsWithoutPlanner(t *testing.T) {
 	reply, stop, handled := localControl("turn yourself off")
 	if !handled || !stop || reply != "Turning off." {
@@ -82,6 +102,20 @@ func (s testSegmenter) Run(context.Context, <-chan []int16, audio.Format) <-chan
 	out := make(chan vad.Utterance, s.count)
 	for range s.count {
 		out <- vad.Utterance{Format: audio.Default()}
+	}
+	close(out)
+	return out
+}
+
+type wakeMatchedSegmenter struct{}
+
+func (wakeMatchedSegmenter) Run(context.Context, <-chan []int16, audio.Format) <-chan vad.Utterance {
+	out := make(chan vad.Utterance, 1)
+	out <- vad.Utterance{
+		PCM:         []int16{1, 2, 3},
+		Format:      audio.Default(),
+		WakeMatched: true,
+		Keyword:     "HEY_VOICE",
 	}
 	close(out)
 	return out

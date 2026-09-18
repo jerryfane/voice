@@ -3,10 +3,10 @@
 A persistent, tool-capable voice agent for Linux. Say “Hey Voice,” speak a request, and continue one long-lived OMP conversation with its own workspace and memory.
 
 ```text
-microphone → VAD → local wake gate → OpenRouter STT → rules → Jev → OMP agent
-                              │              │          │
-                              └ reject local └ local STT└ bounded actions
-                                               fallback
+microphone → Sherpa KWS → command capture → OpenRouter STT → rules → Jev → OMP
+               │                                  │          │
+               └ discard ambient                  └ local STT└ bounded actions
+                                                     fallback
 ```
 
 ## Agent model
@@ -21,7 +21,7 @@ Nontrivial requests run in one persistent OMP session. The session:
 - runs as the restricted `voice-agent` OS account, not as your login account;
 - cannot read the `pi` account’s private files or authenticated browser profile.
 
-Audio is always wake-gated locally. By default all transcription remains local. When `stt.openrouter` is configured and `OPENROUTER_API_KEY` is available, only an utterance that the local gate accepted is sent to OpenRouter for transcription; ambient and non-wake audio never leaves the device. Provider failure falls back to the loopback resident Whisper server and then `whisper-cli`.
+Audio is always wake-gated locally by a resident 3M-parameter Sherpa-ONNX keyword spotter. Only a bounded utterance accepted after `HEY_VOICE` or `HEY_BOYS` is detected can reach OpenRouter; ambient and non-wake audio is discarded without transcription. Provider failure falls back to the loopback resident Whisper server and then `whisper-cli`.
 
 ## Install
 
@@ -100,20 +100,19 @@ The default wake phrase is exactly:
 Hey Voice
 ```
 
-Voice performs the first transcription locally and checks that the transcript
-starts with a configured wake phrase. Ambient speech, noise segments, and
-standalone mentions never reach cloud STT or the agent. With OpenRouter
-configured, the accepted utterance is then transcribed by the hosted primary;
-resident Whisper and `whisper-cli` remain ordered local fallbacks. A standalone
-wake phrase is still accepted locally and asks for the request without calling
-the agent.
+Voice runs a small streaming keyword model over microphone frames and starts a
+bounded command capture only after a configured wake phrase is detected. It
+does not run Whisper over ambient segments. With OpenRouter configured, the
+accepted command is transcribed by the hosted primary; resident Whisper and
+`whisper-cli` remain ordered local fallbacks. A standalone wake phrase is
+handled locally and does not call the agent.
 
 Say `Hey Voice, turn off` to stop the listener without an LLM call; run
 `voice on` to start it again.
 
 ALSA capture and playback are configurable argv templates. The current Pi deployment uses an Anker PowerConf. `packaging/99-voice-powerconf.rules` grants only `voice-agent` permission to send the USB telephony off-hook report required by that microphone.
 
-Speech engines and models are external. `scripts/setup-speech.sh` installs `whisper-cli`, the loopback `whisper-server`, Piper, and their default English models under `~/.local/share/voice`; the restricted installer copies them to `/var/lib/voice`. `voice-whisper.service` keeps the local model loaded once and binds only to `127.0.0.1:8178`.
+Speech engines and models are external. `scripts/setup-speech.sh` installs the Sherpa-ONNX keyword model, `whisper-cli`, the loopback `whisper-server`, Piper, and their default English models under `~/.local/share/voice`; the restricted installer copies them to `/var/lib/voice`. `voice-whisper.service` keeps the fallback Whisper model loaded once and binds only to `127.0.0.1:8178`.
 
 ## Activation feedback
 

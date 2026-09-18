@@ -2,13 +2,14 @@
 set -eu
 
 # Installs the default local speech engines used by Voice:
+#   - Sherpa-ONNX's 3M streaming keyword model
 #   - whisper.cpp CLI and resident HTTP server (built natively for this CPU)
 #   - Piper for text-to-speech (official prebuilt archive)
 # Models live outside the repository under $XDG_DATA_HOME/voice/models.
-# Nothing here is linked into the Voice binary; config may select other engines.
 
 WHISPER_VERSION=${WHISPER_VERSION:-v1.9.4}
 PIPER_VERSION=${PIPER_VERSION:-2023.11.14-2}
+KWS_MODEL=${KWS_MODEL:-sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20}
 DATA=${XDG_DATA_HOME:-"$HOME/.local/share"}/voice
 CACHE=${XDG_CACHE_HOME:-"$HOME/.cache"}/voice
 BIN=${HOME}/.local/bin
@@ -61,6 +62,28 @@ if [ ! -s "$MODELS/ggml-base.en.bin" ]; then
   curl -fL https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin -o "$MODELS/ggml-base.en.bin.tmp"
   mv "$MODELS/ggml-base.en.bin.tmp" "$MODELS/ggml-base.en.bin"
 fi
+
+kws_dir="$MODELS/sherpa-kws"
+if [ ! -s "$kws_dir/encoder.int8.onnx" ] ||
+   [ ! -s "$kws_dir/decoder.onnx" ] ||
+   [ ! -s "$kws_dir/joiner.int8.onnx" ] ||
+   [ ! -s "$kws_dir/tokens.txt" ]; then
+  archive="$CACHE/$KWS_MODEL.tar.bz2"
+  extracted="$CACHE/$KWS_MODEL"
+  curl -fL "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/$KWS_MODEL.tar.bz2" -o "$archive.tmp"
+  mv "$archive.tmp" "$archive"
+  rm -rf "$extracted"
+  tar -xjf "$archive" -C "$CACHE"
+  mkdir -p "$kws_dir"
+  install -m 0644 "$extracted/encoder-epoch-13-avg-2-chunk-8-left-64.int8.onnx" "$kws_dir/encoder.int8.onnx"
+  install -m 0644 "$extracted/decoder-epoch-13-avg-2-chunk-8-left-64.onnx" "$kws_dir/decoder.onnx"
+  install -m 0644 "$extracted/joiner-epoch-13-avg-2-chunk-8-left-64.int8.onnx" "$kws_dir/joiner.int8.onnx"
+  install -m 0644 "$extracted/tokens.txt" "$kws_dir/tokens.txt"
+fi
+printf '%s\n' \
+  'HH EY1 V OY1 S :3.0 #0.25 @HEY_VOICE' \
+  'HH EY1 B OY1 Z :3.0 #0.25 @HEY_BOYS' \
+  > "$kws_dir/keywords.txt"
 
 voice_base=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium
 for ext in onnx onnx.json; do

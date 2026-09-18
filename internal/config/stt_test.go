@@ -16,6 +16,12 @@ func TestDefaultFastPipelineConfigurationValidates(t *testing.T) {
 	if got, want := c.Brain.Jev.Endpoint, "https://openrouter.ai/api/alpha/decisions"; got != want {
 		t.Fatalf("default Jev endpoint = %q, want %q", got, want)
 	}
+	if c.Wake.Detector != "sherpa" || c.Wake.Sherpa == nil {
+		t.Fatalf("default wake gate = %q, sherpa configured=%v", c.Wake.Detector, c.Wake.Sherpa != nil)
+	}
+	if got, want := c.Wake.VAD.MaxUtterance.D().String(), "6s"; got != want {
+		t.Fatalf("default command cap = %q, want %q", got, want)
+	}
 }
 
 func TestResidentTranscriberMustStayOnLoopback(t *testing.T) {

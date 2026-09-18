@@ -97,6 +97,14 @@ func (a *Assistant) Speak(ctx context.Context, text string) error {
 // Run listens until ctx is cancelled. Every model request must contain the wake
 // phrase and command in the same utterance.
 func (a *Assistant) Run(ctx context.Context) error {
+	if managed, ok := a.VAD.(vad.ManagedSegmenter); ok {
+		if err := managed.Start(); err != nil {
+			a.logf("stage=wake state=failed source=streaming err=%v", err)
+			return fmt.Errorf("start wake detector: %w", err)
+		}
+		defer managed.Close() // discard: Close reports no result; it only releases native detector state.
+		a.logf("stage=wake state=ready source=streaming detector=%q", managed.Name())
+	}
 	// Establish a known indicator state at startup and leave it idle however
 	// Run exits: cancellation, shutdown or a spoken "turn off".
 	a.Feedback.Restore()
@@ -145,6 +153,28 @@ func (a *Assistant) Run(ctx context.Context) error {
 			ms := len(u.PCM) * 1000 / max(u.Format.SampleRate, 1)
 			a.logf("stage=segment state=ok samples=%d ms=%d peak=%.4f truncated=%v",
 				len(u.PCM), ms, u.Peak, u.Truncated)
+			if u.WakeMatched {
+				text, err := a.STT.Transcribe(ctx, u.PCM, u.Format)
+				if err != nil {
+					a.logf("stage=transcribe state=failed err=%v", err)
+					continue
+				}
+				text = strings.TrimSpace(text)
+				if text == "" {
+					a.logf("stage=transcribe state=empty peak=%.4f", u.Peak)
+					continue
+				}
+				a.logf("stage=transcribe state=ok heard=%q peak=%.4f", text, u.Peak)
+				command := text
+				if cloudMatched, cloudCommand, _ := wake.Match(text, a.WakePhrases, a.WakeFuzz); cloudMatched {
+					command = cloudCommand
+				}
+				a.logf("stage=wake state=accepted source=streaming keyword=%q command=%q", u.Keyword, command)
+				if stop := a.accepted(ctx, command); stop {
+					return nil
+				}
+				continue
+			}
 			if a.WakeSTT != nil {
 				started := time.Now()
 				gateText, err := a.WakeSTT.Transcribe(ctx, u.PCM, u.Format)

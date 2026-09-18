@@ -14,6 +14,7 @@ import (
 	"github.com/jerryfane/voice/internal/speech"
 	"github.com/jerryfane/voice/internal/timer"
 	"github.com/jerryfane/voice/internal/vad"
+	"github.com/jerryfane/voice/internal/wake"
 )
 
 // Build wires a complete assistant from config. Feedback hardware that is
@@ -62,7 +63,9 @@ func Build(c config.Config) *Assistant {
 	if remote := c.STT.OpenRouter; remote != nil {
 		key := os.Getenv(remote.APIKeyEnv)
 		if key != "" {
-			wakeSTT = localSTT
+			if c.Wake.Detector == "stt" {
+				wakeSTT = localSTT
+			}
 			stt = speech.NewCascade(logger,
 				speech.NewOpenRouterTranscriber(remote.Endpoint, remote.Model, key, remote.Timeout.D(), logger),
 				localSTT,
@@ -85,7 +88,23 @@ func Build(c config.Config) *Assistant {
 		}
 		return n
 	}
-	seg := vad.NewEnergy(vad.Params{Threshold: c.Wake.VAD.Threshold, MinSpeech: frames(c.Wake.VAD.MinSpeech), Silence: frames(c.Wake.VAD.Silence), MaxUtterance: frames(c.Wake.VAD.MaxUtterance), PreRoll: frames(c.Wake.VAD.PreRoll), FrameSize: frame})
+	params := vad.Params{Threshold: c.Wake.VAD.Threshold, MinSpeech: frames(c.Wake.VAD.MinSpeech), Silence: frames(c.Wake.VAD.Silence), MaxUtterance: frames(c.Wake.VAD.MaxUtterance), PreRoll: frames(c.Wake.VAD.PreRoll), FrameSize: frame}
+	var seg vad.Segmenter = vad.NewEnergy(params)
+	if c.Wake.Detector == "sherpa" && c.Wake.Sherpa != nil {
+		s := c.Wake.Sherpa
+		detector := wake.NewSherpa(wake.SherpaConfig{
+			Encoder:           s.Encoder,
+			Decoder:           s.Decoder,
+			Joiner:            s.Joiner,
+			Tokens:            s.Tokens,
+			Keywords:          s.Keywords,
+			NumThreads:        s.NumThreads,
+			MaxActivePaths:    s.MaxActivePaths,
+			KeywordsScore:     float32(s.KeywordsScore),
+			KeywordsThreshold: float32(s.KeywordsThreshold),
+		})
+		seg = vad.NewKeyword(params, detector, logger)
+	}
 	var timers *timer.Scheduler
 	var missed []timer.Timer
 	if c.Timers.Enabled {

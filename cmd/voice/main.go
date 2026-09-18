@@ -21,6 +21,7 @@ import (
 	"github.com/jerryfane/voice/internal/proc"
 	"github.com/jerryfane/voice/internal/requests"
 	"github.com/jerryfane/voice/internal/session"
+	"github.com/jerryfane/voice/internal/vad"
 	"github.com/jerryfane/voice/internal/wake"
 )
 
@@ -370,7 +371,10 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant, loaded s
 	check("speaker", ok, a.Player.Describe())
 	ok, d := a.STT.Available()
 	check("speech-to-text", ok, a.STT.Name()+": "+d)
-	if a.WakeSTT != nil {
+	if gate, managed := a.VAD.(vad.ManagedSegmenter); managed {
+		ok, d = gate.Available()
+		check("wake gate", ok, gate.Name()+": "+d)
+	} else if a.WakeSTT != nil {
 		ok, d = a.WakeSTT.Available()
 		check("wake gate", ok, a.WakeSTT.Name()+": "+d)
 	}

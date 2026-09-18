@@ -23,6 +23,11 @@ type Utterance struct {
 	Peak float64
 	// Truncated reports that MaxUtterance cut the segment short.
 	Truncated bool
+	// WakeMatched means a local streaming detector accepted this audio before
+	// it entered the transcription pipeline.
+	WakeMatched bool
+	// Keyword is the local detector label that opened the command capture.
+	Keyword string
 }
 
 // Params tunes the gate. All durations are converted from config.
@@ -45,4 +50,14 @@ type Segmenter interface {
 	// Utterance per detected span. The returned channel closes when input
 	// stops, so callers can range over it.
 	Run(ctx context.Context, in <-chan []int16, f audio.Format) <-chan Utterance
+}
+
+// ManagedSegmenter owns a resident detector that must be started before audio
+// capture and closed when the listening loop exits.
+type ManagedSegmenter interface {
+	Segmenter
+	Name() string
+	Available() (bool, string)
+	Start() error
+	Close()
 }

@@ -152,13 +152,25 @@ type Wake struct {
 	// and ordinary speech - including "hey buzz light year", which collides
 	// once vowels are discarded - still does not.
 	Fuzz float64 `json:"fuzz"`
-	// Detector selects the strategy: "stt" transcribes every speech segment
-	// and matches the phrase (no extra dependency, works today); "external"
-	// runs Command and treats any line on stdout as a detection.
-	Detector string  `json:"detector"`
-	Command  Command `json:"command,omitempty"`
+	// Detector selects the strategy: "sherpa" detects a configured phrase in
+	// streaming audio; "stt" keeps the slower whole-utterance Whisper gate.
+	Detector string      `json:"detector"`
+	Sherpa   *SherpaWake `json:"sherpa,omitempty"`
 	// VAD tunes speech segmentation.
 	VAD VAD `json:"vad"`
+}
+
+// SherpaWake configures the resident open-vocabulary keyword spotter.
+type SherpaWake struct {
+	Encoder           string  `json:"encoder"`
+	Decoder           string  `json:"decoder"`
+	Joiner            string  `json:"joiner"`
+	Tokens            string  `json:"tokens"`
+	Keywords          string  `json:"keywords"`
+	NumThreads        int     `json:"num_threads"`
+	MaxActivePaths    int     `json:"max_active_paths"`
+	KeywordsScore     float64 `json:"keywords_score"`
+	KeywordsThreshold float64 `json:"keywords_threshold"`
 }
 
 // VAD tunes the energy-based speech segmenter.
@@ -328,15 +340,26 @@ func Default() Config {
 			Command: Command{"aplay", "-D", "{device}", "-q", "-"},
 		},
 		Wake: Wake{
-			Phrases:  []string{"hey voice"},
+			Phrases:  []string{"hey voice", "hey boys"},
 			Fuzz:     0.2,
-			Detector: "stt",
+			Detector: "sherpa",
+			Sherpa: &SherpaWake{
+				Encoder:           "/var/lib/voice/models/sherpa-kws/encoder.int8.onnx",
+				Decoder:           "/var/lib/voice/models/sherpa-kws/decoder.onnx",
+				Joiner:            "/var/lib/voice/models/sherpa-kws/joiner.int8.onnx",
+				Tokens:            "/var/lib/voice/models/sherpa-kws/tokens.txt",
+				Keywords:          "/var/lib/voice/models/sherpa-kws/keywords.txt",
+				NumThreads:        1,
+				MaxActivePaths:    4,
+				KeywordsScore:     3,
+				KeywordsThreshold: 0.25,
+			},
 			VAD: VAD{
 				Threshold:    0,
 				MinSpeech:    Duration(250 * time.Millisecond),
 				Silence:      Duration(700 * time.Millisecond),
-				MaxUtterance: Duration(12 * time.Second),
-				PreRoll:      Duration(300 * time.Millisecond),
+				MaxUtterance: Duration(6 * time.Second),
+				PreRoll:      Duration(1500 * time.Millisecond),
 			},
 		},
 		Feedback: Feedback{
@@ -566,16 +589,41 @@ func (c Config) Validate() error {
 	if c.Input.SampleRate <= 0 {
 		return fmt.Errorf("input.sample_rate must be positive (16000 for whisper)")
 	}
-	switch c.Wake.Detector {
-	case "stt", "external":
-	default:
-		return fmt.Errorf("wake.detector must be \"stt\" or \"external\", got %q", c.Wake.Detector)
-	}
-	if c.Wake.Detector == "external" && len(c.Wake.Command) == 0 {
-		return fmt.Errorf("wake.detector is \"external\" but wake.command is empty")
-	}
-	if c.Wake.Detector == "stt" && len(c.Wake.Phrases) == 0 {
+	if len(c.Wake.Phrases) == 0 {
 		return fmt.Errorf("wake.phrases is empty: Voice would never wake")
+	}
+	switch c.Wake.Detector {
+	case "stt":
+	case "sherpa":
+		if c.Wake.Sherpa == nil {
+			return fmt.Errorf("wake.sherpa is required when wake.detector is \"sherpa\"")
+		}
+		s := c.Wake.Sherpa
+		for _, required := range []struct {
+			label string
+			path  string
+		}{
+			{"encoder", s.Encoder},
+			{"decoder", s.Decoder},
+			{"joiner", s.Joiner},
+			{"tokens", s.Tokens},
+			{"keywords", s.Keywords},
+		} {
+			if strings.TrimSpace(required.path) == "" {
+				return fmt.Errorf("wake.sherpa.%s is empty", required.label)
+			}
+		}
+		if s.NumThreads <= 0 || s.MaxActivePaths <= 0 {
+			return fmt.Errorf("wake.sherpa thread and path counts must be positive")
+		}
+		if s.KeywordsScore <= 0 {
+			return fmt.Errorf("wake.sherpa.keywords_score must be positive")
+		}
+		if s.KeywordsThreshold <= 0 || s.KeywordsThreshold >= 1 {
+			return fmt.Errorf("wake.sherpa.keywords_threshold must be between 0 and 1")
+		}
+	default:
+		return fmt.Errorf("wake.detector must be \"sherpa\" or \"stt\", got %q", c.Wake.Detector)
 	}
 	if c.Wake.Fuzz < 0 || c.Wake.Fuzz > 1 {
 		return fmt.Errorf("wake.fuzz must be between 0 and 1, got %v", c.Wake.Fuzz)
