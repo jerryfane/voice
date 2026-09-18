@@ -79,10 +79,40 @@ run_as_agent /usr/local/libexec/voice-omp config set auth.broker.token "$token" 
 sudo systemctl daemon-reload
 sudo udevadm control --reload-rules
 sudo udevadm trigger
-sudo systemctl enable --now "voice-auth-broker@$owner.service"
-sudo systemctl enable --now voice.service
+sudo systemctl enable "voice-auth-broker@$owner.service"
+sudo systemctl restart "voice-auth-broker@$owner.service"
+sudo systemctl enable voice.service
+# restart, not enable --now: --now starts a STOPPED unit and leaves a running
+# one alone, so every install since the per-stage logging landed wrote a new
+# binary that nobody then ran. The device served the household from a build
+# months behind the repo while this script printed "Installed".
+sudo systemctl restart voice.service
 rm -f /tmp/voice-install
 
+# Verify the process now running IS the file just installed, rather than
+# trusting the restart. A restart can be refused, a unit can fail and leave the
+# old process up, and a service can be masked; an installer that reports
+# success without checking is how the stale binary survived every reinstall.
+installed_hash=$(sha256sum /usr/local/bin/voice | cut -d' ' -f1)
+main_pid=$(systemctl show -p MainPID --value voice.service)
+if [ -z "$main_pid" ] || [ "$main_pid" = "0" ]; then
+  echo "install failed: voice.service is not running after restart" >&2
+  exit 1
+fi
+running_exe=$(sudo readlink -f "/proc/$main_pid/exe" 2>/dev/null || true)
+if [ -z "$running_exe" ]; then
+  echo "install failed: cannot read /proc/$main_pid/exe to confirm what is running" >&2
+  exit 1
+fi
+running_hash=$(sudo sha256sum "$running_exe" | cut -d' ' -f1)
+if [ "$installed_hash" != "$running_hash" ]; then
+  echo "install failed: the running program is not the one just installed." >&2
+  echo "  installed /usr/local/bin/voice: $installed_hash" >&2
+  echo "  running   $running_exe (pid $main_pid): $running_hash" >&2
+  exit 1
+fi
+
 echo "Installed /usr/local/bin/voice with restricted agent account $agent_user."
+echo "Verified pid $main_pid is running that exact binary ($installed_hash)."
 echo "Workspace: $workspace"
 echo "Service: systemctl status voice"
