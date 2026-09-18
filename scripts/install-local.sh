@@ -67,15 +67,32 @@ else
   printf 'keeping existing wake phrases: %s\n' "$(sudo jq -c '.wake.phrases' /etc/voice/config.json)"
 fi
 
-sudo jq "$wake_filter" /etc/voice/config.json | jq '
-  .stt.model = "/var/lib/voice/models/ggml-base.en.bin" |
-  .tts.model = "/var/lib/voice/models/en_US-amy-medium.onnx" |
-  .brain.mode = "agent" |
-  .brain.command = ["voice-agent-run", "{prompt}"] |
-  .brain.timeout = "10m0s" |
-  .brain.persona = "You are Voice, a concise personal agent. Complete the user request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences." |
-  .brain.rules = false
-' > /tmp/voice-config.json
+# ONE jq, not a pipeline. A pipeline made this step unable to fail: the
+# shebang is `env sh`, which is dash here, dash has no pipefail, and `set -e`
+# in a pipeline only inspects the LAST command's status. With an unparseable
+# config - a bad manual edit, an unclean power loss on an embedded device -
+# the first jq died, the second produced an empty document, and a 0-byte
+# config was then installed OVER the working one. The single-jq form this
+# replaced aborted instead. Introduced by me and caught in review.
+config_filter="$wake_filter |
+  .stt.model = \"/var/lib/voice/models/ggml-base.en.bin\" |
+  .tts.model = \"/var/lib/voice/models/en_US-amy-medium.onnx\" |
+  .brain.mode = \"agent\" |
+  .brain.command = [\"voice-agent-run\", \"{prompt}\"] |
+  .brain.timeout = \"10m0s\" |
+  .brain.persona = \"You are Voice, a concise personal agent. Complete the user request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences.\" |
+  .brain.rules = false"
+sudo jq "$config_filter" /etc/voice/config.json > /tmp/voice-config.json
+
+# Belt and braces, because the thing being overwritten is the only copy of
+# the owner's configuration: refuse to install a file that is empty or does
+# not parse, whatever the exit statuses said.
+if [ ! -s /tmp/voice-config.json ] || ! jq -e 'type == "object" and (.wake.phrases | length > 0)' /tmp/voice-config.json > /dev/null; then
+  rm -f /tmp/voice-config.json
+  echo "refusing to install a config that is empty, unparseable, or has no wake phrases" >&2
+  exit 1
+fi
+
 sudo install -o root -g "$agent_user" -m 0640 /tmp/voice-config.json /etc/voice/config.json
 rm -f /tmp/voice-config.json
 sudo chown root:"$agent_user" /etc/voice/config.json
