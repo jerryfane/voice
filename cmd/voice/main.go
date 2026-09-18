@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -68,23 +69,50 @@ func (p *printer) print(a ...any) {
 	_, p.err = fmt.Fprint(p.w, a...)
 }
 
+// agentAccount is the restricted account the voice agent runs as, matching
+// packaging/voice.service and packaging/voice-agent-run.
+const agentAccount = "voice-agent"
+
+// agentHome resolves that account's home directory. It is a variable so the
+// resolution can be tested on a host that has no such account: without a
+// seam, the test for "look in the AGENT's home, not the caller's" skips
+// everywhere except a real device, which is another check that cannot fail.
+// Production uses the real lookup below and nothing flips it.
+var agentHome = func() (string, bool) {
+	u, err := user.Lookup(agentAccount)
+	if err != nil || u.HomeDir == "" {
+		return "", false
+	}
+	return u.HomeDir, true
+}
+
 // requestsPath is where the voice agent records requests it could not act on.
-// It reads the same environment variable packaging/voice-agent-run uses to
-// choose the workspace, so the writer and the reader cannot disagree about
-// the location - two places deriving one path is how a report goes silent.
+//
+// It resolves the AGENT'S home, not the caller's. `voice doctor` is normally
+// run by the operator - root, or the pi user - whose home is not the agent's,
+// and the sudoers grant the installer writes permits only `voice-agent-run`,
+// so doctor cannot re-run itself as the agent. Deriving the path from
+// os.UserHomeDir meant doctor looked in /root/voice-workspace while the agent
+// wrote to /home/voice-agent/voice-workspace: requests recorded, and a
+// reader that reported none. The review caught it; my own smoke test had
+// passed only because it forced HOME.
 func requestsPath() string {
 	if p := os.Getenv("VOICE_REQUESTS"); p != "" {
 		return p
 	}
-	ws := os.Getenv("VOICE_AGENT_WORKSPACE")
-	if ws == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "voice-workspace/REQUESTS.tsv"
-		}
-		ws = filepath.Join(home, "voice-workspace")
+	if ws := os.Getenv("VOICE_AGENT_WORKSPACE"); ws != "" {
+		return filepath.Join(ws, "REQUESTS.tsv")
 	}
-	return filepath.Join(ws, "REQUESTS.tsv")
+	if home, ok := agentHome(); ok {
+		return filepath.Join(home, "voice-workspace", "REQUESTS.tsv")
+	}
+	// No such account: this is not a device install, so fall back to the
+	// caller's own workspace rather than inventing a path.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join("voice-workspace", "REQUESTS.tsv")
+	}
+	return filepath.Join(home, "voice-workspace", "REQUESTS.tsv")
 }
 
 func main() {
@@ -280,11 +308,15 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 	} else if len(reqs) > 0 {
 		stdout.printf("%-12s %-4s %d spoken request(s) need someone with code access:\n", "requests", "INFO", len(reqs))
 		for _, r := range reqs {
-			when := "undated"
+			// A line the loader could not parse is marked, not shown as if
+			// it were a clean entry: the writer is an agent following prose
+			// instructions, so a mangled line is likely and reading it as
+			// dated-and-fine would misreport what was actually recorded.
+			when := "unparsed"
 			if !r.When.IsZero() {
 				when = r.When.Local().Format("2 Jan 15:04")
 			}
-			stdout.printf("%-12s      %s  %s\n", "", when, r.Text)
+			stdout.printf("%-12s      %-13s %s\n", "", when, r.Text)
 		}
 	}
 	if c.Timers.Enabled {

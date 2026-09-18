@@ -10,7 +10,7 @@
 // whether anyone had looked.
 //
 // So the agent appends here instead. No new privileges: the file lives in the
-// workspace it already owns, and `voice requests` reads it back.
+// workspace it already owns, and `voice doctor` reads it back.
 package requests
 
 import (
