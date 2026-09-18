@@ -188,17 +188,21 @@ func run(args []string) error {
 	if args[0] == "on" || args[0] == "off" || args[0] == "status" {
 		return controlService(args[0])
 	}
-	cfg, p, err := config.Load(*path)
+	cfg, loaded, err := config.Load(*path)
 	if err != nil {
-		return fmt.Errorf("load config: %w (run `voice init`)", err)
+		// No `voice init` suggestion bolted on here: when nothing exists
+		// anywhere, config.NotFoundError already names the files it looked
+		// for and what init would write. Appending the advice
+		// unconditionally is how it came to be offered for a config that
+		// existed and was simply somewhere else.
+		return fmt.Errorf("load config: %w", err)
 	}
-	_ = p
 	a := session.Build(cfg)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	switch args[0] {
 	case "doctor":
-		return doctor(ctx, cfg, a)
+		return doctor(ctx, cfg, a, loaded)
 	case "devices":
 		return listDevices(ctx, a)
 	case "wake":
@@ -342,7 +346,7 @@ func initConfig(path string, force bool) error {
 	stdout.println("Run `voice doctor`, then edit device names and addresses.")
 	return nil
 }
-func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
+func doctor(ctx context.Context, c config.Config, a *session.Assistant, loaded string) error {
 	bad := 0
 	check := func(label string, ok bool, detail string) {
 		status := "OK"
@@ -352,6 +356,10 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 		}
 		stdout.printf("%-12s %-4s %s\n", label, status, detail)
 	}
+	// Unconditionally, including on success: "which config am I actually
+	// running" was unanswerable, and a diagnostic that reports on a file it
+	// does not name is how someone ends up tuning the wrong one.
+	check("config", true, loaded)
 	_, ok := proc.Which(c.Input.Command[0])
 	check("microphone", ok, a.Recorder.Describe())
 	_, ok = proc.Which(c.Output.Command[0])
