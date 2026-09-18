@@ -1,0 +1,22 @@
+#!/bin/sh
+# Run the Spotify client in its own ALSA namespace, as its own account.
+#
+# Two separate guarantees, deliberately not one:
+#   - ALSA_CONFIG_PATH decides WHICH device "default" is, because the client
+#     cannot name one itself.
+#   - the spotify-player account is not in `audio`, and a udev rule grants it
+#     access to the Pebble's nodes only, so reaching any other card - including
+#     the capture device the Voice service holds - fails with EACCES.
+#
+# The second is what makes the first safe to rely on: a config the client could
+# ignore is advice, a permission it cannot escape is a boundary.
+set -eu
+
+if [ "$(id -un)" != "spotify-player" ]; then
+  exec sudo -n -H -u spotify-player /usr/local/bin/spotify-player-run "$@"
+fi
+
+ALSA_CONFIG_PATH=/etc/voice/spotify-alsa.conf
+export ALSA_CONFIG_PATH
+
+exec /usr/local/bin/spotify_player "$@"

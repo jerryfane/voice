@@ -1,0 +1,38 @@
+[Unit]
+Description=Spotify playback daemon for Voice, pinned to the Pebble
+Documentation=https://github.com/jerryfane/voice
+After=sound.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=spotify-player
+Group=spotify-player
+ExecStart=/usr/local/bin/spotify-player-run -d
+Restart=on-failure
+RestartSec=5s
+
+# The client plays audio and talks to Spotify. It has no business anywhere
+# else on this device, and in particular no business near the Voice workspace
+# or the owner's account.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/spotify-player
+PrivateDevices=no
+DeviceAllow=char-alsa rw
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=no
+LockPersonality=yes
+
+Environment=ALSA_CONFIG_PATH=/etc/voice/spotify-alsa.conf
+Environment=XDG_CONFIG_HOME=/var/lib/spotify-player/config
+Environment=XDG_CACHE_HOME=/var/lib/spotify-player/cache
+
+[Install]
+WantedBy=multi-user.target

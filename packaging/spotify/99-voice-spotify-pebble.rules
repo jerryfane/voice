@@ -1,0 +1,16 @@
+# Give the restricted spotify-player account access to the Creative Pebble V3
+# sound nodes, and ONLY those.
+#
+# The account is deliberately not a member of `audio`, so it cannot open any
+# other card - including the PowerConf capture device the Voice service holds.
+# That boundary is enforced by the kernel rather than by an ALSA config an
+# application could ignore or override: a client that "helpfully" falls back to
+# the default device gets EACCES instead of the owner's microphone.
+#
+# Matched by USB vendor/product rather than by card number, because card
+# numbers are assigned in probe order and shift when devices are replugged
+# (issue #38).
+SUBSYSTEM=="sound", KERNEL=="card*", ATTRS{idVendor}=="041e", ATTRS{idProduct}=="3272", \
+  RUN+="/usr/bin/setfacl -m u:spotify-player:rw /dev/snd/controlC%n"
+SUBSYSTEM=="sound", KERNEL=="pcmC*D*p", ATTRS{../idVendor}=="041e", ATTRS{../idProduct}=="3272", \
+  RUN+="/usr/bin/setfacl -m u:spotify-player:rw /dev/snd/%k"

@@ -192,6 +192,40 @@ voice tv <id> volume-down
 voice tv <id> mute
 ```
 
+## Spotify
+
+Optional, and deliberately separate from the assistant. `scripts/install-spotify.sh`
+installs a Spotify client that plays to a second speaker and **cannot reach the
+microphone**.
+
+    scripts/install-spotify.sh
+
+Two independent guarantees, because one of them is only advice:
+
+- **Which device.** `spotify-player` cannot name an output device - it calls
+  `audio_backend::find(None)`, and librespot's ALSA backend maps that `None` to
+  the string `"default"`. So `packaging/spotify/alsa.conf`, selected through
+  `ALSA_CONFIG_PATH`, defines what `"default"` *means* for that process: the
+  Creative Pebble V3, addressed as `card "V3"` and never as a card number,
+  which shifts with probe order.
+- **Which devices are reachable at all.** The client runs as `spotify-player`,
+  an account that is **not** in the `audio` group. A udev rule grants it access
+  to the Pebble's nodes alone, matched by USB vendor and product. Reaching any
+  other card - including the capture device the Voice service holds - fails with
+  `EACCES`. A config a client can ignore is advice; a permission it cannot
+  escape is a boundary.
+
+The installer refuses to proceed unless it can demonstrate the ALSA namespace is
+load-bearing: it points `default` at a nonexistent card, requires playback to
+fail, and requires the failure to be *attributable to that card* rather than to
+a missing binary or a busy device. An ignored `ALSA_CONFIG_PATH` would otherwise
+look exactly like a working one - audio would still play, just out of the wrong
+speaker.
+
+Login is not automated. The installer prints the one command that needs a person,
+because it opens a browser flow against the owner's Spotify account. Premium is
+required for playback through this client.
+
 ## Security boundary
 
 A spoken command can cause shell or browser activity. Isolation is therefore an OS boundary, not merely a prompt instruction:
