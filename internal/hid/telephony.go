@@ -184,6 +184,18 @@ func (t *Telephony) SetLogger(f func(format string, args ...any)) {
 	t.log = f
 }
 
+// LogReady records that the device is open and what it can drive, so that the
+// ABSENCE of later write lines is itself a diagnosis. A successful-write log
+// cannot distinguish "wrote the wrong bytes" from "never wrote at all",
+// because the second case leaves no line at all; a ready line with nothing
+// after it answers that on its own.
+func (t *Telephony) LogReady() {
+	if t == nil {
+		return
+	}
+	t.logf("stage=hid state=ready path=%s caps=%s", t.path, t.Describe())
+}
+
 func (t *Telephony) logf(format string, args ...any) {
 	if t == nil || t.log == nil {
 		return

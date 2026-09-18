@@ -38,6 +38,14 @@ func Build(c config.Config) *Assistant {
 		// lit the ring while Voice's own path lit nothing and reported no
 		// error, and nothing in the journal could say which bytes it sent.
 		tel.SetLogger(logger.Printf)
+		// A ready line, so the absence of written lines MEANS something. The
+		// review pointed out that a successful-write log cannot by itself
+		// separate "wrote the wrong bytes" from "never wrote at all" - that
+		// second case is only visible in the wake-light fallback line and the
+		// feedback error line, which an engineer has to know to correlate.
+		// With this, a ready line and no written lines is the answer on its
+		// own.
+		tel.LogReady()
 	}
 	rec := audio.NewCommandRecorder(c.Input.Command, c.Input.Device, f, frame, tel, faults.Log(logger, "capture"))
 	player := audio.NewCommandPlayer(c.Output.Command, c.Output.Device)
