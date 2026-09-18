@@ -18,6 +18,7 @@ import (
 	"github.com/jerryfane/voice/internal/device"
 	"github.com/jerryfane/voice/internal/proc"
 	"github.com/jerryfane/voice/internal/session"
+	"github.com/jerryfane/voice/internal/wake"
 )
 
 var version = "0.1.0-dev"
@@ -240,6 +241,15 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 	ok, d = a.Brain.Available()
 	check("brain", ok, a.Brain.Name()+": "+d)
 	stdout.printf("%-12s %-4s %s\n", "wake feedback", "INFO", a.Feedback.Describe())
+	// The wake line reports how each phrase will be matched, because the
+	// tolerance silently does nothing for a phrase with too little sound in
+	// it. The sentence is built in the wake package beside the rule it
+	// describes: assembling it here produced a self-contradiction, telling an
+	// exact-only single-word phrase that it would wake on sound-alikes.
+	for _, phrase := range c.Wake.Phrases {
+		stdout.printf("%-12s %-4s %q: %s\n", "wake phrase", "INFO", phrase,
+			wake.DescribeMatching(phrase, c.Wake.Fuzz))
+	}
 	if c.Timers.Enabled {
 		if a.Timers == nil {
 			check("timers", false, "enabled but no scheduler was built")
