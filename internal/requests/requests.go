@@ -79,7 +79,7 @@ func Load(path string) ([]Request, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("read requests: %w", err)
 	}
 	var out []Request
 	for _, raw := range strings.Split(string(body), "\n") {

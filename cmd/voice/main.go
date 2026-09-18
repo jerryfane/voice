@@ -86,8 +86,15 @@ var agentHome = func() (string, bool) {
 	return u.HomeDir, true
 }
 
+// requestCandidate is one place the journal could be, and whether a failure
+// to read it is a fault or merely worth mentioning.
+type requestCandidate struct {
+	path     string
+	required bool
+}
+
 // requestsPaths lists every place the voice agent's journal could be, most
-// specific first, deduplicated.
+// specific first, deduplicated by file identity.
 //
 // It returns a LIST rather than a single answer on purpose. The reader and the
 // writer resolve this path in different processes with different environments:
@@ -97,34 +104,51 @@ var agentHome = func() (string, bool) {
 // doctor can report "no requests" while a real request sits in the other
 // location - a silent wrong answer, which is the defect this whole feature
 // exists to end. So doctor reads them all and says which file it found.
-func requestsPaths() []string {
-	var paths []string
-	add := func(p string) {
+func requestsPaths() []requestCandidate {
+	var paths []requestCandidate
+	add := func(p string, required bool) {
 		if p == "" {
 			return
 		}
+		p = filepath.Clean(p)
+		// Deduplicate by file IDENTITY, not by string. A relocated
+		// workspace is often a symlink or a bind mount of the agent's own,
+		// so two different strings name one file: counting it twice would
+		// report two requests where one was spoken and print it twice, and
+		// a reader that invents requests is no more trustworthy than one
+		// that hides them.
+		info, err := os.Stat(p)
 		for _, existing := range paths {
-			if existing == p {
+			if existing.path == p {
+				return
+			}
+			if err != nil {
+				continue
+			}
+			other, otherErr := os.Stat(existing.path)
+			if otherErr == nil && os.SameFile(info, other) {
 				return
 			}
 		}
-		paths = append(paths, p)
+		paths = append(paths, requestCandidate{path: p, required: required})
 	}
 
-	add(os.Getenv("VOICE_REQUESTS"))
+	// Required candidates are the places the journal is MEANT to be, named
+	// by an operator or by the service account. The caller's own home is a
+	// backstop, so a stray unreadable file there must not fail a device
+	// whose real journal is healthy.
+	add(os.Getenv("VOICE_REQUESTS"), true)
 	if ws := os.Getenv("VOICE_AGENT_WORKSPACE"); ws != "" {
-		add(filepath.Join(ws, "REQUESTS.tsv"))
+		add(filepath.Join(ws, "REQUESTS.tsv"), true)
 	}
 	if home, ok := agentHome(); ok {
-		add(filepath.Join(home, "voice-workspace", "REQUESTS.tsv"))
+		add(filepath.Join(home, "voice-workspace", "REQUESTS.tsv"), true)
 	}
-	// The caller's own workspace, for a developer machine with no such
-	// account, and as a backstop if the agent's home moved.
 	if home, err := os.UserHomeDir(); err == nil {
-		add(filepath.Join(home, "voice-workspace", "REQUESTS.tsv"))
+		add(filepath.Join(home, "voice-workspace", "REQUESTS.tsv"), false)
 	}
 	if len(paths) == 0 {
-		add(filepath.Join("voice-workspace", "REQUESTS.tsv"))
+		add(filepath.Join("voice-workspace", "REQUESTS.tsv"), false)
 	}
 	return paths
 }
@@ -317,23 +341,32 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 	// itself. Reported here because the alternative is what already
 	// happened: a spoken request refused politely, written nowhere, and
 	// found days later only because someone thought to ask.
+	candidates := requestsPaths()
 	found := map[string][]requests.Request{}
 	total := 0
-	for _, path := range requestsPaths() {
-		reqs, err := requests.Load(path)
+	for _, candidate := range candidates {
+		reqs, err := requests.Load(candidate.path)
 		if err != nil {
-			check("requests", false, path+": "+err.Error())
+			if candidate.required {
+				check("requests", false, err.Error())
+			} else {
+				// A leftover file in whoever-ran-doctor's own home is not
+				// the device's problem, but it is not nothing either: say
+				// it and carry on rather than failing a healthy install or
+				// swallowing it silently.
+				stdout.printf("%-12s %-4s ignoring an unreadable backstop: %v\n", "requests", "INFO", err)
+			}
 			continue
 		}
 		if len(reqs) > 0 {
-			found[path] = reqs
+			found[candidate.path] = reqs
 			total += len(reqs)
 		}
 	}
 	if total > 0 {
 		stdout.printf("%-12s %-4s %d spoken request(s) need someone with code access:\n", "requests", "INFO", total)
-		for _, path := range requestsPaths() {
-			reqs, ok := found[path]
+		for _, candidate := range candidates {
+			reqs, ok := found[candidate.path]
 			if !ok {
 				continue
 			}
@@ -341,13 +374,14 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 			// requests, so a relocated workspace is visible rather than
 			// looking like one merged list.
 			if len(found) > 1 {
-				stdout.printf("%-12s      in %s:\n", "", path)
+				stdout.printf("%-12s      in %s:\n", "", candidate.path)
 			}
 			for _, r := range reqs {
-				// A line the loader could not parse is marked, not shown as if
-				// it were a clean entry: the writer is an agent following prose
-				// instructions, so a mangled line is likely and reading it as
-				// dated-and-fine would misreport what was actually recorded.
+				// A line the loader could not parse is marked, not shown
+				// as if it were a clean entry: the writer is an agent
+				// following prose instructions, so a mangled line is
+				// likely and reading it as dated-and-fine would misreport
+				// what was actually recorded.
 				when := "unparsed"
 				if !r.When.IsZero() {
 					when = r.When.Local().Format("2 Jan 15:04")

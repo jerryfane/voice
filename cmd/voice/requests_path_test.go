@@ -1,14 +1,15 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func hasPath(paths []string, want string) bool {
+func hasPath(paths []requestCandidate, want string) bool {
 	for _, p := range paths {
-		if p == want {
+		if p.path == want {
 			return true
 		}
 	}
@@ -82,8 +83,11 @@ func TestRequestsPathsPutAnExplicitOverrideFirst(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	got := requestsPaths()
-	if len(got) == 0 || got[0] != explicit {
+	if len(got) == 0 || got[0].path != explicit {
 		t.Errorf("paths = %v, want %q first", got, explicit)
+	}
+	if !got[0].required {
+		t.Error("an explicitly named journal must be required: failing to read the file an operator pointed at is a fault, not a footnote")
 	}
 }
 
@@ -102,10 +106,10 @@ func TestRequestsPathsAreDeduplicated(t *testing.T) {
 	got := requestsPaths()
 	seen := map[string]bool{}
 	for _, p := range got {
-		if seen[p] {
-			t.Errorf("paths = %v, contains %q twice", got, p)
+		if seen[p.path] {
+			t.Errorf("paths = %v, contains %q twice", got, p.path)
 		}
-		seen[p] = true
+		seen[p.path] = true
 	}
 	if len(got) != 1 {
 		t.Errorf("paths = %v; one workspace must collapse to one path", got)
@@ -129,8 +133,76 @@ func TestRequestsPathsNeverEmpty(t *testing.T) {
 		t.Fatal("no candidate paths at all; doctor would never look anywhere")
 	}
 	for _, p := range got {
-		if strings.Contains(p, "voice-agent") {
+		if strings.Contains(p.path, "voice-agent") {
 			t.Errorf("paths = %v, invented an agent path with no such account", got)
+		}
+	}
+}
+
+// Two different strings can name ONE file: a relocated workspace is commonly a
+// symlink or a bind mount of the agent's own. Deduplicating by string alone
+// counts that request twice and prints it twice, and a reader that invents
+// requests is no more trustworthy than one that hides them.
+func TestRequestsPathsDeduplicateBySymlinkedIdentityNotJustString(t *testing.T) {
+	real := t.TempDir()
+	journal := filepath.Join(real, "REQUESTS.tsv")
+	if err := os.WriteFile(journal, []byte("2026-09-18T14:05:00Z\tplay music\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second, differently-named route to the very same file.
+	link := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot create symlinks here: %v", err)
+	}
+
+	t.Setenv("VOICE_REQUESTS", filepath.Join(link, "REQUESTS.tsv"))
+	t.Setenv("VOICE_AGENT_WORKSPACE", real)
+	t.Setenv("HOME", t.TempDir())
+
+	restore := agentHome
+	agentHome = func() (string, bool) { return "", false }
+	t.Cleanup(func() { agentHome = restore })
+
+	got := requestsPaths()
+	hits := 0
+	for _, c := range got {
+		if info, err := os.Stat(c.path); err == nil {
+			if other, err := os.Stat(journal); err == nil && os.SameFile(info, other) {
+				hits++
+			}
+		}
+	}
+	if hits != 1 {
+		t.Errorf("paths = %v resolve to the same journal %d times; one spoken request would be reported %d times", got, hits, hits)
+	}
+}
+
+// The caller's own home is a backstop, not where the journal is meant to live.
+// A stray unreadable file there must not be treated as a device fault, or
+// whoever runs doctor can fail a healthy install with their own leftovers.
+func TestOnlyTheIntendedLocationsAreRequired(t *testing.T) {
+	agentDir := t.TempDir()
+	t.Setenv("VOICE_REQUESTS", "")
+	t.Setenv("VOICE_AGENT_WORKSPACE", "")
+	t.Setenv("HOME", t.TempDir())
+
+	restore := agentHome
+	agentHome = func() (string, bool) { return agentDir, true }
+	t.Cleanup(func() { agentHome = restore })
+
+	got := requestsPaths()
+	agentJournal := filepath.Join(agentDir, "voice-workspace", "REQUESTS.tsv")
+	for _, c := range got {
+		switch c.path {
+		case agentJournal:
+			if !c.required {
+				t.Error("the agent's own journal must be required: an unreadable journal there is a real fault")
+			}
+		default:
+			if c.required {
+				t.Errorf("%q is a backstop and must not be required", c.path)
+			}
 		}
 	}
 }
