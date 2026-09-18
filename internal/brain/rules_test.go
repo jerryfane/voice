@@ -118,3 +118,37 @@ func (p *refusingPlanner) Plan(context.Context, string, []device.Info) (Plan, er
 }
 func (*refusingPlanner) Name() string              { return "refusing" }
 func (*refusingPlanner) Available() (bool, string) { return true, "" }
+
+// Device IDs carry punctuation - "living-room", "lamp_2", "hue:desk" - and the
+// transcript is now normalised, so the ID must be normalised the same way.
+// Comparing normalised text against a raw ID silently broke every punctuated
+// device: "turn on the living-room lamp" normalises to "living room" and
+// matched nothing.
+func TestDeviceIDsWithPunctuationStillMatch(t *testing.T) {
+	inv := []device.Info{
+		{ID: "living-room", Kind: "light", Capabilities: []string{string(device.OpOn), string(device.OpOff)}},
+		{ID: "lamp_2", Kind: "light", Capabilities: []string{string(device.OpOn)}},
+		{ID: "hue:desk", Kind: "light", Capabilities: []string{string(device.OpOn)}},
+	}
+	r := NewRules(&refusingPlanner{onCall: func() {}})
+
+	for _, c := range []struct{ said, want string }{
+		{"turn on the living-room", "living-room"},
+		{"turn on living room", "living-room"},
+		{"turn on lamp_2", "lamp_2"},
+		{"turn on lamp 2", "lamp_2"},
+		{"turn on hue:desk", "hue:desk"},
+	} {
+		p, err := r.Plan(context.Background(), c.said, inv)
+		if err != nil {
+			t.Fatalf("%q: %v", c.said, err)
+		}
+		if len(p.Actions) == 0 {
+			t.Errorf("%q produced no action; the device was not recognised", c.said)
+			continue
+		}
+		if p.Actions[0].Device != c.want {
+			t.Errorf("%q acted on %q, want %q", c.said, p.Actions[0].Device, c.want)
+		}
+	}
+}

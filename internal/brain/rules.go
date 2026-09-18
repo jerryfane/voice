@@ -33,8 +33,13 @@ func (r *Rules) Plan(ctx context.Context, text string, inv []device.Info) (Plan,
 		return Plan{Speak: "Okay.", Source: "rules"}, nil
 	}
 	for _, d := range inv {
-		id := strings.ToLower(d.ID)
-		if !strings.Contains(n, id) {
+		// The ID is normalised the same way as the transcript, because the
+		// transcript now is: comparing normalised text against a raw ID broke
+		// every device whose ID contains punctuation - "living-room" became
+		// "living room" in the transcript and matched nothing. Normalising one
+		// side only is how a shared rule turns into a silent regression.
+		id := normalise(d.ID)
+		if id == "" || !strings.Contains(n, id) {
 			continue
 		}
 		if strings.Contains(n, "turn on") || strings.HasPrefix(n, "on ") {
