@@ -48,13 +48,26 @@ if [ -x /var/lib/voice/piper/piper ]; then
   sudo ln -sfn /var/lib/voice/piper/piper /usr/local/bin/piper
 fi
 
+fresh_config=0
 if [ ! -f /etc/voice/config.json ]; then
   sudo /usr/local/bin/voice --config /etc/voice/config.json init
+  fresh_config=1
 fi
-sudo jq '
-  .wake.phrases = ["hey voice"] |
-  .wake.fuzz = 0 |
-  del(.wake.follow_up) |
+
+# The wake settings belong to whoever owns the speaker, not to this script.
+# It used to assign wake.phrases and wake.fuzz on EVERY run, which silently
+# removed the owner's "hey boys" alias each time the device was reinstalled -
+# restored by hand afterwards, every time, by the person doing the install.
+# A deploy step that quietly undoes a user's configuration is a defect even
+# when the value it writes is the documented default.
+wake_filter='.'
+if [ "$fresh_config" = 1 ]; then
+  wake_filter='.wake.phrases = ["hey voice"] | .wake.fuzz = 0 | del(.wake.follow_up)'
+else
+  printf 'keeping existing wake phrases: %s\n' "$(sudo jq -c '.wake.phrases' /etc/voice/config.json)"
+fi
+
+sudo jq "$wake_filter" /etc/voice/config.json | jq '
   .stt.model = "/var/lib/voice/models/ggml-base.en.bin" |
   .tts.model = "/var/lib/voice/models/en_US-amy-medium.onnx" |
   .brain.mode = "agent" |
@@ -62,7 +75,7 @@ sudo jq '
   .brain.timeout = "10m0s" |
   .brain.persona = "You are Voice, a concise personal agent. Complete the user request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences." |
   .brain.rules = false
-' /etc/voice/config.json > /tmp/voice-config.json
+' > /tmp/voice-config.json
 sudo install -o root -g "$agent_user" -m 0640 /tmp/voice-config.json /etc/voice/config.json
 rm -f /tmp/voice-config.json
 sudo chown root:"$agent_user" /etc/voice/config.json
