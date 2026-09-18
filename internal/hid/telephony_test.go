@@ -330,4 +330,32 @@ func TestLogReadyRecordsThePathAndCapabilities(t *testing.T) {
 	var none *Telephony
 	none.SetLogger(func(string, ...any) { t.Error("nil device logged a ready line") })
 	none.LogReady()
+
+	// The point of the ready line is that an ABSENCE becomes readable, so the
+	// two states must be distinguishable in one stream: ready with no write
+	// lines is "never wrote", ready followed by a write line is "wrote". A
+	// reader cannot draw the first conclusion unless the second looks
+	// different.
+	node := filepath.Join(t.TempDir(), "hidraw-stream")
+	if err := os.WriteFile(node, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live := &Telephony{path: node, outs: outs, state: map[byte][]byte{}}
+	var stream []string
+	live.SetLogger(func(format string, args ...any) {
+		stream = append(stream, fmt.Sprintf(format, args...))
+	})
+	live.LogReady()
+	if len(stream) != 1 || !strings.Contains(stream[0], "state=ready") {
+		t.Fatalf("expected exactly one ready line, got %v", stream)
+	}
+	if strings.Contains(stream[0], "state=written") {
+		t.Error("a ready line must not read as a write, or an absence proves nothing")
+	}
+	if ok, err := live.Set(PageLED, LEDHold, true); err != nil || !ok {
+		t.Fatalf("write failed: ok=%v err=%v", ok, err)
+	}
+	if len(stream) != 2 || !strings.Contains(stream[1], "state=written") {
+		t.Fatalf("a successful write must add a distinguishable line, got %v", stream)
+	}
 }
