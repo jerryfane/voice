@@ -12,5 +12,11 @@
 # (issue #38).
 SUBSYSTEM=="sound", KERNEL=="card*", ATTRS{idVendor}=="041e", ATTRS{idProduct}=="3272", \
   RUN+="/usr/bin/setfacl -m u:spotify-player:rw /dev/snd/controlC%n"
-SUBSYSTEM=="sound", KERNEL=="pcmC*D*p", ATTRS{../idVendor}=="041e", ATTRS{../idProduct}=="3272", \
+# Plain ATTRS on the pcm node, not ATTRS{../idVendor}. The relative form DOES
+# match on this device - verified with udevadm test - but udev warns "Direct
+# reference to parent sysfs directory, may break in future kernels", and a
+# boundary that stops matching after a kernel upgrade fails silently: the rule
+# still installs, grants nothing, and the client merely fails to play. Both
+# forms were tested on the hardware and the plain one matches too.
+SUBSYSTEM=="sound", KERNEL=="pcmC*D*p", ATTRS{idVendor}=="041e", ATTRS{idProduct}=="3272", \
   RUN+="/usr/bin/setfacl -m u:spotify-player:rw /dev/snd/%k"
