@@ -32,6 +32,12 @@ func Build(c config.Config) *Assistant {
 			// only the descriptor was unreadable.
 			logger.Printf("telephony HID: %v", err)
 		}
+		// Every report write is logged with its exact bytes and length. A
+		// light that does not come on was otherwise indistinguishable from a
+		// write that never happened: on the device, the raw report 02 09 00
+		// lit the ring while Voice's own path lit nothing and reported no
+		// error, and nothing in the journal could say which bytes it sent.
+		tel.SetLogger(logger.Printf)
 	}
 	rec := audio.NewCommandRecorder(c.Input.Command, c.Input.Device, f, frame, tel, faults.Log(logger, "capture"))
 	player := audio.NewCommandPlayer(c.Output.Command, c.Output.Device)

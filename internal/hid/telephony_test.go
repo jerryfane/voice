@@ -1,8 +1,10 @@
 package hid
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -214,5 +216,63 @@ func TestConcurrentWritersNeverEmitATornReport(t *testing.T) {
 	}
 	if got[1]&0x01 == 0 {
 		t.Fatalf("final report = % x: indicator writes cleared the off-hook bit", got)
+	}
+}
+
+// A successful report write logged nothing, so a light that did not come on
+// was indistinguishable from a write that never happened - which is exactly
+// what happened on the device: the raw report 02 09 00 lit the ring while
+// Voice's own path lit nothing and reported no error.
+//
+// The bytes and the LENGTH both matter: firmware treats a report of the wrong
+// length as a different report, so a log line without the length cannot
+// explain a silent failure.
+func TestWriteLogsTheExactReportBytesAndLength(t *testing.T) {
+	node := filepath.Join(t.TempDir(), "hidraw-test")
+	if err := os.WriteFile(node, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tel := &Telephony{path: node, state: map[byte][]byte{}}
+	var lines []string
+	tel.SetLogger(func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+	if err := tel.SetReportBit(StandardOffHook, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("want one log line per write, got %d: %v", len(lines), lines)
+	}
+	for _, want := range []string{"stage=hid", "bytes=", "len=", "on=true"} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("log line lacks %q: %s", want, lines[0])
+		}
+	}
+	// The retained state must be visible across writes: a second bit written
+	// into the same report has to show BOTH bits on the wire, which is the
+	// property that would have explained the missing light on the device.
+	outs, err := ParseOutputs(powerConfDescriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := &Telephony{path: node, outs: outs, state: map[byte][]byte{}}
+	var wire []string
+	dev.SetLogger(func(format string, args ...any) {
+		wire = append(wire, fmt.Sprintf(format, args...))
+	})
+	if err := dev.SetReportBit(StandardOffHook, true); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := dev.Set(PageLED, LEDHold, true); err != nil || !ok {
+		t.Fatalf("hold LED write: ok=%v err=%v", ok, err)
+	}
+	if len(wire) != 2 {
+		t.Fatalf("want two log lines, got %d: %v", len(wire), wire)
+	}
+	// Off-hook is bit 0 and hold is bit 3, so the second report must carry
+	// both: 0x09. A report showing only 0x08 would be the missing-light bug,
+	// and before this logging existed nothing could tell the two apart.
+	if !strings.Contains(wire[1], "09") {
+		t.Errorf("second write did not carry the retained off-hook bit:\n%s", wire[1])
 	}
 }
