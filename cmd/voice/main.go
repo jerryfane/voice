@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 	"github.com/jerryfane/voice/internal/config"
 	"github.com/jerryfane/voice/internal/device"
 	"github.com/jerryfane/voice/internal/proc"
+	"github.com/jerryfane/voice/internal/requests"
 	"github.com/jerryfane/voice/internal/session"
 	"github.com/jerryfane/voice/internal/wake"
 )
@@ -64,6 +66,25 @@ func (p *printer) print(a ...any) {
 		return
 	}
 	_, p.err = fmt.Fprint(p.w, a...)
+}
+
+// requestsPath is where the voice agent records requests it could not act on.
+// It reads the same environment variable packaging/voice-agent-run uses to
+// choose the workspace, so the writer and the reader cannot disagree about
+// the location - two places deriving one path is how a report goes silent.
+func requestsPath() string {
+	if p := os.Getenv("VOICE_REQUESTS"); p != "" {
+		return p
+	}
+	ws := os.Getenv("VOICE_AGENT_WORKSPACE")
+	if ws == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "voice-workspace/REQUESTS.tsv"
+		}
+		ws = filepath.Join(home, "voice-workspace")
+	}
+	return filepath.Join(ws, "REQUESTS.tsv")
 }
 
 func main() {
@@ -249,6 +270,22 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 	for _, phrase := range c.Wake.Phrases {
 		stdout.printf("%-12s %-4s %q: %s\n", "wake phrase", "INFO", phrase,
 			wake.DescribeMatching(phrase, c.Wake.Fuzz))
+	}
+	// Requests the voice agent recorded because it could not act on them
+	// itself. Reported here because the alternative is what already
+	// happened: a spoken request refused politely, written nowhere, and
+	// found days later only because someone thought to ask.
+	if reqs, err := requests.Load(requestsPath()); err != nil {
+		check("requests", false, err.Error())
+	} else if len(reqs) > 0 {
+		stdout.printf("%-12s %-4s %d spoken request(s) need someone with code access:\n", "requests", "INFO", len(reqs))
+		for _, r := range reqs {
+			when := "undated"
+			if !r.When.IsZero() {
+				when = r.When.Local().Format("2 Jan 15:04")
+			}
+			stdout.printf("%-12s      %s  %s\n", "", when, r.Text)
+		}
 	}
 	if c.Timers.Enabled {
 		if a.Timers == nil {

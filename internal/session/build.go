@@ -101,7 +101,7 @@ func Build(c config.Config) *Assistant {
 	}
 	// The thinking sound is rendered at startup like the acknowledgement, so
 	// a config typo is reported once here rather than discovered mid-answer.
-	working, err := audio.Thinking(c.Feedback.Thinking, f, c.Feedback.Volume)
+	working, err := audio.Thinking(c.Feedback.Thinking, f, c.Feedback.ResolvedThinkingVolume())
 	if err != nil {
 		logger.Printf("thinking sound: %v", err)
 	}
