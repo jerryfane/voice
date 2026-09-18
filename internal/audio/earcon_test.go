@@ -83,3 +83,49 @@ func abs(s int16) int {
 	}
 	return v
 }
+
+// A thinking sound must be quiet, must include its own trailing silence so a
+// caller can loop it without timing gaps, and must not be mistaken for an
+// answer. It exists because 7.1 seconds of planner time sounded exactly like
+// Voice having missed the question.
+func TestThinkingRendersAQuietLoopableCycle(t *testing.T) {
+	f := Format{SampleRate: 16000, Channels: 1}
+	for _, name := range []string{ThinkingTick, ThinkingHum} {
+		pcm, err := Thinking(name, f, 1)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(pcm) == 0 {
+			t.Fatalf("%s rendered nothing", name)
+		}
+		// About a second, so stopping the loop lands near the answer.
+		secs := float64(len(pcm)) / float64(f.SampleRate)
+		if secs < 0.8 || secs > 1.3 {
+			t.Errorf("%s cycle is %.2fs, want roughly one second", name, secs)
+		}
+		// It ends in silence, which is what makes it loopable without a gap.
+		tail := pcm[len(pcm)-f.SampleRate/10:]
+		for _, s := range tail {
+			if s != 0 {
+				t.Errorf("%s does not end in silence, so looping it will stutter", name)
+				break
+			}
+		}
+		// Quieter than an acknowledgement at the same volume: it plays under
+		// someone waiting, not at them.
+		ack, err := Earcon(EarconChime, f, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if peak(pcm) >= peak(ack) {
+			t.Errorf("%s peaks at %d, not below the acknowledgement's %d", name, peak(pcm), peak(ack))
+		}
+	}
+
+	if pcm, err := Thinking(ThinkingNone, f, 1); err != nil || pcm != nil {
+		t.Errorf("none must render nothing: %v %v", len(pcm), err)
+	}
+	if _, err := Thinking("wobble", f, 1); err == nil {
+		t.Error("an unknown thinking sound must be an error, not silence")
+	}
+}

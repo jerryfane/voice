@@ -22,10 +22,10 @@ func (r *Rules) Available() (bool, string) { return r.Next.Available() }
 func (r *Rules) Plan(ctx context.Context, text string, inv []device.Info) (Plan, error) {
 	n := strings.ToLower(strings.TrimSpace(text))
 	now := r.Now()
-	if strings.Contains(n, "what time") || n == "time" {
+	if asksClock(n) {
 		return Plan{Speak: fmt.Sprintf("It is %s.", now.Format("3:04 PM")), Source: "rules"}, nil
 	}
-	if strings.Contains(n, "what date") || strings.Contains(n, "what day") || n == "date" {
+	if asksDate(n) {
 		return Plan{Speak: fmt.Sprintf("It is %s.", now.Format("Monday, January 2")), Source: "rules"}, nil
 	}
 	if n == "stop" || n == "cancel" || n == "never mind" {
@@ -59,6 +59,40 @@ func (r *Rules) Plan(ctx context.Context, text string, inv []device.Info) (Plan,
 	}
 	return r.Next.Plan(ctx, text, inv)
 }
+
+// asksClock recognises the ways people actually ask for the time. The first
+// version matched "what time" or exactly "time", so "what is the time" fell
+// through to a remote model - a 7-second answer to a question the device holds
+// in its own clock. A phrasing this narrow makes the fast path look broken
+// rather than absent.
+//
+// "timer" is deliberately not matched: "set a timer for five minutes" is a
+// timer request, not a clock query, and the timer path handles it.
+func asksClock(n string) bool {
+	if n == "time" {
+		return true
+	}
+	for _, p := range []string{"what time", "the time", "time is it"} {
+		if strings.Contains(n, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// asksDate recognises date queries in the same spirit.
+func asksDate(n string) bool {
+	if n == "date" || n == "day" {
+		return true
+	}
+	for _, p := range []string{"what date", "what day", "the date", "what's the day", "which day"} {
+		if strings.Contains(n, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func actionPlan(d device.Info, op device.Op, args map[string]any) (Plan, error) {
 	ok := false
 	for _, c := range d.Capabilities {

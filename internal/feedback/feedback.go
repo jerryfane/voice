@@ -50,9 +50,12 @@ type Notifier struct {
 	Indicator Indicator
 	Player    audio.Player
 	// Sound is pre-rendered PCM in Format. Nil disables the sound.
-	Sound  []int16
-	Format audio.Format
-	Logger *log.Logger
+	Sound []int16
+	// Working is one loopable cycle of the thinking sound, including its
+	// trailing silence. Nil disables it.
+	Working []int16
+	Format  audio.Format
+	Logger  *log.Logger
 }
 
 func (n *Notifier) logf(f string, v ...any) {
@@ -75,6 +78,40 @@ func (n *Notifier) Accepted(ctx context.Context) {
 	}
 	if err := n.Player.PlayPCM(ctx, n.Sound, n.Format); err != nil && ctx.Err() == nil {
 		n.logf("feedback sound: %v", err)
+	}
+}
+
+// Thinking plays the working sound on a loop until the returned stop function
+// is called, and returns immediately. It exists because a request that leaves
+// the device takes seconds - 7.102 s measured on the owner's hardware - and
+// silence during that wait is indistinguishable from Voice having missed the
+// question.
+//
+// stop is always safe to call, including when nothing is playing, so callers
+// need no branch and can defer it. A playback failure stops the loop rather
+// than retrying: a sound that cannot play must not become a spin.
+func (n *Notifier) Thinking(ctx context.Context) (stop func()) {
+	if n == nil || len(n.Working) == 0 || n.Player == nil {
+		return func() {}
+	}
+	loop, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for loop.Err() == nil {
+			if err := n.Player.PlayPCM(loop, n.Working, n.Format); err != nil {
+				if loop.Err() == nil {
+					n.logf("thinking sound: %v", err)
+				}
+				return
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		// Waiting matters: the next thing to happen is the spoken answer, and
+		// overlapping it with the thinking loop would talk over the reply.
+		<-done
 	}
 }
 

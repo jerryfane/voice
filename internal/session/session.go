@@ -211,7 +211,13 @@ func (a *Assistant) accepted(ctx context.Context, command string) (stop bool) {
 	// wake were all instrumented and all fast, so the slowest part of a real
 	// request was the one part nobody could see.
 	started := time.Now()
+	// The thinking sound runs only around the PLANNER, not around the local
+	// fast path or the spoken reply: a query answered on the device returns
+	// in milliseconds, and a loop started for it would be heard as a glitch.
+	// It stops before Speak so the loop never talks over the answer.
+	stopThinking := a.Feedback.Thinking(ctx)
 	p, err := a.HandleText(ctx, command)
+	stopThinking()
 	if err != nil {
 		a.logf("stage=plan state=failed ms=%.3f err=%v", sinceMS(started), err)
 		a.say(ctx, "I couldn't do that.")

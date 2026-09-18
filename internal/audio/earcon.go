@@ -16,6 +16,44 @@ const (
 	EarconTwoUp = "two-up"
 )
 
+// Thinking sounds are played on a loop while the planner is working, because
+// a request that leaves the device takes seconds and silence during that wait
+// is indistinguishable from Voice having missed the question. Measured on the
+// owner's hardware: 7.102 s in the planner, during which nothing happened that
+// a person in the room could perceive.
+const (
+	ThinkingNone = "none"
+	// ThinkingTick is a soft low pulse: quiet, periodic, and clearly not an
+	// answer, so nobody mistakes it for a reply.
+	ThinkingTick = "tick"
+	// ThinkingHum is a gentler two-note murmur for people who find a pulse
+	// insistent.
+	ThinkingHum = "hum"
+)
+
+// Thinkings lists the selectable thinking sounds, "none" included.
+func Thinkings() []string { return []string{ThinkingNone, ThinkingTick, ThinkingHum} }
+
+// Thinking renders one iteration of a looping thinking sound, INCLUDING its
+// trailing silence, so a caller can play it repeatedly without timing gaps
+// itself. A cycle is about a second: long enough not to nag, short enough that
+// stopping it lands close to the moment the answer arrives.
+func Thinking(name string, f Format, volume float64) ([]int16, error) {
+	// A thinking sound plays under a person waiting, not at them, so it is
+	// rendered quieter than an acknowledgement.
+	volume = math.Max(0, math.Min(1, volume)) * 0.35
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", ThinkingNone:
+		return nil, nil
+	case ThinkingTick:
+		return render([]note{{392, 0.05, 0.7}, {0, 0.95, 0}}, f, volume), nil
+	case ThinkingHum:
+		return render([]note{{329.63, 0.09, 0.6}, {392, 0.09, 0.5}, {0, 0.82, 0}}, f, volume), nil
+	default:
+		return nil, fmt.Errorf("unknown thinking sound %q (choose one of %s)", name, strings.Join(Thinkings(), ", "))
+	}
+}
+
 // Earcons lists the selectable sound names, "none" included.
 func Earcons() []string { return []string{EarconNone, EarconChime, EarconBlip, EarconTwoUp} }
 
