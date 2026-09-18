@@ -85,11 +85,19 @@ config_filter="$wake_filter |
 sudo jq "$config_filter" /etc/voice/config.json > /tmp/voice-config.json
 
 # Belt and braces, because the thing being overwritten is the only copy of
-# the owner's configuration: refuse to install a file that is empty or does
-# not parse, whatever the exit statuses said.
-if [ ! -s /tmp/voice-config.json ] || ! jq -e 'type == "object" and (.wake.phrases | length > 0)' /tmp/voice-config.json > /dev/null; then
+# the owner's configuration: refuse to install a config the binary itself
+# will not accept.
+#
+# The check is the BINARY, not a second copy of the rules. My first version
+# asserted "wake.phrases is not empty" in jq, which is wrong: config.Validate
+# requires phrases only for the "stt" detector, and an "external" detector
+# legitimately has none, so that guard refused a configuration the app
+# supports. Two places encoding one rule is how a check drifts from the
+# behaviour it is checking - the recurring defect in this repo - and here it
+# would have blocked a reinstall on a valid device.
+if [ ! -s /tmp/voice-config.json ] || ! /usr/local/bin/voice --config /tmp/voice-config.json config > /dev/null; then
   rm -f /tmp/voice-config.json
-  echo "refusing to install a config that is empty, unparseable, or has no wake phrases" >&2
+  echo "refusing to install a config the voice binary rejects" >&2
   exit 1
 fi
 
