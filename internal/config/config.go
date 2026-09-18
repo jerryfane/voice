@@ -87,10 +87,14 @@ type Feedback struct {
 	Sound string `json:"sound"`
 	// Volume scales the earcon between 0 (silent) and 1 (full scale).
 	Volume float64 `json:"volume"`
-	// ThinkingVolume scales the thinking sound. Zero means "derive it from
-	// Volume", which is what an unset field decodes to, so an existing
-	// config keeps the behaviour it had.
-	ThinkingVolume float64 `json:"thinking_volume"`
+	// ThinkingVolume scales the thinking sound, between 0 (silent) and 1.
+	//
+	// A POINTER so absence and zero are different things. With a plain
+	// float64, an explicit thinking_volume of 0 is indistinguishable from an
+	// omitted field, so the one value a user most obviously wants - silence,
+	// from the very setting added to control it - would have been read as
+	// "derive it from Volume" and quietly ignored.
+	ThinkingVolume *float64 `json:"thinking_volume,omitempty"`
 }
 
 // Timers configures local spoken timers.
@@ -403,8 +407,8 @@ func Save(cfg Config, path string) error {
 // disagree — two places deriving the same number is how a report drifts from
 // the behaviour it describes, which this repo has already been caught doing.
 func (f Feedback) ResolvedThinkingVolume() float64 {
-	if f.ThinkingVolume > 0 {
-		return f.ThinkingVolume
+	if f.ThinkingVolume != nil {
+		return *f.ThinkingVolume
 	}
 	return f.Volume * audio.ThinkingVolumeRatio
 }
@@ -458,8 +462,8 @@ func (c Config) Validate() error {
 	// Validated here for the same reason as the acknowledgement: a typo must
 	// be reported at startup, not discovered as silence while someone waits
 	// for an answer.
-	if c.Feedback.ThinkingVolume < 0 || c.Feedback.ThinkingVolume > 1 {
-		return fmt.Errorf("feedback.thinking_volume must be between 0 and 1, got %v", c.Feedback.ThinkingVolume)
+	if v := c.Feedback.ThinkingVolume; v != nil && (*v < 0 || *v > 1) {
+		return fmt.Errorf("feedback.thinking_volume must be between 0 and 1, got %v", *v)
 	}
 	if _, err := audio.Thinking(c.Feedback.Thinking, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.ResolvedThinkingVolume()); err != nil {
 		return fmt.Errorf("feedback.thinking: %w", err)
