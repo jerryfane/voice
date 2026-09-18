@@ -213,11 +213,11 @@ func (a *Assistant) accepted(ctx context.Context, command string) (stop bool) {
 	started := time.Now()
 	p, err := a.HandleText(ctx, command)
 	if err != nil {
-		a.logf("stage=plan state=failed ms=%d err=%v", sinceMS(started), err)
+		a.logf("stage=plan state=failed ms=%.3f err=%v", sinceMS(started), err)
 		a.say(ctx, "I couldn't do that.")
 		return false
 	}
-	a.logf("stage=plan state=ok ms=%d reply=%d", sinceMS(started), len(p.Speak))
+	a.logf("stage=plan state=ok ms=%.3f reply=%d", sinceMS(started), len(p.Speak))
 	a.speakLogged(ctx, p.Speak)
 	return false
 }
@@ -228,13 +228,19 @@ func (a *Assistant) accepted(ctx context.Context, command string) (stop bool) {
 func (a *Assistant) speakLogged(ctx context.Context, text string) {
 	started := time.Now()
 	if err := a.Speak(ctx, text); err != nil {
-		a.logf("stage=speak state=failed ms=%d chars=%d err=%v", sinceMS(started), len(text), err)
+		a.logf("stage=speak state=failed ms=%.3f chars=%d err=%v", sinceMS(started), len(text), err)
 		return
 	}
-	a.logf("stage=speak state=ok ms=%d chars=%d", sinceMS(started), len(text))
+	a.logf("stage=speak state=ok ms=%.3f chars=%d", sinceMS(started), len(text))
 }
 
-func sinceMS(t time.Time) int64 { return time.Since(t).Milliseconds() }
+// sinceMS reports elapsed milliseconds with fractions. Milliseconds() alone
+// truncates toward zero, so a sub-millisecond stage logged ms=0, which is
+// indistinguishable at a glance from a stage that was never measured - the
+// exact ambiguity this logging exists to remove.
+func sinceMS(t time.Time) float64 {
+	return float64(time.Since(t).Microseconds()) / 1000
+}
 
 func localControl(command string) (reply string, stop bool, handled bool) {
 	switch strings.ToLower(strings.TrimSpace(command)) {
