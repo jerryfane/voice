@@ -243,19 +243,12 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 	stdout.printf("%-12s %-4s %s\n", "wake feedback", "INFO", a.Feedback.Describe())
 	// The wake line reports how each phrase will be matched, because the
 	// tolerance silently does nothing for a phrase with too little sound in
-	// it - a non-Latin phrase, or one of very short words. A user who set
-	// wake.fuzz and saw no effect had no way to find that out.
+	// it. The sentence is built in the wake package beside the rule it
+	// describes: assembling it here produced a self-contradiction, telling an
+	// exact-only single-word phrase that it would wake on sound-alikes.
 	for _, phrase := range c.Wake.Phrases {
-		mode := fmt.Sprintf("sound-matched, tolerance %v", c.Wake.Fuzz)
-		if c.Wake.Fuzz <= 0 {
-			mode = "exact only (wake.fuzz is 0)"
-		} else if wake.ExactOnly(phrase, c.Wake.Fuzz) {
-			mode = fmt.Sprintf("exact only: too little recognisable sound for tolerance %v", c.Wake.Fuzz)
-		}
-		if wake.Anchorless(phrase) {
-			mode += "; SINGLE WORD, so it wakes on sound-alikes of that word alone"
-		}
-		stdout.printf("%-12s %-4s %q: %s\n", "wake phrase", "INFO", phrase, mode)
+		stdout.printf("%-12s %-4s %q: %s\n", "wake phrase", "INFO", phrase,
+			wake.DescribeMatching(phrase, c.Wake.Fuzz))
 	}
 	if c.Timers.Enabled {
 		if a.Timers == nil {

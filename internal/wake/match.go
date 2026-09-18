@@ -2,6 +2,7 @@
 package wake
 
 import (
+	"fmt"
 	"strings"
 	"unicode"
 )
@@ -90,6 +91,28 @@ func ExactOnly(phrase string, fuzz float64) bool {
 		}
 	}
 	return true
+}
+
+// DescribeMatching explains, in one sentence, how a configured phrase will be
+// matched at this tolerance. It lives here beside the rule it describes
+// because the alternative - assembling the sentence at the callsite - produced
+// a self-contradiction: an exact-only single-word phrase was told it would
+// wake on sound-alikes of that word, which is precisely what exact matching
+// does NOT do.
+func DescribeMatching(phrase string, fuzz float64) string {
+	switch {
+	case fuzz <= 0:
+		if Anchorless(phrase) {
+			return "matched exactly (wake.fuzz is 0); single word, so an exact transcript of it wakes Voice"
+		}
+		return "matched exactly (wake.fuzz is 0)"
+	case ExactOnly(phrase, fuzz):
+		return fmt.Sprintf("matched exactly: no word in it has enough sound for tolerance %v", fuzz)
+	case Anchorless(phrase):
+		return fmt.Sprintf("sound-matched at tolerance %v; SINGLE WORD, so it also wakes on sound-alikes of that word alone", fuzz)
+	default:
+		return fmt.Sprintf("sound-matched at tolerance %v", fuzz)
+	}
 }
 
 // Anchorless reports whether a phrase is a single word, which makes it wake on

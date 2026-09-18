@@ -1,6 +1,7 @@
 package wake
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/jerryfane/voice/internal/config"
@@ -276,5 +277,39 @@ func TestAnchorlessNamesSingleWordPhrases(t *testing.T) {
 	// "voice" answers the first word of an ordinary sentence.
 	if matched, _, _ := Match("boys will be boys", []string{"voice"}, 0.2); !matched {
 		t.Log("note: 'boys will be boys' no longer matches a lone 'voice'; the warning may be overstated")
+	}
+}
+
+// The doctor sentence must never contradict itself. Assembling it at the
+// callsite told an exact-only single-word phrase that it would wake on
+// sound-alikes of that word - which is exactly what exact matching does not
+// do, so the diagnostic said two opposite things at once.
+func TestDescribeMatchingNeverContradictsItself(t *testing.T) {
+	cases := []struct {
+		phrase string
+		fuzz   float64
+	}{
+		{"hey voice", 0.2}, {"hey voice", 0}, {"voice", 0.2}, {"voice", 0},
+		{"hey", 0.2}, {"hi bo", 0.2}, {"こんにちは", 0.2}, {"hey voice", 0.1},
+	}
+	for _, c := range cases {
+		got := DescribeMatching(c.phrase, c.fuzz)
+		exact := strings.Contains(got, "matched exactly")
+		alike := strings.Contains(got, "sound-alikes")
+		if exact && alike {
+			t.Errorf("DescribeMatching(%q, %v) says both exact and sound-alike: %s", c.phrase, c.fuzz, got)
+		}
+		// And it must agree with the behaviour, not merely be coherent.
+		if exact != ExactOnly(c.phrase, c.fuzz) && c.fuzz > 0 {
+			t.Errorf("DescribeMatching(%q, %v) = %q but ExactOnly = %v", c.phrase, c.fuzz, got, ExactOnly(c.phrase, c.fuzz))
+		}
+		if strings.Contains(got, "SINGLE WORD") && !Anchorless(c.phrase) {
+			t.Errorf("DescribeMatching(%q, %v) warns SINGLE WORD for a multi-word phrase: %s", c.phrase, c.fuzz, got)
+		}
+	}
+
+	// The case the review found: a single word with no tolerance available.
+	if got := DescribeMatching("hey", 0.2); strings.Contains(got, "sound-alikes") {
+		t.Errorf("an exact-only single word must not be told it wakes on sound-alikes: %s", got)
 	}
 }
