@@ -327,8 +327,63 @@ func Default() Config {
 	}
 }
 
-// Path returns the config file location, honouring VOICE_CONFIG and
-// XDG_CONFIG_HOME before falling back to ~/.config/voice/config.json.
+// SystemPath is where an installed device keeps its config. The service unit
+// passes it explicitly; every other command has to find it.
+const SystemPath = "/etc/voice/config.json"
+
+// systemPath is the location actually consulted, as a variable so the
+// fallback can be tested without a real /etc/voice on the host - otherwise
+// the test for "fall back to the installed config" only runs on a device,
+// which is a check that cannot fail anywhere else. Production never reassigns
+// it.
+var systemPath = SystemPath
+
+// NotFoundError says where a config was looked for, because the useful part
+// of "no config" is which files were considered.
+type NotFoundError struct {
+	Looked []string
+}
+
+func (e *NotFoundError) Error() string {
+	return fmt.Sprintf("no config found; looked in %s. Run `voice init` to write %s, or pass --config PATH",
+		strings.Join(e.Looked, " and "), e.Looked[0])
+}
+
+// Locate finds the config to READ, preferring the caller's own over the
+// installed one.
+//
+// The per-user path alone was not enough: an installed device keeps its
+// config at SystemPath and the service passes it explicitly, so every command
+// a person would type to inspect that device failed - and the failure advised
+// `voice init`, which writes a SECOND config into the caller's home that the
+// service never reads. Somebody following the program's own instruction would
+// tune a file with no effect on the running assistant and conclude it worked:
+// a machine teaching its operator a false model of itself.
+func Locate() (string, error) {
+	if p := os.Getenv("VOICE_CONFIG"); p != "" {
+		return p, nil
+	}
+	looked := make([]string, 0, 2)
+	own, ownErr := Path()
+	if ownErr == nil {
+		looked = append(looked, own)
+		if _, err := os.Stat(own); err == nil {
+			return own, nil
+		}
+	}
+	looked = append(looked, systemPath)
+	if _, err := os.Stat(systemPath); err == nil {
+		return systemPath, nil
+	}
+	if ownErr != nil {
+		return "", ownErr
+	}
+	return "", &NotFoundError{Looked: looked}
+}
+
+// Path returns the per-user config location - the file `voice init` writes -
+// honouring VOICE_CONFIG and XDG_CONFIG_HOME before falling back to
+// ~/.config/voice/config.json. Use Locate to decide which file to READ.
 func Path() (string, error) {
 	if p := os.Getenv("VOICE_CONFIG"); p != "" {
 		return p, nil
@@ -363,7 +418,7 @@ func StatePath(name string) (string, error) {
 func Load(path string) (Config, string, error) {
 	var err error
 	if path == "" {
-		if path, err = Path(); err != nil {
+		if path, err = Locate(); err != nil {
 			return Config{}, "", err
 		}
 	}
