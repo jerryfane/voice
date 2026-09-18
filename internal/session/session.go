@@ -195,31 +195,46 @@ func (a *Assistant) accepted(ctx context.Context, command string) (stop bool) {
 	a.Feedback.Accepted(ctx)
 	defer a.Feedback.Restore()
 	if command == "" {
-		if err := a.Speak(ctx, "Please say Hey Voice followed by your request."); err != nil {
-			a.logf("speak: %v", err)
-		}
+		a.speakLogged(ctx, "Please say Hey Voice followed by your request.")
 		return false
 	}
 	if a.timerControl(ctx, command) {
 		return false
 	}
 	if reply, stop, handled := localControl(command); handled {
-		if err := a.Speak(ctx, reply); err != nil {
-			a.logf("speak: %v", err)
-		}
+		a.speakLogged(ctx, reply)
 		return stop
 	}
+	// The planner and the speaker are timed because they were the only
+	// unlogged stages, and they turned out to own almost all of a
+	// minute-long interaction on the device: capture, segment, transcribe and
+	// wake were all instrumented and all fast, so the slowest part of a real
+	// request was the one part nobody could see.
+	started := time.Now()
 	p, err := a.HandleText(ctx, command)
 	if err != nil {
-		a.logf("command %q: %v", command, err)
+		a.logf("stage=plan state=failed ms=%d err=%v", sinceMS(started), err)
 		a.say(ctx, "I couldn't do that.")
 		return false
 	}
-	if err := a.Speak(ctx, p.Speak); err != nil {
-		a.logf("speak: %v", err)
-	}
+	a.logf("stage=plan state=ok ms=%d reply=%d", sinceMS(started), len(p.Speak))
+	a.speakLogged(ctx, p.Speak)
 	return false
 }
+
+// speakLogged times synthesis and playback together, which is what a person
+// waits through, and reports the text length so a slow reply can be told from
+// a long one.
+func (a *Assistant) speakLogged(ctx context.Context, text string) {
+	started := time.Now()
+	if err := a.Speak(ctx, text); err != nil {
+		a.logf("stage=speak state=failed ms=%d chars=%d err=%v", sinceMS(started), len(text), err)
+		return
+	}
+	a.logf("stage=speak state=ok ms=%d chars=%d", sinceMS(started), len(text))
+}
+
+func sinceMS(t time.Time) int64 { return time.Since(t).Milliseconds() }
 
 func localControl(command string) (reply string, stop bool, handled bool) {
 	switch strings.ToLower(strings.TrimSpace(command)) {

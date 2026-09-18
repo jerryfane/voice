@@ -194,3 +194,44 @@ func TestToleranceIsJudgedPerWordNotAcrossThePhrase(t *testing.T) {
 		t.Error("a one-word transcript matched a two-word phrase")
 	}
 }
+
+// The second zero-distance collision the review found, and it is structural
+// rather than a fold of mine: "he" and "hi" reduce to the same two classes as
+// "hey", because e, i and y are one vowel class and the repeated class
+// collapses. No tolerance can separate them, so a word with fewer than four
+// sound classes must match exactly.
+func TestShortWakeWordsAreNotSubstitutable(t *testing.T) {
+	phrases := []string{"hey voice"}
+	for _, heard := range []string{
+		"he voiced his concerns about the plan",
+		"hi voice mail is full",
+		"hay voice",
+		"ay voice",
+		"a voice",
+	} {
+		if matched, _, _ := Match(heard, phrases, 0.2); matched {
+			t.Errorf("%q matched; a two-letter word must not stand in for the wake word", heard)
+		}
+	}
+
+	// The distinctive word keeps its tolerance, which is the whole point:
+	// that is where the recogniser actually failed on the device.
+	if matched, command, _ := Match("hey boys what time is it", phrases, 0.2); !matched || command != "what time is it" {
+		t.Errorf("the device transcript stopped matching: matched=%v command=%q", matched, command)
+	}
+}
+
+// A phrase the tolerance cannot help must say so, rather than leaving a user
+// who set wake.fuzz wondering why it does nothing.
+func TestExactOnlyReportsPhrasesTheToleranceCannotHelp(t *testing.T) {
+	for _, phrase := range []string{"hey", "hi bo", "こんにちは"} {
+		if !ExactOnly(phrase) {
+			t.Errorf("ExactOnly(%q) = false; this phrase has no word long enough to tolerate", phrase)
+		}
+	}
+	for _, phrase := range []string{"hey voice", "voice", "okay computer"} {
+		if ExactOnly(phrase) {
+			t.Errorf("ExactOnly(%q) = true; this phrase has sound the tolerance can work with", phrase)
+		}
+	}
+}

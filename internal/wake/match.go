@@ -55,6 +55,23 @@ func Match(transcript string, phrases []string, fuzz float64) (matched bool, com
 	return false, "", ""
 }
 
+// ExactOnly reports whether a configured phrase has too little recognisable
+// sound for the tolerance to apply, so every word must match exactly. That is
+// true of a non-Latin phrase, whose runes contribute no sound classes, and of
+// a phrase of very short words.
+//
+// It exists so the degradation is not silent: a user setting wake.fuzz on such
+// a phrase would otherwise see the setting quietly do nothing. Callers report
+// it; see the doctor wake line.
+func ExactOnly(phrase string) bool {
+	for _, w := range strings.Fields(normalize(phrase)) {
+		if len([]rune(skeleton(w))) >= 4 {
+			return false
+		}
+	}
+	return true
+}
+
 func normalize(s string) string {
 	return strings.TrimSpace(strings.Join(strings.Fields(strings.Map(func(r rune) rune {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) {
@@ -73,6 +90,26 @@ func wordsSoundAlike(heard, want []string, fuzz float64) bool {
 	for i := range want {
 		w := skeleton(want[i])
 		den := len([]rune(w))
+		// A short word carries too little sound to be tolerant about. Two
+		// review rounds found zero-distance collisions on the leading word
+		// - first "we" and "why" through a fold of mine, then "he" and "hi",
+		// which reduce to the same two classes as "hey" no matter what the
+		// fold does, because e, i and y are one vowel class and the repeated
+		// class collapses. No tolerance can separate those, so a word with
+		// fewer than four sound classes must match exactly.
+		//
+		// This costs nothing real: the confusion that broke the device was in
+		// the DISTINCTIVE word - "voice" heard as "boys" - and that word is
+		// long enough to keep its tolerance. A recogniser mangling "hey"
+		// itself is a different problem, and one that should be solved by
+		// configuring the phrase it actually produces rather than by making
+		// every two-letter pronoun a wake word.
+		if den < 4 {
+			if heard[i] != want[i] {
+				return false
+			}
+			continue
+		}
 		if den == 0 {
 			// Nothing to compare by sound - a non-Latin phrase, for example -
 			// so fall back to the spelling this function cannot judge rather

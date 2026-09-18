@@ -18,6 +18,7 @@ import (
 	"github.com/jerryfane/voice/internal/device"
 	"github.com/jerryfane/voice/internal/proc"
 	"github.com/jerryfane/voice/internal/session"
+	"github.com/jerryfane/voice/internal/wake"
 )
 
 var version = "0.1.0-dev"
@@ -240,6 +241,19 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 	ok, d = a.Brain.Available()
 	check("brain", ok, a.Brain.Name()+": "+d)
 	stdout.printf("%-12s %-4s %s\n", "wake feedback", "INFO", a.Feedback.Describe())
+	// The wake line reports how each phrase will be matched, because the
+	// tolerance silently does nothing for a phrase with too little sound in
+	// it - a non-Latin phrase, or one of very short words. A user who set
+	// wake.fuzz and saw no effect had no way to find that out.
+	for _, phrase := range c.Wake.Phrases {
+		mode := fmt.Sprintf("sound-matched, tolerance %v", c.Wake.Fuzz)
+		if c.Wake.Fuzz <= 0 {
+			mode = "exact only (wake.fuzz is 0)"
+		} else if wake.ExactOnly(phrase) {
+			mode = fmt.Sprintf("exact only: too little recognisable sound for tolerance %v", c.Wake.Fuzz)
+		}
+		stdout.printf("%-12s %-4s %q: %s\n", "wake phrase", "INFO", phrase, mode)
+	}
 	if c.Timers.Enabled {
 		if a.Timers == nil {
 			check("timers", false, "enabled but no scheduler was built")
