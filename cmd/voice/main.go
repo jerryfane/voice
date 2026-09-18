@@ -86,33 +86,47 @@ var agentHome = func() (string, bool) {
 	return u.HomeDir, true
 }
 
-// requestsPath is where the voice agent records requests it could not act on.
+// requestsPaths lists every place the voice agent's journal could be, most
+// specific first, deduplicated.
 //
-// It resolves the AGENT'S home, not the caller's. `voice doctor` is normally
-// run by the operator - root, or the pi user - whose home is not the agent's,
-// and the sudoers grant the installer writes permits only `voice-agent-run`,
-// so doctor cannot re-run itself as the agent. Deriving the path from
-// os.UserHomeDir meant doctor looked in /root/voice-workspace while the agent
-// wrote to /home/voice-agent/voice-workspace: requests recorded, and a
-// reader that reported none. The review caught it; my own smoke test had
-// passed only because it forced HOME.
-func requestsPath() string {
-	if p := os.Getenv("VOICE_REQUESTS"); p != "" {
-		return p
+// It returns a LIST rather than a single answer on purpose. The reader and the
+// writer resolve this path in different processes with different environments:
+// the wrapper runs under `sudo -n -H`, which strips VOICE_AGENT_WORKSPACE out
+// of the service environment, so a workspace relocated in voice.service is
+// honoured by one side and invisible to the other. Picking one candidate means
+// doctor can report "no requests" while a real request sits in the other
+// location - a silent wrong answer, which is the defect this whole feature
+// exists to end. So doctor reads them all and says which file it found.
+func requestsPaths() []string {
+	var paths []string
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		for _, existing := range paths {
+			if existing == p {
+				return
+			}
+		}
+		paths = append(paths, p)
 	}
+
+	add(os.Getenv("VOICE_REQUESTS"))
 	if ws := os.Getenv("VOICE_AGENT_WORKSPACE"); ws != "" {
-		return filepath.Join(ws, "REQUESTS.tsv")
+		add(filepath.Join(ws, "REQUESTS.tsv"))
 	}
 	if home, ok := agentHome(); ok {
-		return filepath.Join(home, "voice-workspace", "REQUESTS.tsv")
+		add(filepath.Join(home, "voice-workspace", "REQUESTS.tsv"))
 	}
-	// No such account: this is not a device install, so fall back to the
-	// caller's own workspace rather than inventing a path.
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join("voice-workspace", "REQUESTS.tsv")
+	// The caller's own workspace, for a developer machine with no such
+	// account, and as a backstop if the agent's home moved.
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, "voice-workspace", "REQUESTS.tsv"))
 	}
-	return filepath.Join(home, "voice-workspace", "REQUESTS.tsv")
+	if len(paths) == 0 {
+		add(filepath.Join("voice-workspace", "REQUESTS.tsv"))
+	}
+	return paths
 }
 
 func main() {
@@ -303,20 +317,43 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 	// itself. Reported here because the alternative is what already
 	// happened: a spoken request refused politely, written nowhere, and
 	// found days later only because someone thought to ask.
-	if reqs, err := requests.Load(requestsPath()); err != nil {
-		check("requests", false, err.Error())
-	} else if len(reqs) > 0 {
-		stdout.printf("%-12s %-4s %d spoken request(s) need someone with code access:\n", "requests", "INFO", len(reqs))
-		for _, r := range reqs {
-			// A line the loader could not parse is marked, not shown as if
-			// it were a clean entry: the writer is an agent following prose
-			// instructions, so a mangled line is likely and reading it as
-			// dated-and-fine would misreport what was actually recorded.
-			when := "unparsed"
-			if !r.When.IsZero() {
-				when = r.When.Local().Format("2 Jan 15:04")
+	found := map[string][]requests.Request{}
+	total := 0
+	for _, path := range requestsPaths() {
+		reqs, err := requests.Load(path)
+		if err != nil {
+			check("requests", false, path+": "+err.Error())
+			continue
+		}
+		if len(reqs) > 0 {
+			found[path] = reqs
+			total += len(reqs)
+		}
+	}
+	if total > 0 {
+		stdout.printf("%-12s %-4s %d spoken request(s) need someone with code access:\n", "requests", "INFO", total)
+		for _, path := range requestsPaths() {
+			reqs, ok := found[path]
+			if !ok {
+				continue
 			}
-			stdout.printf("%-12s      %-13s %s\n", "", when, r.Text)
+			// Name the file whenever more than one location holds
+			// requests, so a relocated workspace is visible rather than
+			// looking like one merged list.
+			if len(found) > 1 {
+				stdout.printf("%-12s      in %s:\n", "", path)
+			}
+			for _, r := range reqs {
+				// A line the loader could not parse is marked, not shown as if
+				// it were a clean entry: the writer is an agent following prose
+				// instructions, so a mangled line is likely and reading it as
+				// dated-and-fine would misreport what was actually recorded.
+				when := "unparsed"
+				if !r.When.IsZero() {
+					when = r.When.Local().Format("2 Jan 15:04")
+				}
+				stdout.printf("%-12s      %-13s %s\n", "", when, r.Text)
+			}
 		}
 	}
 	if c.Timers.Enabled {
