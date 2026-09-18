@@ -200,13 +200,17 @@ it to Voice's device inventory:
     scripts/install-spotify.sh
 
 After authentication, spoken requests can start shuffled liked songs, resume or
-pause playback, skip tracks, go back, or play a named track, album, artist, or
-playlist. The equivalent direct controls are:
+pause playback, skip tracks, go back, play a named track, album, artist, or
+playlist, and control music volume on an integer scale from 0 (silent) to 10
+(maximum). “Turn the music up/down” moves one step. The equivalent direct
+controls are:
 
     voice music spotify play
     voice music spotify play artist "Miles Davis"
     voice music spotify pause
     voice music spotify next
+    voice music spotify volume 7
+    voice music spotify volume-up
 
 Spotify plays to a second speaker and **cannot reach the microphone**.
 

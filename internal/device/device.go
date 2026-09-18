@@ -28,6 +28,7 @@ const (
 	OpWhite      Op = "white"      // args: level (0-100)
 	OpVolumeUp   Op = "volume_up"
 	OpVolumeDown Op = "volume_down"
+	OpVolume     Op = "volume" // args: level (0-10)
 	OpMute       Op = "mute"
 	OpInput      Op = "input" // args: source
 	OpPlay       Op = "play"  // args: optional query and type (track, album, artist, playlist)

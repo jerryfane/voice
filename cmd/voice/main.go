@@ -271,7 +271,7 @@ Usage: voice [--config PATH] COMMAND
 
 Light ops: on, off, toggle, color NAME, white 0-100, brightness 0-100
 TV ops: on, off, volume-up, volume-down, mute
-Music ops: play [track|album|artist|playlist QUERY], resume, pause, next, previous
+Music ops: play [track|album|artist|playlist QUERY], resume, pause, next, previous, volume 0-10, volume-up, volume-down
 `)
 	return nil
 }
@@ -500,6 +500,16 @@ func commandDevice(ctx context.Context, a *session.Assistant, kind string, args 
 	if cmd.Op == device.OpWhite || cmd.Op == device.OpBrightness {
 		if len(args) < 3 {
 			return errors.New("level requires 0-100")
+		}
+		n, e := strconv.Atoi(args[2])
+		if e != nil {
+			return e
+		}
+		cmd.Args = map[string]any{"level": n}
+	}
+	if cmd.Op == device.OpVolume {
+		if len(args) < 3 {
+			return errors.New("music volume requires a level from 0 to 10")
 		}
 		n, e := strconv.Atoi(args[2])
 		if e != nil {

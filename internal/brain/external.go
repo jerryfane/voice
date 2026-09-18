@@ -91,7 +91,7 @@ Use your tools when they help. You may inspect or change files in your workspace
 
 After completing the work, return ONLY one JSON object with this exact shape:
 {"speak":"short natural response spoken aloud","actions":[{"device":"configured id","op":"advertised capability","args":{}}]}
-Use only listed devices and advertised capabilities. Never invent a device ID. For color use args {"name":"red"} or integer r/g/b. For brightness use {"level":0..100}. For a music play action, omit args to start shuffled liked songs, or use {"query":"name","type":"track|album|artist|playlist"}; use resume for the paused item. If no local device action is needed, actions is []. No markdown outside the JSON.`, e.Persona, transcript, inventory)
+Use only listed devices and advertised capabilities. Never invent a device ID. For color use args {"name":"red"} or integer r/g/b. For brightness use {"level":0..100}. For a music play action, omit args to start shuffled liked songs, or use {"query":"name","type":"track|album|artist|playlist"}; use resume for the paused item. Music volume uses integer args {"level":0..10}; volume_up and volume_down change one step. If no local device action is needed, actions is []. No markdown outside the JSON.`, e.Persona, transcript, inventory)
 	}
 	return fmt.Sprintf(`%s
 
@@ -99,7 +99,7 @@ You are the reasoning core inside a voice assistant. The user said: %q
 Available local devices: %s
 Return ONLY one JSON object with this exact shape:
 {"speak":"short response spoken aloud","actions":[{"device":"configured id","op":"advertised capability","args":{}}]}
-Rules: Use only listed devices and advertised capabilities. Never invent an ID. For color use args {"name":"red"} or integer r/g/b. For brightness use {"level":0..100}. For a music play action, omit args to start shuffled liked songs, or use {"query":"name","type":"track|album|artist|playlist"}; use resume for the paused item. If no local action is needed, actions is []. No markdown.`, e.Persona, transcript, inventory)
+Rules: Use only listed devices and advertised capabilities. Never invent an ID. For color use args {"name":"red"} or integer r/g/b. For brightness use {"level":0..100}. For a music play action, omit args to start shuffled liked songs, or use {"query":"name","type":"track|album|artist|playlist"}; use resume for the paused item. Music volume uses integer args {"level":0..10}; volume_up and volume_down change one step. If no local action is needed, actions is []. No markdown.`, e.Persona, transcript, inventory)
 }
 func has(a []string, s string) bool {
 	for _, v := range a {

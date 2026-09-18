@@ -197,7 +197,7 @@ func TestMusicTransportCommandsStayLocal(t *testing.T) {
 	inv := []device.Info{{
 		ID:           "spotify",
 		Kind:         "music",
-		Capabilities: []string{string(device.OpPlay), string(device.OpPause), string(device.OpResume), string(device.OpNext), string(device.OpPrevious)},
+		Capabilities: []string{string(device.OpPlay), string(device.OpPause), string(device.OpResume), string(device.OpNext), string(device.OpPrevious), string(device.OpVolumeUp), string(device.OpVolumeDown)},
 	}}
 
 	for _, tt := range []struct {
@@ -209,6 +209,8 @@ func TestMusicTransportCommandsStayLocal(t *testing.T) {
 		{said: "continue music", op: device.OpResume},
 		{said: "skip the track", op: device.OpNext},
 		{said: "go back one song", op: device.OpPrevious},
+		{said: "raise the music volume", op: device.OpVolumeUp},
+		{said: "turn the music down", op: device.OpVolumeDown},
 	} {
 		p, err := r.Plan(context.Background(), tt.said, inv)
 		if err != nil {

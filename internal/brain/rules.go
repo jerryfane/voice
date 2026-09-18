@@ -175,6 +175,10 @@ func musicCommand(n string) (device.Op, bool) {
 		return device.OpNext, true
 	case "previous song", "previous track", "go back a song", "go back one song":
 		return device.OpPrevious, true
+	case "turn music up", "turn the music up", "music louder", "raise music volume", "raise the music volume":
+		return device.OpVolumeUp, true
+	case "turn music down", "turn the music down", "music quieter", "lower music volume", "lower the music volume":
+		return device.OpVolumeDown, true
 	default:
 		return "", false
 	}
@@ -202,11 +206,13 @@ func musicPlan(inv []device.Info, op device.Op) (Plan, error) {
 		return Plan{}, err
 	}
 	p.Speak = map[device.Op]string{
-		device.OpPlay:     "Playing some music.",
-		device.OpPause:    "Pausing the music.",
-		device.OpResume:   "Resuming the music.",
-		device.OpNext:     "Skipping.",
-		device.OpPrevious: "Going back.",
+		device.OpPlay:       "Playing some music.",
+		device.OpPause:      "Pausing the music.",
+		device.OpResume:     "Resuming the music.",
+		device.OpNext:       "Skipping.",
+		device.OpPrevious:   "Going back.",
+		device.OpVolumeUp:   "Turning the music up.",
+		device.OpVolumeDown: "Turning the music down.",
 	}[op]
 	return p, nil
 }

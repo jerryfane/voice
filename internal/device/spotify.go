@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,10 +31,10 @@ func NewSpotify(id, deviceName string, command []string) *Spotify {
 func (s *Spotify) ID() string   { return s.Name }
 func (s *Spotify) Kind() string { return "music" }
 func (s *Spotify) Describe() string {
-	return fmt.Sprintf("Spotify Connect device %q; play accepts optional args query and type (track, album, artist, or playlist)", s.DeviceName)
+	return fmt.Sprintf("Spotify Connect device %q; play accepts optional query/type args, volume uses integer level 0-10", s.DeviceName)
 }
 func (s *Spotify) Capabilities() []Op {
-	return []Op{OpPlay, OpResume, OpPause, OpNext, OpPrevious}
+	return []Op{OpPlay, OpResume, OpPause, OpNext, OpPrevious, OpVolume, OpVolumeUp, OpVolumeDown}
 }
 
 func (s *Spotify) run(ctx context.Context, args ...string) ([]byte, error) {
@@ -96,49 +97,67 @@ func (s *Spotify) Read(ctx context.Context) (State, error) {
 }
 
 func (s *Spotify) Apply(ctx context.Context, cmd Command) (State, error) {
-	args, err := spotifyCommandArgs(cmd)
+	if !Supports(s, cmd.Op) {
+		return nil, fmt.Errorf("Spotify does not support %q", cmd.Op)
+	}
+	// Spotify's Web API returns 404 when no playback device is active, even
+	// though the integrated librespot endpoint is online. Read first and only
+	// activate the daemon when necessary: reconnecting an already-active but
+	// paused device resumes it, so doing that for a volume change unexpectedly
+	// starts music.
+	before, err := s.Read(ctx)
 	if err != nil {
 		return nil, err
 	}
-	// Spotify's Web API returns 404 when no playback device is active, even
-	// though the integrated librespot endpoint is online. Activate this daemon
-	// before commands that need a playback target; pause is safe when nothing is
-	// active and must not steal playback from another device merely to stop it.
-	if cmd.Op != OpPause {
+	active, _ := before["active"].(bool)
+	isVolume := cmd.Op == OpVolume || cmd.Op == OpVolumeUp || cmd.Op == OpVolumeDown
+	if isVolume && !active {
+		return nil, fmt.Errorf("Spotify has no active playback device; start music before changing its volume")
+	}
+	if cmd.Op != OpPause && !active {
 		if _, err := s.run(ctx, "connect", "--name", s.DeviceName); err != nil {
 			return nil, err
 		}
-	}
-	var previousTrack string
-	if cmd.Op == OpNext || cmd.Op == OpPrevious {
-		before, err := s.Read(ctx)
+		before, err = s.Read(ctx)
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	var previousTrack string
+	currentVolume := -1
+	if cmd.Op == OpNext || cmd.Op == OpPrevious {
 		previousTrack, _ = before["track_id"].(string)
+	}
+	if volume, ok := before["volume"].(int); ok {
+		currentVolume = volume
+	}
+	args, expectedVolume, err := spotifyCommandArgs(cmd, currentVolume)
+	if err != nil {
+		return nil, err
 	}
 	if _, err := s.run(ctx, args...); err != nil {
 		return nil, err
 	}
-	return s.waitForApplied(ctx, cmd.Op, previousTrack)
+	return s.waitForApplied(ctx, cmd.Op, previousTrack, expectedVolume)
 }
 
-func spotifyCommandArgs(cmd Command) ([]string, error) {
+func spotifyCommandArgs(cmd Command, currentVolume int) ([]string, int, error) {
 	switch cmd.Op {
 	case OpPlay:
 		query, err := optionalStringArg(cmd.Args, "query")
 		if err != nil {
-			return nil, err
+			return nil, -1, err
 		}
 		kind, err := optionalStringArg(cmd.Args, "type")
 		if err != nil {
-			return nil, err
+			return nil, -1, err
 		}
 		if query == "" {
 			if kind != "" {
-				return nil, fmt.Errorf("Spotify play type requires a query")
+				return nil, -1, fmt.Errorf("Spotify play type requires a query")
 			}
-			return []string{"playback", "start", "liked", "--random"}, nil
+			return []string{"playback", "start", "liked", "--random"}, -1, nil
 		}
 		kind = strings.ToLower(kind)
 		if kind == "" || kind == "song" {
@@ -146,22 +165,43 @@ func spotifyCommandArgs(cmd Command) ([]string, error) {
 		}
 		switch kind {
 		case "track":
-			return []string{"playback", "start", "track", "--name", query}, nil
+			return []string{"playback", "start", "track", "--name", query}, -1, nil
 		case "album", "artist", "playlist":
-			return []string{"playback", "start", "context", "--name", query, kind}, nil
+			return []string{"playback", "start", "context", "--name", query, kind}, -1, nil
 		default:
-			return nil, fmt.Errorf("Spotify play type must be track, album, artist, or playlist, got %q", kind)
+			return nil, -1, fmt.Errorf("Spotify play type must be track, album, artist, or playlist, got %q", kind)
 		}
 	case OpResume:
-		return []string{"playback", "play"}, nil
+		return []string{"playback", "play"}, -1, nil
 	case OpPause:
-		return []string{"playback", "pause"}, nil
+		return []string{"playback", "pause"}, -1, nil
 	case OpNext:
-		return []string{"playback", "next"}, nil
+		return []string{"playback", "next"}, -1, nil
 	case OpPrevious:
-		return []string{"playback", "previous"}, nil
+		return []string{"playback", "previous"}, -1, nil
+	case OpVolume:
+		level, err := number(cmd.Args, "level", -1)
+		if err != nil {
+			return nil, -1, err
+		}
+		if level < 0 || level > 10 {
+			return nil, -1, fmt.Errorf("Spotify volume level must be 0-10")
+		}
+		percent := level * 10
+		return []string{"playback", "volume", strconv.Itoa(percent)}, percent, nil
+	case OpVolumeUp, OpVolumeDown:
+		if currentVolume < 0 {
+			return nil, -1, fmt.Errorf("Spotify did not report its current volume")
+		}
+		percent := currentVolume
+		if cmd.Op == OpVolumeUp {
+			percent = min(100, percent+10)
+		} else {
+			percent = max(0, percent-10)
+		}
+		return []string{"playback", "volume", strconv.Itoa(percent)}, percent, nil
 	default:
-		return nil, fmt.Errorf("Spotify does not support %q", cmd.Op)
+		return nil, -1, fmt.Errorf("Spotify does not support %q", cmd.Op)
 	}
 }
 
@@ -177,7 +217,7 @@ func optionalStringArg(args map[string]any, key string) (string, error) {
 	return strings.TrimSpace(s), nil
 }
 
-func (s *Spotify) waitForApplied(ctx context.Context, op Op, previousTrack string) (State, error) {
+func (s *Spotify) waitForApplied(ctx context.Context, op Op, previousTrack string, expectedVolume int) (State, error) {
 	deadline := time.NewTimer(s.Timeout)
 	defer deadline.Stop()
 	tick := time.NewTicker(200 * time.Millisecond)
@@ -189,6 +229,7 @@ func (s *Spotify) waitForApplied(ctx context.Context, op Op, previousTrack strin
 			last = state
 			playing, _ := state["playing"].(bool)
 			track, _ := state["track_id"].(string)
+			volume, _ := state["volume"].(int)
 			switch op {
 			case OpPause:
 				if !playing {
@@ -200,6 +241,10 @@ func (s *Spotify) waitForApplied(ctx context.Context, op Op, previousTrack strin
 				}
 			case OpNext, OpPrevious:
 				if previousTrack == "" || (track != "" && track != previousTrack) {
+					return state, nil
+				}
+			case OpVolume, OpVolumeUp, OpVolumeDown:
+				if volume == expectedVolume {
 					return state, nil
 				}
 			}
