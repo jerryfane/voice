@@ -32,16 +32,30 @@ func (r *Rules) Plan(ctx context.Context, text string, inv []device.Info) (Plan,
 	if n == "stop" || n == "cancel" || n == "never mind" {
 		return Plan{Speak: "Okay.", Source: "rules"}, nil
 	}
+	// Which devices does this utterance name? Collected rather than acted on
+	// immediately, because normalising both sides created a collision the
+	// review found: "lamp-2" and "lamp_2" reduce to the same text, and the
+	// first match won silently. Acting on the wrong light is worse than the
+	// miss that normalising fixed, so an ambiguous name asks instead.
+	var named []device.Info
 	for _, d := range inv {
-		// The ID is normalised the same way as the transcript, because the
-		// transcript now is: comparing normalised text against a raw ID broke
-		// every device whose ID contains punctuation - "living-room" became
-		// "living room" in the transcript and matched nothing. Normalising one
-		// side only is how a shared rule turns into a silent regression.
 		id := normalise(d.ID)
 		if id == "" || !strings.Contains(n, id) {
 			continue
 		}
+		named = append(named, d)
+	}
+	if len(named) > 1 {
+		ids := make([]string, 0, len(named))
+		for _, d := range named {
+			ids = append(ids, d.ID)
+		}
+		return Plan{
+			Speak:  fmt.Sprintf("I know more than one device by that name: %s. Which one?", strings.Join(ids, ", ")),
+			Source: "rules",
+		}, nil
+	}
+	for _, d := range named {
 		if strings.Contains(n, "turn on") || strings.HasPrefix(n, "on ") {
 			return actionPlan(d, device.OpOn, nil)
 		}

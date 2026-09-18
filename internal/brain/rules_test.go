@@ -152,3 +152,38 @@ func TestDeviceIDsWithPunctuationStillMatch(t *testing.T) {
 		}
 	}
 }
+
+// Normalising both sides created a collision: "lamp-2" and "lamp_2" reduce to
+// the same text, and the first match won silently. Acting on the wrong light
+// is worse than the miss that normalising fixed, so an ambiguous name must ask
+// rather than choose.
+func TestAnAmbiguousDeviceNameAsksInsteadOfGuessing(t *testing.T) {
+	inv := []device.Info{
+		{ID: "lamp-2", Kind: "light", Capabilities: []string{string(device.OpOn)}},
+		{ID: "lamp_2", Kind: "light", Capabilities: []string{string(device.OpOn)}},
+	}
+	r := NewRules(&refusingPlanner{onCall: func() {}})
+
+	p, err := r.Plan(context.Background(), "turn on lamp 2", inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Actions) != 0 {
+		t.Fatalf("acted on %q despite two devices matching; it cannot know which", p.Actions[0].Device)
+	}
+	for _, want := range []string{"lamp-2", "lamp_2"} {
+		if !strings.Contains(p.Speak, want) {
+			t.Errorf("the question does not name %q, so the user cannot answer it: %q", want, p.Speak)
+		}
+	}
+
+	// One matching device still acts, or the guard has become a wall.
+	single := []device.Info{{ID: "lamp-2", Kind: "light", Capabilities: []string{string(device.OpOn)}}}
+	p, err = r.Plan(context.Background(), "turn on lamp 2", single)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Actions) != 1 || p.Actions[0].Device != "lamp-2" {
+		t.Errorf("a single match must still act, got %+v", p.Actions)
+	}
+}
