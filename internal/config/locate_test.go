@@ -135,3 +135,52 @@ func TestLocateErrorNamesEveryFileItLookedFor(t *testing.T) {
 		}
 	}
 }
+
+// With HOME unresolvable the installed path was still checked, so the error
+// must name it. Returning the raw home-directory error hid the one file that
+// matters on a device - and this whole change exists because a misleading
+// config error taught its operator the wrong thing.
+func TestLocateErrorNamesTheInstalledPathEvenWithNoHome(t *testing.T) {
+	t.Setenv("VOICE_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", "")
+
+	restore := systemPath
+	systemPath = filepath.Join(t.TempDir(), "absent.json")
+	t.Cleanup(func() { systemPath = restore })
+
+	_, err := Locate()
+	var notFound *NotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("Locate() error = %v, want a NotFoundError naming the installed path", err)
+	}
+	if !strings.Contains(err.Error(), systemPath) {
+		t.Errorf("error %q does not name the installed config %q", err, systemPath)
+	}
+}
+
+// On a device the operator wants the INSTALLED file, so the advice has to name
+// that action too. Naming only the per-user path is how somebody ends up
+// creating a config the service never reads - the original defect.
+func TestNotFoundAdviceNamesTheDeviceAction(t *testing.T) {
+	t.Setenv("VOICE_CONFIG", "")
+	own := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", own)
+	t.Setenv("HOME", t.TempDir())
+
+	restore := systemPath
+	systemPath = filepath.Join(t.TempDir(), "absent.json")
+	t.Cleanup(func() { systemPath = restore })
+
+	_, err := Locate()
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "voice init --config "+systemPath) {
+		t.Errorf("advice %q does not offer creating the installed config", msg)
+	}
+	if !strings.Contains(msg, filepath.Join(own, "voice", "config.json")) {
+		t.Errorf("advice %q no longer names the per-user path", msg)
+	}
+}

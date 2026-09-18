@@ -342,11 +342,26 @@ var systemPath = SystemPath
 // of "no config" is which files were considered.
 type NotFoundError struct {
 	Looked []string
+	// UserPath is the per-user file `voice init` writes by default, empty if
+	// it could not be resolved at all - HOME unset, for instance. The system
+	// path was still checked in that case, so the error must still name it
+	// rather than degrading to a bare "cannot locate home directory".
+	UserPath string
+	// System is the installed location, named separately because on a device
+	// it is the file the operator almost certainly wants to create.
+	System string
 }
 
 func (e *NotFoundError) Error() string {
-	return fmt.Sprintf("no config found; looked in %s. Run `voice init` to write %s, or pass --config PATH",
-		strings.Join(e.Looked, " and "), e.Looked[0])
+	msg := "no config found; looked in " + strings.Join(e.Looked, " and ") + "."
+	switch {
+	case e.UserPath != "":
+		msg += fmt.Sprintf(" Run `voice init` to write %s, `voice init --config %s` for a device install, or pass --config PATH",
+			e.UserPath, e.System)
+	default:
+		msg += fmt.Sprintf(" Run `voice init --config %s` to write it, or pass --config PATH", e.System)
+	}
+	return msg
 }
 
 // Locate finds the config to READ, preferring the caller's own over the
@@ -375,10 +390,13 @@ func Locate() (string, error) {
 	if _, err := os.Stat(systemPath); err == nil {
 		return systemPath, nil
 	}
+	// Even when the per-user path could not be resolved, the installed one WAS
+	// checked, so the error names it. Returning the raw home-directory error
+	// instead would hide the file that actually matters on a device.
 	if ownErr != nil {
-		return "", ownErr
+		own = ""
 	}
-	return "", &NotFoundError{Looked: looked}
+	return "", &NotFoundError{Looked: looked, UserPath: own, System: systemPath}
 }
 
 // Path returns the per-user config location - the file `voice init` writes -
