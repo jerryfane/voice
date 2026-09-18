@@ -66,7 +66,17 @@
       "en"
     ],
     "model": "models/ggml-tiny.en.bin",
-    "timeout": "30s"
+    "timeout": "30s",
+    "resident": {
+      "endpoint": "http://127.0.0.1:8178/inference",
+      "timeout": "10s"
+    },
+    "openrouter": {
+      "endpoint": "https://openrouter.ai/api/v1/audio/transcriptions",
+      "model": "openai/whisper-large-v3-turbo",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "timeout": "5s"
+    }
   },
   "tts": {
     "name": "piper",
@@ -87,8 +97,15 @@
       "{prompt}"
     ],
     "timeout": "10m0s",
-    "persona": "You are Voice, a concise personal agent. Complete the user's request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences.",
-    "rules": false
+    "persona": "You are Voice, a concise personal agent. Complete the user request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences.",
+    "rules": true,
+    "jev": {
+      "endpoint": "https://openrouter.ai/api/v1/api/alpha/decisions",
+      "model": "typesafe/jev-1.13",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "confidence": 0.85,
+      "timeout": "2s"
+    }
   },
   "lights": [],
   "tvs": []

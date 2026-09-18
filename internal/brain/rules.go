@@ -3,6 +3,7 @@ package brain
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -31,6 +32,9 @@ func (r *Rules) Plan(ctx context.Context, text string, inv []device.Info) (Plan,
 	}
 	if n == "stop" || n == "cancel" || n == "never mind" {
 		return Plan{Speak: "Okay.", Source: "rules"}, nil
+	}
+	if level, ok := musicVolumeCommand(n); ok {
+		return musicVolumePlan(inv, level)
 	}
 	if op, ok := musicCommand(n); ok {
 		return musicPlan(inv, op)
@@ -161,6 +165,51 @@ func asksClock(n string) bool {
 func asksDate(n string) bool {
 	c := content(n)
 	return len(c) == 1 && (c[0] == "date" || c[0] == "day")
+}
+
+func musicVolumeCommand(n string) (int, bool) {
+	fields := strings.Fields(n)
+	if len(fields) < 3 {
+		return 0, false
+	}
+	level, err := strconv.Atoi(fields[len(fields)-1])
+	if err != nil || level < 0 || level > 10 {
+		return 0, false
+	}
+	prefix := strings.Join(fields[:len(fields)-1], " ")
+	switch prefix {
+	case "music to", "music volume", "music volume to", "set music to",
+		"set music volume", "set music volume to", "set the music to",
+		"set the music volume", "set the music volume to":
+		return level, true
+	default:
+		return 0, false
+	}
+}
+
+func musicVolumePlan(inv []device.Info, level int) (Plan, error) {
+	var music []device.Info
+	for _, d := range inv {
+		if d.Kind == "music" {
+			music = append(music, d)
+		}
+	}
+	if len(music) == 0 {
+		return Plan{Speak: "No music player is configured.", Source: "rules"}, nil
+	}
+	if len(music) > 1 {
+		ids := make([]string, 0, len(music))
+		for _, d := range music {
+			ids = append(ids, d.ID)
+		}
+		return Plan{Speak: fmt.Sprintf("Which music player: %s?", strings.Join(ids, ", ")), Source: "rules"}, nil
+	}
+	p, err := actionPlan(music[0], device.OpVolume, map[string]any{"level": level})
+	if err != nil {
+		return Plan{}, err
+	}
+	p.Speak = fmt.Sprintf("Setting the music volume to %d.", level)
+	return p, nil
 }
 
 func musicCommand(n string) (device.Op, bool) {

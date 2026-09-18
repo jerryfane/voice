@@ -482,3 +482,49 @@ func TestStageDurationsKeepSubMillisecondResolution(t *testing.T) {
 		t.Errorf("duration truncated to an integer zero, indistinguishable from unmeasured:\n%s", line)
 	}
 }
+
+// A remote primary is safe only when a local transcript has already matched
+// the wake phrase and found a command. This test asserts the privacy boundary,
+// not just the final command: ambient speech and a bare wake phrase must
+// produce zero remote calls.
+func TestLocalWakeGatePreventsRemoteTranscriptionOfAmbientSpeech(t *testing.T) {
+	planner := &countingPlanner{}
+	gate := &countingTranscriber{texts: []string{"people talking nearby", "hey voice", "hey voice pause the music"}}
+	remote := &countingTranscriber{texts: []string{"Hey Voice, pause the music."}}
+	a := &Assistant{
+		Recorder:    testRecorder{},
+		Player:      testPlayer{},
+		VAD:         testSegmenter{count: 3},
+		WakeSTT:     gate,
+		STT:         remote,
+		TTS:         testSynthesizer{},
+		Brain:       planner,
+		Devices:     device.NewRegistry(),
+		WakePhrases: []string{"hey voice"},
+	}
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if gate.calls != 3 {
+		t.Fatalf("local gate calls = %d, want one per utterance", gate.calls)
+	}
+	if remote.calls != 1 {
+		t.Fatalf("remote transcription calls = %d, want only the accepted wake utterance", remote.calls)
+	}
+	if planner.calls != 1 {
+		t.Fatalf("planner calls = %d, want one accepted command", planner.calls)
+	}
+}
+
+type countingTranscriber struct {
+	texts []string
+	calls int
+}
+
+func (t *countingTranscriber) Transcribe(context.Context, []int16, audio.Format) (string, error) {
+	text := t.texts[t.calls]
+	t.calls++
+	return text, nil
+}
+func (*countingTranscriber) Name() string              { return "counting transcriber" }
+func (*countingTranscriber) Available() (bool, string) { return true, "available" }

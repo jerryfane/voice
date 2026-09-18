@@ -370,6 +370,10 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant, loaded s
 	check("speaker", ok, a.Player.Describe())
 	ok, d := a.STT.Available()
 	check("speech-to-text", ok, a.STT.Name()+": "+d)
+	if a.WakeSTT != nil {
+		ok, d = a.WakeSTT.Available()
+		check("wake gate", ok, a.WakeSTT.Name()+": "+d)
+	}
 	ok, d = a.TTS.Available()
 	check("text-to-speech", ok, a.TTS.Name()+": "+d)
 	ok, d = a.Brain.Available()

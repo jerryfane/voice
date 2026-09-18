@@ -49,12 +49,34 @@ func Build(c config.Config) *Assistant {
 	}
 	rec := audio.NewCommandRecorder(c.Input.Command, c.Input.Device, f, frame, tel, faults.Log(logger, "capture"))
 	player := audio.NewCommandPlayer(c.Output.Command, c.Output.Device)
-	stt := speech.NewCommandTranscriber(c.STT.Name, c.STT.Command, c.STT.Model, c.STT.Timeout.D(), faults.Log(logger, "speech-to-text"))
+	commandSTT := speech.NewCommandTranscriber(c.STT.Name, c.STT.Command, c.STT.Model, c.STT.Timeout.D(), faults.Log(logger, "speech-to-text"))
+	var localSTT speech.Transcriber = commandSTT
+	if resident := c.STT.Resident; resident != nil {
+		localSTT = speech.NewCascade(logger,
+			speech.NewWhisperServerTranscriber(resident.Endpoint, resident.Timeout.D()),
+			commandSTT,
+		)
+	}
+	stt := localSTT
+	var wakeSTT speech.Transcriber
+	if remote := c.STT.OpenRouter; remote != nil {
+		key := os.Getenv(remote.APIKeyEnv)
+		if key != "" {
+			wakeSTT = localSTT
+			stt = speech.NewCascade(logger,
+				speech.NewOpenRouterTranscriber(remote.Endpoint, remote.Model, key, remote.Timeout.D(), logger),
+				localSTT,
+			)
+		}
+	}
 	tts := speech.NewCommandSynthesizer(c.TTS.Name, c.TTS.Command, c.TTS.Model, c.TTS.Timeout.D(), faults.Log(logger, "text-to-speech"))
 	ext := brain.NewExternal("brain", c.Brain.Command, c.Brain.Persona, c.Brain.Timeout.D(), c.Brain.Mode)
 	var planner brain.Planner = ext
+	if jev := c.Brain.Jev; jev != nil {
+		planner = brain.NewJev(jev.Endpoint, jev.Model, os.Getenv(jev.APIKeyEnv), jev.Confidence, jev.Timeout.D(), planner, logger)
+	}
 	if c.Brain.Rules {
-		planner = brain.NewRules(ext)
+		planner = brain.NewRules(planner)
 	}
 	frames := func(d config.Duration) int {
 		n := int(d.D().Seconds() * float64(f.SampleRate) / float64(frame))
@@ -106,5 +128,5 @@ func Build(c config.Config) *Assistant {
 		logger.Printf("thinking sound: %v", err)
 	}
 	fb := &feedback.Notifier{Indicator: light, Player: player, Sound: sound, Working: working, Format: f, Logger: logger}
-	return &Assistant{Recorder: rec, Player: player, VAD: seg, STT: stt, TTS: tts, Brain: planner, Devices: device.Build(c), Feedback: fb, Timers: timers, Missed: missed, WakePhrases: c.Wake.Phrases, WakeFuzz: c.Wake.Fuzz, Logger: logger}
+	return &Assistant{Recorder: rec, Player: player, VAD: seg, WakeSTT: wakeSTT, STT: stt, TTS: tts, Brain: planner, Devices: device.Build(c), Feedback: fb, Timers: timers, Missed: missed, WakePhrases: c.Wake.Phrases, WakeFuzz: c.Wake.Fuzz, Logger: logger}
 }

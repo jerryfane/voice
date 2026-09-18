@@ -12,6 +12,8 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,8 +44,8 @@ type Config struct {
 	Feedback Feedback `json:"feedback"`
 	// Timers configures local spoken timers, which also never involve it.
 	Timers Timers `json:"timers"`
-	// STT is speech-to-text.
-	STT Engine `json:"stt"`
+	// STT configures local and optional remote speech-to-text engines.
+	STT STT `json:"stt"`
 	// TTS is text-to-speech.
 	TTS Engine `json:"tts"`
 	// Brain is the reasoning layer.
@@ -189,6 +191,29 @@ type Engine struct {
 	Timeout Duration `json:"timeout"`
 }
 
+// STT keeps the existing command engine as the final fallback and optionally
+// puts a resident local server and OpenRouter in front of it.
+type STT struct {
+	Engine
+	Resident   *ResidentSTT   `json:"resident,omitempty"`
+	OpenRouter *OpenRouterSTT `json:"openrouter,omitempty"`
+}
+
+// ResidentSTT describes a loopback-only whisper.cpp server.
+type ResidentSTT struct {
+	Endpoint string   `json:"endpoint"`
+	Timeout  Duration `json:"timeout"`
+}
+
+// OpenRouterSTT describes the cloud transcription endpoint. APIKeyEnv names
+// the environment variable; the secret itself never belongs in config.
+type OpenRouterSTT struct {
+	Endpoint  string   `json:"endpoint"`
+	Model     string   `json:"model"`
+	APIKeyEnv string   `json:"api_key_env"`
+	Timeout   Duration `json:"timeout"`
+}
+
 // Brain configures reasoning.
 type Brain struct {
 	// Mode is "plan" (model returns JSON) or "agent" (a persistent session with
@@ -208,6 +233,18 @@ type Brain struct {
 	// the owner's hardware - while holding the answer in its own clock. Set
 	// it false to send every utterance to the planner.
 	Rules bool `json:"rules"`
+	// Jev optionally routes bounded device actions before the agent.
+	Jev *Jev `json:"jev,omitempty"`
+}
+
+// Jev configures one OpenRouter Decisions request. APIKeyEnv names the
+// protected environment variable rather than storing its value.
+type Jev struct {
+	Endpoint   string   `json:"endpoint"`
+	Model      string   `json:"model"`
+	APIKeyEnv  string   `json:"api_key_env"`
+	Confidence float64  `json:"confidence"`
+	Timeout    Duration `json:"timeout"`
 }
 
 // Light is a Zengge/Magic Home controller.
@@ -309,14 +346,26 @@ func Default() Config {
 			Volume:   0.35,
 		},
 		Timers: Timers{Enabled: true},
-		STT: Engine{
-			Name:    "whisper.cpp",
-			Model:   "models/ggml-base.en.bin",
-			Timeout: Duration(30 * time.Second),
-			Command: Command{
-				"whisper-cli", "-m", "{model}", "-f", "{file}",
-				"--no-timestamps", "--no-prints", "-t", "3", "-l", "en",
-				"--prompt", "Hey Voice.",
+		STT: STT{
+			Engine: Engine{
+				Name:    "whisper.cpp",
+				Model:   "models/ggml-base.en.bin",
+				Timeout: Duration(30 * time.Second),
+				Command: Command{
+					"whisper-cli", "-m", "{model}", "-f", "{file}",
+					"--no-timestamps", "--no-prints", "-t", "3", "-l", "en",
+					"--prompt", "Hey Voice.",
+				},
+			},
+			Resident: &ResidentSTT{
+				Endpoint: "http://127.0.0.1:8178/inference",
+				Timeout:  Duration(10 * time.Second),
+			},
+			OpenRouter: &OpenRouterSTT{
+				Endpoint:  "https://openrouter.ai/api/v1/audio/transcriptions",
+				Model:     "openai/whisper-large-v3-turbo",
+				APIKeyEnv: "OPENROUTER_API_KEY",
+				Timeout:   Duration(5 * time.Second),
 			},
 		},
 		TTS: Engine{
@@ -333,6 +382,13 @@ func Default() Config {
 			Command: Command{"voice-agent-run", "{prompt}"},
 			Persona: "You are Voice, a concise personal agent. Complete the user's request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences.",
 			Rules:   true,
+			Jev: &Jev{
+				Endpoint:   "https://openrouter.ai/api/v1/api/alpha/decisions",
+				Model:      "typesafe/jev-1.13",
+				APIKeyEnv:  "OPENROUTER_API_KEY",
+				Confidence: 0.85,
+				Timeout:    Duration(2 * time.Second),
+			},
 		},
 		Lights: []Light{},
 		TVs:    []TV{},
@@ -530,6 +586,40 @@ func (c Config) Validate() error {
 	if c.Wake.VAD.MaxUtterance.D() <= c.Wake.VAD.MinSpeech.D() {
 		return fmt.Errorf("wake.vad.max_utterance must exceed min_speech")
 	}
+	if c.STT.Resident != nil {
+		if strings.TrimSpace(c.STT.Resident.Endpoint) == "" {
+			return fmt.Errorf("stt.resident.endpoint is empty")
+		}
+		u, err := url.Parse(c.STT.Resident.Endpoint)
+		if err != nil || u.Scheme != "http" || u.Hostname() == "" {
+			return fmt.Errorf("stt.resident.endpoint must be an HTTP loopback URL")
+		}
+		ip := net.ParseIP(u.Hostname())
+		if u.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
+			return fmt.Errorf("stt.resident.endpoint must use localhost or a loopback address")
+		}
+		if c.STT.Resident.Timeout.D() <= 0 {
+			return fmt.Errorf("stt.resident.timeout must be positive")
+		}
+	}
+	if c.STT.OpenRouter != nil {
+		if strings.TrimSpace(c.STT.OpenRouter.Endpoint) == "" {
+			return fmt.Errorf("stt.openrouter.endpoint is empty")
+		}
+		u, err := url.Parse(c.STT.OpenRouter.Endpoint)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return fmt.Errorf("stt.openrouter.endpoint must be an HTTPS URL")
+		}
+		if strings.TrimSpace(c.STT.OpenRouter.Model) == "" {
+			return fmt.Errorf("stt.openrouter.model is empty")
+		}
+		if strings.TrimSpace(c.STT.OpenRouter.APIKeyEnv) == "" {
+			return fmt.Errorf("stt.openrouter.api_key_env is empty")
+		}
+		if c.STT.OpenRouter.Timeout.D() <= 0 {
+			return fmt.Errorf("stt.openrouter.timeout must be positive")
+		}
+	}
 	switch c.Feedback.Light {
 	case feedback.LightAuto, feedback.LightNone, feedback.LightMic, feedback.LightRing, feedback.LightMute, feedback.LightHold:
 	default:
@@ -560,6 +650,27 @@ func (c Config) Validate() error {
 	}
 	if len(c.Brain.Command) == 0 {
 		return fmt.Errorf("brain.command is empty: nothing can reason")
+	}
+	if c.Brain.Jev != nil {
+		if strings.TrimSpace(c.Brain.Jev.Endpoint) == "" {
+			return fmt.Errorf("brain.jev.endpoint is empty")
+		}
+		u, err := url.Parse(c.Brain.Jev.Endpoint)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return fmt.Errorf("brain.jev.endpoint must be an HTTPS URL")
+		}
+		if strings.TrimSpace(c.Brain.Jev.Model) == "" {
+			return fmt.Errorf("brain.jev.model is empty")
+		}
+		if strings.TrimSpace(c.Brain.Jev.APIKeyEnv) == "" {
+			return fmt.Errorf("brain.jev.api_key_env is empty")
+		}
+		if c.Brain.Jev.Confidence <= 0 || c.Brain.Jev.Confidence > 1 {
+			return fmt.Errorf("brain.jev.confidence must be above 0 and at most 1")
+		}
+		if c.Brain.Jev.Timeout.D() <= 0 {
+			return fmt.Errorf("brain.jev.timeout must be positive")
+		}
 	}
 	seen := map[string]string{}
 	for _, l := range c.Lights {

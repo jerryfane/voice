@@ -1,0 +1,22 @@
+[Unit]
+Description=Voice resident whisper.cpp transcription server
+After=network.target
+
+[Service]
+Type=simple
+User=voice-agent
+Group=voice-agent
+ExecStart=/usr/local/bin/whisper-server -m /var/lib/voice/models/ggml-base.en.bin --host 127.0.0.1 --port 8178 -t 3 -nt -l en --prompt "Hey Voice. Hey Boys." -fa
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

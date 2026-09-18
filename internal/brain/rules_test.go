@@ -233,3 +233,39 @@ func TestMusicTransportCommandsStayLocal(t *testing.T) {
 		t.Fatal("a named music request did not reach the planner")
 	}
 }
+
+func TestMusicVolumeWithBoundedNumberStaysLocal(t *testing.T) {
+	reached := false
+	r := NewRules(&refusingPlanner{onCall: func() { reached = true }})
+	inv := []device.Info{{
+		ID:           "spotify",
+		Kind:         "music",
+		Capabilities: []string{string(device.OpVolume)},
+	}}
+	for _, said := range []string{"music to 10", "set the music volume to 0", "music volume 7"} {
+		p, err := r.Plan(context.Background(), said, inv)
+		if err != nil {
+			t.Fatalf("%q: %v", said, err)
+		}
+		if reached {
+			t.Fatalf("%q reached the planner", said)
+		}
+		if len(p.Actions) != 1 || p.Actions[0].Op != device.OpVolume {
+			t.Fatalf("%q actions = %+v", said, p.Actions)
+		}
+		level, ok := p.Actions[0].Args["level"].(int)
+		if !ok || level < 0 || level > 10 {
+			t.Fatalf("%q level = %#v", said, p.Actions[0].Args["level"])
+		}
+	}
+
+	// An out-of-range level must never become a local physical action.
+	reached = false
+	p, err := r.Plan(context.Background(), "music to 11", inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reached || len(p.Actions) != 0 {
+		t.Fatalf("out-of-range command did not fall through safely: reached=%v plan=%+v", reached, p)
+	}
+}

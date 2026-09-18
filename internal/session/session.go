@@ -24,10 +24,14 @@ type Assistant struct {
 	Recorder audio.Recorder
 	Player   audio.Player
 	VAD      vad.Segmenter
-	STT      speech.Transcriber
-	TTS      speech.Synthesizer
-	Brain    brain.Planner
-	Devices  *device.Registry
+	// WakeSTT is an optional local-only privacy gate. When set, it must find a
+	// configured wake phrase before STT may send the same audio to a remote
+	// primary. Nil preserves the single-transcriber local pipeline.
+	WakeSTT speech.Transcriber
+	STT     speech.Transcriber
+	TTS     speech.Synthesizer
+	Brain   brain.Planner
+	Devices *device.Registry
 	// Feedback acknowledges an accepted wake phrase locally. A nil Notifier
 	// disables light and sound without changing command handling.
 	Feedback *feedback.Notifier
@@ -53,9 +57,13 @@ func (a *Assistant) logf(f string, v ...any) {
 // HandleText is the non-voice entry point used by the CLI, agents and tests.
 // It runs the exact same planner and device execution path as a spoken command.
 func (a *Assistant) HandleText(ctx context.Context, text string) (brain.Plan, error) {
+	started := time.Now()
 	p, err := a.Brain.Plan(ctx, strings.TrimSpace(text), a.Devices.Infos())
 	if err != nil {
 		return p, err
+	}
+	if p.Source == "rules" {
+		a.logf("stage=route state=local source=rules ms=%.3f", sinceMS(started))
 	}
 	for _, act := range p.Actions {
 		dev, err := a.Devices.Get(act.Device)
@@ -137,6 +145,49 @@ func (a *Assistant) Run(ctx context.Context) error {
 			ms := len(u.PCM) * 1000 / max(u.Format.SampleRate, 1)
 			a.logf("stage=segment state=ok samples=%d ms=%d peak=%.4f truncated=%v",
 				len(u.PCM), ms, u.Peak, u.Truncated)
+			if a.WakeSTT != nil {
+				started := time.Now()
+				gateText, err := a.WakeSTT.Transcribe(ctx, u.PCM, u.Format)
+				if err != nil {
+					a.logf("stage=wake state=failed source=local-stt ms=%.3f err=%v", sinceMS(started), err)
+					continue
+				}
+				gateText = strings.TrimSpace(gateText)
+				matched, command, _ := wake.Match(gateText, a.WakePhrases, a.WakeFuzz)
+				if !matched {
+					a.logf("stage=wake state=nomatch source=local-stt ms=%.3f", sinceMS(started))
+					continue
+				}
+				a.logf("stage=wake state=matched source=local-stt ms=%.3f", sinceMS(started))
+				if command == "" {
+					a.logf("stage=wake state=accepted command=%q", command)
+					if stop := a.accepted(ctx, command); stop {
+						return nil
+					}
+					continue
+				}
+
+				text, err := a.STT.Transcribe(ctx, u.PCM, u.Format)
+				if err != nil {
+					a.logf("stage=transcribe state=failed err=%v", err)
+					continue
+				}
+				text = strings.TrimSpace(text)
+				if text == "" {
+					a.logf("stage=transcribe state=empty peak=%.4f", u.Peak)
+					continue
+				}
+				a.logf("stage=transcribe state=ok heard=%q peak=%.4f", text, u.Peak)
+				if cloudMatched, cloudCommand, _ := wake.Match(text, a.WakePhrases, a.WakeFuzz); cloudMatched {
+					command = cloudCommand
+				}
+				a.logf("stage=wake state=accepted command=%q", command)
+				if stop := a.accepted(ctx, command); stop {
+					return nil
+				}
+				continue
+			}
+
 			text, err := a.STT.Transcribe(ctx, u.PCM, u.Format)
 			if err != nil {
 				a.logf("stage=transcribe state=failed err=%v", err)

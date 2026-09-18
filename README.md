@@ -2,13 +2,11 @@
 
 A persistent, tool-capable voice agent for Linux. Say “Hey Voice,” speak a request, and continue one long-lived OMP conversation with its own workspace and memory.
 
-```
-microphone → VAD → local Whisper → “Hey Voice” → persistent OMP agent
-                                                      ├─ shell and files
-                                                      ├─ browser and web search
-                                                      ├─ Magic Home lights
-                                                      ├─ HDMI-CEC television
-                                                      └─ local Piper speech
+```text
+microphone → VAD → local wake gate → OpenRouter STT → rules → Jev → OMP agent
+                              │              │          │
+                              └ reject local └ local STT└ bounded actions
+                                               fallback
 ```
 
 ## Agent model
@@ -23,7 +21,7 @@ Nontrivial requests run in one persistent OMP session. The session:
 - runs as the restricted `voice-agent` OS account, not as your login account;
 - cannot read the `pi` account’s private files or authenticated browser profile.
 
-Raw audio never goes to the model. Recording, VAD, Whisper transcription, wake matching, Piper synthesis, and device execution remain local. After a wake match, the recognized text and configured device inventory are sent to the OMP model.
+Audio is always wake-gated locally. By default all transcription remains local. When `stt.openrouter` is configured and `OPENROUTER_API_KEY` is available, only an utterance that the local gate accepted is sent to OpenRouter for transcription; ambient and non-wake audio never leaves the device. Provider failure falls back to the loopback resident Whisper server and then `whisper-cli`.
 
 ## Install
 
@@ -35,6 +33,15 @@ Install speech dependencies and the restricted system service from source:
 ```
 
 The installer creates `voice-agent`, installs the system services, copies OMP into the restricted runtime, configures its credential-broker connection, and starts Voice.
+
+The installer creates `/etc/voice/voice.env` as `root:voice-agent` mode `0640`.
+To enable OpenRouter transcription and Jev routing, place the key there:
+
+```sh
+sudoedit /etc/voice/voice.env
+# OPENROUTER_API_KEY=...
+sudo systemctl restart voice.service
+```
 
 Release binary only:
 
@@ -93,19 +100,20 @@ The default wake phrase is exactly:
 Hey Voice
 ```
 
-Voice only calls the agent when a transcript starts with the wake phrase and
-includes the request in the same utterance. Ambient speech, noise segments, and
-standalone wake phrases never reach the LLM. A standalone wake phrase is still
-*accepted*: it lights the indicator if one is configured, plays the
-acknowledgement sound, and asks for the request, all locally. Only the model
-call is withheld.
+Voice performs the first transcription locally and checks that the transcript
+starts with a configured wake phrase. Ambient speech, noise segments, and
+standalone mentions never reach cloud STT or the agent. With OpenRouter
+configured, the accepted utterance is then transcribed by the hosted primary;
+resident Whisper and `whisper-cli` remain ordered local fallbacks. A standalone
+wake phrase is still accepted locally and asks for the request without calling
+the agent.
 
 Say `Hey Voice, turn off` to stop the listener without an LLM call; run
 `voice on` to start it again.
 
 ALSA capture and playback are configurable argv templates. The current Pi deployment uses an Anker PowerConf. `packaging/99-voice-powerconf.rules` grants only `voice-agent` permission to send the USB telephony off-hook report required by that microphone.
 
-Speech engines and models are external. `scripts/setup-speech.sh` installs whisper.cpp, Piper, and their default English models under `~/.local/share/voice`; the restricted installer copies them to `/var/lib/voice`.
+Speech engines and models are external. `scripts/setup-speech.sh` installs `whisper-cli`, the loopback `whisper-server`, Piper, and their default English models under `~/.local/share/voice`; the restricted installer copies them to `/var/lib/voice`. `voice-whisper.service` keeps the local model loaded once and binds only to `127.0.0.1:8178`.
 
 ## Activation feedback
 

@@ -30,9 +30,13 @@ sudo chmod 0440 /etc/sudoers.d/voice-agent
 sudo visudo -cf /etc/sudoers.d/voice-agent >/dev/null
 sudo install -m 0755 packaging/voice-agent-run /usr/local/bin/voice-agent-run
 sudo install -m 0644 packaging/voice.service /etc/systemd/system/voice.service
+sudo install -m 0644 packaging/voice-whisper.service /etc/systemd/system/voice-whisper.service
 sudo install -m 0644 packaging/voice-auth-broker@.service /etc/systemd/system/voice-auth-broker@.service
 sudo install -m 0644 packaging/99-voice-powerconf.rules /etc/udev/rules.d/99-voice-powerconf.rules
 sudo install -m 0644 packaging/AGENTS.md "$workspace/AGENTS.md"
+if [ ! -e /etc/voice/voice.env ]; then
+  sudo install -o root -g "$agent_user" -m 0640 /dev/null /etc/voice/voice.env
+fi
 if [ ! -e "$workspace/MEMORY.md" ]; then
   sudo -u "$agent_user" touch "$workspace/MEMORY.md"
 fi
@@ -43,6 +47,9 @@ if [ -d "$owner_home/.local/share/voice" ]; then
 fi
 if [ -x "$owner_home/.local/bin/whisper-cli" ]; then
   sudo install -m 0755 "$owner_home/.local/bin/whisper-cli" /usr/local/bin/whisper-cli
+fi
+if [ -x "$owner_home/.local/bin/whisper-server" ]; then
+  sudo install -m 0755 "$owner_home/.local/bin/whisper-server" /usr/local/bin/whisper-server
 fi
 if [ -x /var/lib/voice/piper/piper ]; then
   sudo ln -sfn /var/lib/voice/piper/piper /usr/local/bin/piper
@@ -76,12 +83,14 @@ fi
 # replaced aborted instead. Introduced by me and caught in review.
 config_filter="$wake_filter |
   .stt.model = \"/var/lib/voice/models/ggml-base.en.bin\" |
+  .stt.resident //= {\"endpoint\":\"http://127.0.0.1:8178/inference\",\"timeout\":\"10s\"} |
+  .stt.openrouter //= {\"endpoint\":\"https://openrouter.ai/api/v1/audio/transcriptions\",\"model\":\"openai/whisper-large-v3-turbo\",\"api_key_env\":\"OPENROUTER_API_KEY\",\"timeout\":\"5s\"} |
   .tts.model = \"/var/lib/voice/models/en_US-amy-medium.onnx\" |
   .brain.mode = \"agent\" |
   .brain.command = [\"voice-agent-run\", \"{prompt}\"] |
   .brain.timeout = \"10m0s\" |
   .brain.persona = \"You are Voice, a concise personal agent. Complete the user request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences.\" |
-  .brain.rules = false"
+  .brain.jev //= {\"endpoint\":\"https://openrouter.ai/api/v1/api/alpha/decisions\",\"model\":\"typesafe/jev-1.13\",\"api_key_env\":\"OPENROUTER_API_KEY\",\"confidence\":0.85,\"timeout\":\"2s\"}"
 sudo jq "$config_filter" /etc/voice/config.json > /tmp/voice-config.json
 
 # Belt and braces, because the thing being overwritten is the only copy of
@@ -119,6 +128,8 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger
 sudo systemctl enable "voice-auth-broker@$owner.service"
 sudo systemctl restart "voice-auth-broker@$owner.service"
+sudo systemctl enable voice-whisper.service
+sudo systemctl restart voice-whisper.service
 sudo systemctl enable voice.service
 # restart, not enable --now: --now starts a STOPPED unit and leaves a running
 # one alone, so every install since the per-stage logging landed wrote a new

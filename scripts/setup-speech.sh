@@ -2,7 +2,7 @@
 set -eu
 
 # Installs the default local speech engines used by Voice:
-#   - whisper.cpp for speech-to-text (built natively for this CPU)
+#   - whisper.cpp CLI and resident HTTP server (built natively for this CPU)
 #   - Piper for text-to-speech (official prebuilt archive)
 # Models live outside the repository under $XDG_DATA_HOME/voice/models.
 # Nothing here is linked into the Voice binary; config may select other engines.
@@ -22,7 +22,7 @@ case "$arch" in
   *) echo "unsupported Piper architecture: $arch" >&2; exit 1 ;;
 esac
 
-if ! command -v whisper-cli >/dev/null 2>&1; then
+if [ ! -x "$BIN/whisper-cli" ] || [ ! -x "$BIN/whisper-server" ]; then
   src="$CACHE/whisper.cpp-$WHISPER_VERSION"
   rm -rf "$src"
   git clone --depth 1 --branch "$WHISPER_VERSION" https://github.com/ggml-org/whisper.cpp.git "$src"
@@ -45,6 +45,7 @@ if ! command -v whisper-cli >/dev/null 2>&1; then
     -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
   cmake --build "$src/build" --config Release -j "$(nproc)"
   install -m 0755 "$src/build/bin/whisper-cli" "$BIN/whisper-cli"
+  install -m 0755 "$src/build/bin/whisper-server" "$BIN/whisper-server"
 fi
 
 if [ ! -x "$DATA/piper/piper" ]; then
@@ -111,6 +112,7 @@ check_engine() {
 echo "Speech engines installed:"
 failed=0
 check_engine whisper-cli "$BIN/whisper-cli" || failed=1
+check_engine whisper-server "$BIN/whisper-server" || failed=1
 check_engine piper "$BIN/piper" || failed=1
 if [ "$failed" -ne 0 ]; then
   echo "Speech setup did not produce working engines; Voice would log a failure per utterance and transcribe nothing." >&2
