@@ -12,7 +12,6 @@ set -eu
 alsa_conf=/etc/voice/spotify-alsa.conf
 account=spotify-player
 state=/var/lib/spotify-player
-pebble_card=V3
 
 cd "$(dirname "$0")/.."
 
@@ -45,45 +44,61 @@ sudo udevadm trigger --subsystem-match=sound
 #
 # So: prove the file is load-bearing before trusting it. Point its default at a
 # card that does not exist and require playback to FAIL.
+# The client cannot name an output device, so "default" is defined for it by
+# the ALSA namespace above. That only helps if the namespace is actually being
+# read - and ALSA_CONFIG_PATH being ignored would look exactly like it working,
+# since audio would still play, just out of the wrong device.
+#
+# So prove the namespace is load-bearing with a PAIRED CONTROL: the same
+# binary, the same invocation, twice.
+#
+#   bogus namespace -> playback MUST fail
+#   real  namespace -> the identical command MUST succeed
+#
+# The pairing is what distinguishes "the namespace decides the device" from
+# "aplay is broken, absent, or the file is unreadable": a broken aplay fails
+# BOTH arms, and an ignored config passes both. An earlier version accepted any
+# nonzero status from the negative arm alone, which passed on a host where
+# aplay did not exist - "playback failed" meaning "command not found". A check
+# that could not fail, inside the check meant to prevent one.
+if ! command -v aplay > /dev/null; then
+  echo "aplay is required (package alsa-utils) to prove the ALSA namespace is load-bearing" >&2
+  exit 1
+fi
+
 proof=$(mktemp -d)
 trap 'rm -rf "$proof"' EXIT
-cat > "$proof/broken.conf" <<CONF
+cat > "$proof/bogus.conf" <<CONF
 </usr/share/alsa/alsa.conf>
 pcm.!default {
     type hw
     card "NoSuchCardExists"
 }
 CONF
-if ! command -v aplay > /dev/null; then
-  echo "aplay is required (package alsa-utils) to prove the ALSA namespace is load-bearing" >&2
-  exit 1
-fi
-if broken_out=$(ALSA_CONFIG_PATH="$proof/broken.conf" aplay -d 1 /dev/zero 2>&1); then
-  echo "ALSA_CONFIG_PATH is being IGNORED: playback succeeded against a config naming a nonexistent card." >&2
-  echo "The Pebble pin would be decorative and the client could open any device, so refusing to continue." >&2
-  exit 1
-fi
-# The failure has to be ATTRIBUTABLE to the broken card name. A missing
-# binary, a busy device or a permissions error also make the command fail,
-# and accepting any nonzero status here would be a check that passes for
-# reasons unrelated to what it claims to prove - which is the defect this
-# whole check exists to avoid.
-case "$broken_out" in
-  *NoSuchCardExists* | *"no such"* | *"No such"* | *"cannot find card"* | *"Unknown PCM"* | *"unknown card"*) ;;
-  *)
-    echo "playback failed, but not because of the nonexistent card:" >&2
-    echo "$broken_out" >&2
-    echo "so this does not establish that ALSA_CONFIG_PATH is honoured; refusing to continue." >&2
-    exit 1
-    ;;
-esac
 
-# And the real one must work, or the pin is pointing at nothing.
-if ! ALSA_CONFIG_PATH="$alsa_conf" aplay -l 2>/dev/null | grep -q "$pebble_card"; then
-  echo "the Pebble (card $pebble_card) is not present; plug it in before installing" >&2
+probe_playback() {
+  ALSA_CONFIG_PATH="$1" aplay -q -d 1 -f cd /dev/zero > "$proof/out" 2>&1
+}
+
+if probe_playback "$proof/bogus.conf"; then
+  echo "ALSA_CONFIG_PATH is being IGNORED: playback succeeded against a config naming a nonexistent card." >&2
+  echo "The Pebble pin would be decorative, so refusing to continue." >&2
   exit 1
 fi
-echo "ALSA namespace verified load-bearing: a nonexistent card fails, the Pebble resolves."
+negative_output=$(cat "$proof/out")
+
+if ! probe_playback "$alsa_conf"; then
+  # Both arms failed, so this proves nothing about the namespace: aplay may be
+  # broken, the Pebble may be absent, or the device may be busy. Report it as
+  # UNPROVEN rather than concluding from the negative arm alone.
+  echo "UNPROVEN: playback failed with the real namespace too, so the negative above shows nothing." >&2
+  echo "  with the bogus namespace: $negative_output" >&2
+  echo "  with $alsa_conf: $(cat "$proof/out")" >&2
+  echo "Fix playback to the Pebble first - it must be plugged in and free - then re-run." >&2
+  exit 1
+fi
+
+echo "ALSA namespace verified load-bearing: a nonexistent card fails, the Pebble plays."
 
 if ! command -v cargo > /dev/null; then
   echo "cargo is required to build spotify_player" >&2

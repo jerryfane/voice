@@ -216,11 +216,20 @@ Two independent guarantees, because one of them is only advice:
   escape is a boundary.
 
 The installer refuses to proceed unless it can demonstrate the ALSA namespace is
-load-bearing: it points `default` at a nonexistent card, requires playback to
-fail, and requires the failure to be *attributable to that card* rather than to
-a missing binary or a busy device. An ignored `ALSA_CONFIG_PATH` would otherwise
-look exactly like a working one - audio would still play, just out of the wrong
-speaker.
+load-bearing, using a **paired control** - the same binary, the same invocation,
+twice:
+
+| namespace | required result |
+|---|---|
+| a bogus one naming a nonexistent card | playback **fails** |
+| the real one | the identical command **succeeds** |
+
+The pairing is what distinguishes "the namespace decides the device" from
+"`aplay` is broken, absent, or the file is unreadable": a broken `aplay` fails
+both arms, and an ignored `ALSA_CONFIG_PATH` passes both. If both arms fail the
+installer reports `UNPROVEN` and stops, rather than concluding from the negative
+alone. An ignored `ALSA_CONFIG_PATH` would otherwise look exactly like a working
+one - audio would still play, just out of the wrong speaker.
 
 Login is not automated. The installer prints the one command that needs a person,
 because it opens a browser flow against the owner's Spotify account. Premium is
