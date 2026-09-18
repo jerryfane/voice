@@ -50,6 +50,31 @@ func TestShippedDefaultAnswersTheClockWithoutAModel(t *testing.T) {
 		}
 	}
 
+	// The review's false positives: sentences that MENTION time or a day but
+	// ask something else entirely. Answering these with the clock is worse
+	// than the delay this fast path removes, because the user cannot tell
+	// they were misunderstood.
+	for _, q := range []string{
+		"what time does the shop close",
+		"the time of the meeting",
+		"what day should I book",
+		"what time should we leave",
+		"is the date on the letter right",
+		"what day is the concert",
+	} {
+		reached = false
+		p, err := r.Plan(context.Background(), q, nil)
+		if err != nil {
+			t.Fatalf("%q: %v", q, err)
+		}
+		if p.Source == "rules" {
+			t.Errorf("%q was answered locally with %q; it asks something the device cannot know", q, p.Speak)
+		}
+		if !reached {
+			t.Errorf("%q never reached the planner", q)
+		}
+	}
+
 	// A timer request is NOT a clock query: it contains "time" and must
 	// still reach the paths that handle it rather than being answered with
 	// the current time.

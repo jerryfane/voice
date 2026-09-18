@@ -238,3 +238,51 @@ func (p *loopPlayer) plays() int {
 	defer p.mu.Unlock()
 	return p.n
 }
+
+// A fast answer must be SILENT BY CONSTRUCTION, not by winning a race. The
+// review drove 500 fast-path answers against the first version and the sound
+// fired on one of them; on real hardware that means spawning and killing a
+// playback subprocess for a query answered in microseconds.
+//
+// This asserts the delay exists rather than hoping the scheduler cancels in
+// time: it holds the loop open for a fraction of the delay, which is already
+// many playback cycles, and requires silence. Counting immediate start/stop
+// pairs - which my first attempt did - cannot distinguish a delay from a
+// lucky cancel, and the no-delay mutant passed it.
+func TestThinkingStaysSilentForAFastAnswer(t *testing.T) {
+	p := &loopPlayer{}
+	n := &Notifier{Player: p, Working: []int16{1, 2, 3}, Format: audio.Format{SampleRate: 16000, Channels: 1}}
+
+	stop := n.Thinking(context.Background())
+	// A quarter of the delay: long enough for several playback cycles if the
+	// loop had started, far short of when it is allowed to.
+	time.Sleep(thinkingDelay / 4)
+	stop()
+	if got := p.plays(); got != 0 {
+		t.Errorf("the thinking sound played %d times within %v; a fast answer must be silent by construction", got, thinkingDelay/4)
+	}
+
+	// And the immediate case, which is what the local fast path actually does.
+	for i := 0; i < 200; i++ {
+		n.Thinking(context.Background())()
+	}
+	if got := p.plays(); got != 0 {
+		t.Errorf("the thinking sound played %d times across 200 immediate answers", got)
+	}
+}
+
+// And a slow answer must still be covered, or the feature does nothing.
+func TestThinkingPlaysForASlowAnswer(t *testing.T) {
+	p := &loopPlayer{}
+	n := &Notifier{Player: p, Working: []int16{1, 2, 3}, Format: audio.Format{SampleRate: 16000, Channels: 1}}
+
+	stop := n.Thinking(context.Background())
+	deadline := time.Now().Add(3 * time.Second)
+	for p.plays() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	stop()
+	if p.plays() == 0 {
+		t.Error("the thinking sound never played for a slow answer, so the wait is silent again")
+	}
+}

@@ -61,7 +61,12 @@ type Feedback struct {
 	// Thinking is the sound played on a loop while the planner works: "tick",
 	// "hum" or "none". A request that leaves the device takes seconds, and
 	// silence during that wait is indistinguishable from Voice having missed
-	// the question.
+	// the question. It starts only after the answer has already taken longer
+	// than a moment, so a locally answered query stays silent.
+	//
+	// It is rendered at a THIRD of Volume, deliberately: it plays underneath
+	// someone waiting rather than at them, where the acknowledgement plays at
+	// Volume in full. Raising Volume raises both, in that ratio.
 	Thinking string `json:"thinking"`
 	// Light selects which speakerphone LED shows that Voice is listening:
 	// "auto" takes the first indicator the configured input.telephony_hid

@@ -31,6 +31,9 @@ const (
 	ThinkingHum = "hum"
 )
 
+// thinkingVolumeRatio keeps the working sound underneath the acknowledgement.
+const thinkingVolumeRatio = 0.35
+
 // Thinkings lists the selectable thinking sounds, "none" included.
 func Thinkings() []string { return []string{ThinkingNone, ThinkingTick, ThinkingHum} }
 
@@ -40,8 +43,11 @@ func Thinkings() []string { return []string{ThinkingNone, ThinkingTick, Thinking
 // stopping it lands close to the moment the answer arrives.
 func Thinking(name string, f Format, volume float64) ([]int16, error) {
 	// A thinking sound plays under a person waiting, not at them, so it is
-	// rendered quieter than an acknowledgement.
-	volume = math.Max(0, math.Min(1, volume)) * 0.35
+	// rendered at a third of the configured volume where an acknowledgement
+	// plays at full. The ratio is fixed rather than configurable: it is a
+	// property of the sound's purpose, and feedback.volume documents that
+	// raising it raises both in this proportion.
+	volume = math.Max(0, math.Min(1, volume)) * thinkingVolumeRatio
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "", ThinkingNone:
 		return nil, nil

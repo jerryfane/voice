@@ -8,9 +8,17 @@ import (
 	"context"
 	"log"
 	"strconv"
+	"time"
 
 	"github.com/jerryfane/voice/internal/audio"
 )
+
+// thinkingDelay is how long an answer may take before the thinking sound
+// starts. Local answers return in microseconds and must stay silent; a model
+// call takes seconds and must be covered. Anything in this range works, and
+// being generous costs nothing because the sound's purpose is to fill a wait
+// long enough to be mistaken for a failure.
+const thinkingDelay = 400 * time.Millisecond
 
 // State is what the physical indicator should show.
 type State int
@@ -98,6 +106,20 @@ func (n *Notifier) Thinking(ctx context.Context) (stop func()) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		// Nothing plays until the answer is actually slow. Starting
+		// immediately and cancelling on a fast reply was a RACE, not a
+		// guarantee: the review drove 500 fast-path answers and the sound
+		// fired on one of them, which on real hardware means spawning and
+		// killing a playback subprocess for a query answered in
+		// microseconds - the exact artifact this feature exists to avoid.
+		//
+		// A local answer returns in well under this delay, so the fast path
+		// is silent by construction rather than by winning a race.
+		select {
+		case <-loop.Done():
+			return
+		case <-time.After(thinkingDelay):
+		}
 		for loop.Err() == nil {
 			if err := n.Player.PlayPCM(loop, n.Working, n.Format); err != nil {
 				if loop.Err() == nil {
