@@ -48,21 +48,59 @@ if [ -x /var/lib/voice/piper/piper ]; then
   sudo ln -sfn /var/lib/voice/piper/piper /usr/local/bin/piper
 fi
 
+fresh_config=0
 if [ ! -f /etc/voice/config.json ]; then
   sudo /usr/local/bin/voice --config /etc/voice/config.json init
+  fresh_config=1
 fi
-sudo jq '
-  .wake.phrases = ["hey voice"] |
-  .wake.fuzz = 0 |
-  del(.wake.follow_up) |
-  .stt.model = "/var/lib/voice/models/ggml-base.en.bin" |
-  .tts.model = "/var/lib/voice/models/en_US-amy-medium.onnx" |
-  .brain.mode = "agent" |
-  .brain.command = ["voice-agent-run", "{prompt}"] |
-  .brain.timeout = "10m0s" |
-  .brain.persona = "You are Voice, a concise personal agent. Complete the user request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences." |
-  .brain.rules = false
-' /etc/voice/config.json > /tmp/voice-config.json
+
+# The wake settings belong to whoever owns the speaker, not to this script.
+# It used to assign wake.phrases and wake.fuzz on EVERY run, which silently
+# removed the owner's "hey boys" alias each time the device was reinstalled -
+# restored by hand afterwards, every time, by the person doing the install.
+# A deploy step that quietly undoes a user's configuration is a defect even
+# when the value it writes is the documented default.
+wake_filter='.'
+if [ "$fresh_config" = 1 ]; then
+  wake_filter='.wake.phrases = ["hey voice"] | .wake.fuzz = 0 | del(.wake.follow_up)'
+else
+  printf 'keeping existing wake phrases: %s\n' "$(sudo jq -c '.wake.phrases' /etc/voice/config.json)"
+fi
+
+# ONE jq, not a pipeline. A pipeline made this step unable to fail: the
+# shebang is `env sh`, which is dash here, dash has no pipefail, and `set -e`
+# in a pipeline only inspects the LAST command's status. With an unparseable
+# config - a bad manual edit, an unclean power loss on an embedded device -
+# the first jq died, the second produced an empty document, and a 0-byte
+# config was then installed OVER the working one. The single-jq form this
+# replaced aborted instead. Introduced by me and caught in review.
+config_filter="$wake_filter |
+  .stt.model = \"/var/lib/voice/models/ggml-base.en.bin\" |
+  .tts.model = \"/var/lib/voice/models/en_US-amy-medium.onnx\" |
+  .brain.mode = \"agent\" |
+  .brain.command = [\"voice-agent-run\", \"{prompt}\"] |
+  .brain.timeout = \"10m0s\" |
+  .brain.persona = \"You are Voice, a concise personal agent. Complete the user request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences.\" |
+  .brain.rules = false"
+sudo jq "$config_filter" /etc/voice/config.json > /tmp/voice-config.json
+
+# Belt and braces, because the thing being overwritten is the only copy of
+# the owner's configuration: refuse to install a config the binary itself
+# will not accept.
+#
+# The check is the BINARY, not a second copy of the rules. My first version
+# asserted "wake.phrases is not empty" in jq, which is wrong: config.Validate
+# requires phrases only for the "stt" detector, and an "external" detector
+# legitimately has none, so that guard refused a configuration the app
+# supports. Two places encoding one rule is how a check drifts from the
+# behaviour it is checking - the recurring defect in this repo - and here it
+# would have blocked a reinstall on a valid device.
+if [ ! -s /tmp/voice-config.json ] || ! /usr/local/bin/voice --config /tmp/voice-config.json config > /dev/null; then
+  rm -f /tmp/voice-config.json
+  echo "refusing to install a config the voice binary rejects" >&2
+  exit 1
+fi
+
 sudo install -o root -g "$agent_user" -m 0640 /tmp/voice-config.json /etc/voice/config.json
 rm -f /tmp/voice-config.json
 sudo chown root:"$agent_user" /etc/voice/config.json

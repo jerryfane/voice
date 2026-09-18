@@ -201,6 +201,11 @@ func run(args []string) error {
 		return doctor(ctx, cfg, a)
 	case "devices":
 		return listDevices(ctx, a)
+	case "wake":
+		if len(args) < 2 {
+			return errors.New("usage: voice wake TRANSCRIPT")
+		}
+		return checkWake(cfg, strings.Join(args[1:], " "))
 	case "listen":
 		stderr.printf("Listening for %q. Ctrl-C to stop.\n", cfg.Wake.Phrases[0])
 		return a.Run(ctx)
@@ -251,6 +256,7 @@ Usage: voice [--config PATH] COMMAND
   ask TEXT                  process one text command through the same brain
   say TEXT                  synthesize and play speech
   devices                   list configured devices and live state
+  wake TRANSCRIPT           report whether those words would wake Voice
   light ID OP [VALUE]       control a Magic Home light
   tv ID OP                  control an HDMI-CEC TV
   config                    print effective config
@@ -288,6 +294,35 @@ func controlService(action string) error {
 	stdout.printf("Voice is %s.\n", map[string]string{"on": "on", "off": "off"}[action])
 	return nil
 }
+
+// checkWake answers whether a spoken transcript would wake the assistant,
+// using wake.Match - the SAME function the listener calls, not a reimagining
+// of it, because a checker with its own copy of the rules can agree with
+// itself while disagreeing with the device.
+//
+// It exists because "the config file contains the phrase" is not the question
+// anyone actually has. After an install, the question is whether the words
+// somebody says out loud are accepted, and until now the only way to answer
+// that was to say them and see.
+func checkWake(c config.Config, transcript string) error {
+	matched, command, phrase := wake.Match(transcript, c.Wake.Phrases, c.Wake.Fuzz)
+	if !matched {
+		stdout.printf("%-4s %q would NOT wake Voice; configured phrases: %v\n", "NO", transcript, c.Wake.Phrases)
+		return errWakeNoMatch
+	}
+	if command == "" {
+		stdout.printf("%-4s %q wakes Voice on %q, with no trailing command\n", "YES", transcript, phrase)
+		return nil
+	}
+	stdout.printf("%-4s %q wakes Voice on %q, command %q\n", "YES", transcript, phrase, command)
+	return nil
+}
+
+// errWakeNoMatch makes a non-match a failing exit status so an installer or a
+// deploy receipt can assert it, while staying distinguishable from a real
+// error like an unreadable config.
+var errWakeNoMatch = errors.New("no wake match")
+
 func initConfig(path string, force bool) error {
 	if path == "" {
 		var err error
