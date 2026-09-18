@@ -113,9 +113,16 @@ type Wake struct {
 	// Phrases are accepted wake phrases, lowercase. Multiple spellings may be
 	// listed when speech recognition commonly confuses the chosen phrase.
 	Phrases []string `json:"phrases"`
-	// Fuzz is the maximum normalised edit distance (0-1) still counted as a
-	// match. 0 demands an exact transcript; 0.25 tolerates one wrong character
-	// in four. Raise it if the recogniser keeps mangling the name.
+	// Fuzz is the maximum normalised distance (0-1) still counted as a match,
+	// measured on the SOUND skeleton rather than on spelling. 0 demands the
+	// transcript sound identical; the default 0.2 tolerates one class in five.
+	//
+	// It defaults to 0.2 rather than 0 because 0 made the feature unusable on
+	// real hardware: whisper rendered the configured "hey voice" as "hey
+	// boys", so the exact-match default never woke Voice while the microphone
+	// and the transcription were both working. At 0.2 that transcript matches
+	// and ordinary speech - including "hey buzz light year", which collides
+	// once vowels are discarded - still does not.
 	Fuzz float64 `json:"fuzz"`
 	// Detector selects the strategy: "stt" transcribes every speech segment
 	// and matches the phrase (no extra dependency, works today); "external"
@@ -244,7 +251,7 @@ func Default() Config {
 		},
 		Wake: Wake{
 			Phrases:  []string{"hey voice"},
-			Fuzz:     0,
+			Fuzz:     0.2,
 			Detector: "stt",
 			VAD: VAD{
 				Threshold:    0,
