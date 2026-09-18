@@ -398,12 +398,25 @@ func TestEachPipelineStageIsObservable(t *testing.T) {
 	if err := a.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	// Durations are part of the contract: a stage line without a time cannot
+	// answer where an interaction went.
+	for _, want := range []string{"stage=plan state=ok ms=", "stage=speak state=ok ms="} {
+		if !strings.Contains(log.String(), want) {
+			t.Errorf("journal is missing %q, so the stage cannot be timed:\n%s", want, log.String())
+		}
+	}
 	for _, want := range []string{
 		"stage=capture state=starting",
 		"stage=segment state=ok",
 		"stage=transcribe state=ok",
 		"stage=wake state=matched",
 		"stage=wake state=nomatch",
+		// The planner and the speaker: unlogged until a real interaction took
+		// about a minute and the instrumented stages accounted for six
+		// seconds of it. A pipeline where the slowest stage is invisible
+		// cannot be diagnosed, only guessed at.
+		"stage=plan state=ok",
+		"stage=speak state=ok",
 	} {
 		if !strings.Contains(log.String(), want) {
 			t.Errorf("journal is missing %q:\n%s", want, log.String())
@@ -437,3 +450,35 @@ func (brokenTranscriber) Transcribe(context.Context, []int16, audio.Format) (str
 }
 func (brokenTranscriber) Name() string              { return "broken transcriber" }
 func (brokenTranscriber) Available() (bool, string) { return false, "cannot start" }
+
+// say() was a second entry point to Speak, used by every timer prompt,
+// confirmation and announcement plus the planner-failure fallback - eight
+// production callsites that stayed invisible while this PR claimed every
+// callsite was timed. The claim is only true if the say path logs too.
+func TestTimerSpeechIsTimedLikeEveryOtherReply(t *testing.T) {
+	var log strings.Builder
+	a, _, _ := feedbackAssistant(t, &countingPlanner{}, "hey voice")
+	a.Logger = stdlog.New(&log, "", 0)
+	a.say(context.Background(), "your timer has finished")
+	if got := log.String(); !strings.Contains(got, "stage=speak state=ok ms=") {
+		t.Errorf("say() did not emit a timed speak stage:\n%s", got)
+	}
+}
+
+// A sub-millisecond stage must not log ms=0, which reads as "not measured" -
+// the very ambiguity this instrumentation exists to remove.
+func TestStageDurationsKeepSubMillisecondResolution(t *testing.T) {
+	var log strings.Builder
+	a, _, _ := feedbackAssistant(t, &countingPlanner{}, "hey voice")
+	a.Logger = stdlog.New(&log, "", 0)
+	a.say(context.Background(), "x")
+	line := log.String()
+	if !strings.Contains(line, "ms=") {
+		t.Fatalf("no duration logged:\n%s", line)
+	}
+	// The fakes are instant, so this is precisely the case that used to log
+	// ms=0. A fractional value proves the resolution survived.
+	if strings.Contains(line, "ms=0 ") || strings.HasSuffix(strings.TrimSpace(line), "ms=0") {
+		t.Errorf("duration truncated to an integer zero, indistinguishable from unmeasured:\n%s", line)
+	}
+}

@@ -120,11 +120,13 @@ func (a *Assistant) now() time.Time {
 }
 
 // say speaks and logs, for the paths where a speech failure must not abort the
-// work that produced the words.
+// work that produced the words. It routes through speakLogged so timer
+// prompts, confirmations and announcements are timed like every other spoken
+// reply: this was a SECOND entry point to Speak, and while it existed the
+// claim that every callsite was timed was false - eight production callsites
+// stayed invisible, including the planner-failure fallback.
 func (a *Assistant) say(ctx context.Context, text string) {
-	if err := a.Speak(ctx, text); err != nil {
-		a.logf("speak: %v", err)
-	}
+	a.speakLogged(ctx, text)
 }
 
 func upperFirst(s string) string {
