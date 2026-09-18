@@ -99,6 +99,12 @@ func Build(c config.Config) *Assistant {
 		// built in code.
 		logger.Printf("wake sound: %v", err)
 	}
-	fb := &feedback.Notifier{Indicator: light, Player: player, Sound: sound, Format: f, Logger: logger}
+	// The thinking sound is rendered at startup like the acknowledgement, so
+	// a config typo is reported once here rather than discovered mid-answer.
+	working, err := audio.Thinking(c.Feedback.Thinking, f, c.Feedback.Volume)
+	if err != nil {
+		logger.Printf("thinking sound: %v", err)
+	}
+	fb := &feedback.Notifier{Indicator: light, Player: player, Sound: sound, Working: working, Format: f, Logger: logger}
 	return &Assistant{Recorder: rec, Player: player, VAD: seg, STT: stt, TTS: tts, Brain: planner, Devices: device.Build(c), Feedback: fb, Timers: timers, Missed: missed, WakePhrases: c.Wake.Phrases, WakeFuzz: c.Wake.Fuzz, Logger: logger}
 }

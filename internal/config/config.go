@@ -58,6 +58,16 @@ type Config struct {
 // phrase. It is emitted by the session layer, so it works with no network and
 // no model.
 type Feedback struct {
+	// Thinking is the sound played on a loop while the planner works: "tick",
+	// "hum" or "none". A request that leaves the device takes seconds, and
+	// silence during that wait is indistinguishable from Voice having missed
+	// the question. It starts only after the answer has already taken longer
+	// than a moment, so a locally answered query stays silent.
+	//
+	// It is rendered at a THIRD of Volume, deliberately: it plays underneath
+	// someone waiting rather than at them, where the acknowledgement plays at
+	// Volume in full. Raising Volume raises both, in that ratio.
+	Thinking string `json:"thinking"`
 	// Light selects which speakerphone LED shows that Voice is listening:
 	// "auto" takes the first indicator the configured input.telephony_hid
 	// device advertises, "none" disables the light, or name one explicitly
@@ -175,7 +185,12 @@ type Brain struct {
 	Timeout Duration `json:"timeout"`
 	// Persona is prepended to the agent prompt: how Voice should sound.
 	Persona string `json:"persona"`
-	// Rules enables the local no-model fast path for trivial queries.
+	// Rules enables the local no-model fast path for trivial queries: the
+	// clock, the date, stop and cancel, and device commands the rules
+	// recognise. It defaults to TRUE because shipping it false meant the
+	// device asked a remote model what time it was - 7.1 seconds measured on
+	// the owner's hardware - while holding the answer in its own clock. Set
+	// it false to send every utterance to the planner.
 	Rules bool `json:"rules"`
 }
 
@@ -262,9 +277,10 @@ func Default() Config {
 			},
 		},
 		Feedback: Feedback{
-			Light:  "auto",
-			Sound:  audio.EarconChime,
-			Volume: 0.35,
+			Light:    "auto",
+			Sound:    audio.EarconChime,
+			Thinking: audio.ThinkingTick,
+			Volume:   0.35,
 		},
 		Timers: Timers{Enabled: true},
 		STT: Engine{
@@ -290,7 +306,7 @@ func Default() Config {
 			Timeout: Duration(10 * time.Minute),
 			Command: Command{"voice-agent-run", "{prompt}"},
 			Persona: "You are Voice, a concise personal agent. Complete the user's request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences.",
-			Rules:   false,
+			Rules:   true,
 		},
 		Lights: []Light{},
 		TVs:    []TV{},
@@ -416,6 +432,12 @@ func (c Config) Validate() error {
 	}
 	if _, err := audio.Earcon(c.Feedback.Sound, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.Volume); err != nil {
 		return fmt.Errorf("feedback.sound: %w", err)
+	}
+	// Validated here for the same reason as the acknowledgement: a typo must
+	// be reported at startup, not discovered as silence while someone waits
+	// for an answer.
+	if _, err := audio.Thinking(c.Feedback.Thinking, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.Volume); err != nil {
+		return fmt.Errorf("feedback.thinking: %w", err)
 	}
 	switch c.Brain.Mode {
 	case "plan", "agent":
