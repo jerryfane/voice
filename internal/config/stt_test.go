@@ -13,6 +13,9 @@ func TestDefaultFastPipelineConfigurationValidates(t *testing.T) {
 	if c.STT.Resident == nil || c.STT.OpenRouter == nil || c.Brain.Jev == nil || !c.Brain.Rules {
 		t.Fatalf("default fast path is incomplete: resident=%v openrouter=%v jev=%v rules=%v", c.STT.Resident != nil, c.STT.OpenRouter != nil, c.Brain.Jev != nil, c.Brain.Rules)
 	}
+	if got, want := c.Brain.Jev.Endpoint, "https://openrouter.ai/api/alpha/decisions"; got != want {
+		t.Fatalf("default Jev endpoint = %q, want %q", got, want)
+	}
 }
 
 func TestResidentTranscriberMustStayOnLoopback(t *testing.T) {

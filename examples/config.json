@@ -100,7 +100,7 @@
     "persona": "You are Voice, a concise personal agent. Complete the user request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences.",
     "rules": true,
     "jev": {
-      "endpoint": "https://openrouter.ai/api/v1/api/alpha/decisions",
+      "endpoint": "https://openrouter.ai/api/alpha/decisions",
       "model": "typesafe/jev-1.13",
       "api_key_env": "OPENROUTER_API_KEY",
       "confidence": 0.85,

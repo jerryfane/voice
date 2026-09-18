@@ -383,7 +383,7 @@ func Default() Config {
 			Persona: "You are Voice, a concise personal agent. Complete the user's request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences.",
 			Rules:   true,
 			Jev: &Jev{
-				Endpoint:   "https://openrouter.ai/api/v1/api/alpha/decisions",
+				Endpoint:   "https://openrouter.ai/api/alpha/decisions",
 				Model:      "typesafe/jev-1.13",
 				APIKeyEnv:  "OPENROUTER_API_KEY",
 				Confidence: 0.85,

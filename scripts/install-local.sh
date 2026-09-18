@@ -90,7 +90,8 @@ config_filter="$wake_filter |
   .brain.command = [\"voice-agent-run\", \"{prompt}\"] |
   .brain.timeout = \"10m0s\" |
   .brain.persona = \"You are Voice, a concise personal agent. Complete the user request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences.\" |
-  .brain.jev //= {\"endpoint\":\"https://openrouter.ai/api/v1/api/alpha/decisions\",\"model\":\"typesafe/jev-1.13\",\"api_key_env\":\"OPENROUTER_API_KEY\",\"confidence\":0.85,\"timeout\":\"2s\"}"
+  .brain.jev //= {\"endpoint\":\"https://openrouter.ai/api/alpha/decisions\",\"model\":\"typesafe/jev-1.13\",\"api_key_env\":\"OPENROUTER_API_KEY\",\"confidence\":0.85,\"timeout\":\"2s\"} |
+  if .brain.jev.endpoint == \"https://openrouter.ai/api/v1/api/alpha/decisions\" then .brain.jev.endpoint = \"https://openrouter.ai/api/alpha/decisions\" else . end"
 sudo jq "$config_filter" /etc/voice/config.json > /tmp/voice-config.json
 
 # Belt and braces, because the thing being overwritten is the only copy of
