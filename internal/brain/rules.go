@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jerryfane/voice/internal/device"
 )
@@ -20,7 +21,7 @@ func NewRules(next Planner) *Rules         { return &Rules{Next: next, Now: time
 func (r *Rules) Name() string              { return "rules -> " + r.Next.Name() }
 func (r *Rules) Available() (bool, string) { return r.Next.Available() }
 func (r *Rules) Plan(ctx context.Context, text string, inv []device.Info) (Plan, error) {
-	n := strings.ToLower(strings.TrimSpace(text))
+	n := normalise(text)
 	now := r.Now()
 	if asksClock(n) {
 		return Plan{Speak: fmt.Sprintf("It is %s.", now.Format("3:04 PM")), Source: "rules"}, nil
@@ -58,6 +59,34 @@ func (r *Rules) Plan(ctx context.Context, text string, inv []device.Info) (Plan,
 		}
 	}
 	return r.Next.Plan(ctx, text, inv)
+}
+
+// normalise lowercases and removes punctuation, because real transcripts carry
+// it and the words are what matter. Whisper produced "Hey boys. What time is
+// it?" on the owner's device, and without this the tokens are "it?" and
+// "time." - which match neither the filler list nor the subject, so the local
+// fast path silently missed every genuine query it was written for. The
+// review caught it with the device's own punctuation.
+//
+// Apostrophes are DELETED rather than turned into spaces, so "what's" becomes
+// "whats" - one filler word - instead of "what s", where a stray "s" would
+// count as content and disqualify the utterance.
+func normalise(text string) string {
+	// A rune slice rather than a strings.Builder: the Builder's writers return
+	// an error that is always nil, which this repo forbids discarding and
+	// which errcheck caught here. Appending needs no error-returning writer.
+	out := make([]rune, 0, len(text))
+	for _, r := range strings.ToLower(text) {
+		switch {
+		case r == '\'' || r == '\u2019':
+			continue
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			out = append(out, r)
+		default:
+			out = append(out, ' ')
+		}
+	}
+	return strings.Join(strings.Fields(string(out)), " ")
 }
 
 // filler holds the words that carry no request of their own, so a clock query

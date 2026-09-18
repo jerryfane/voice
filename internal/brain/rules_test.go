@@ -28,6 +28,14 @@ func TestShippedDefaultAnswersTheClockWithoutAModel(t *testing.T) {
 	r.Now = func() time.Time { return time.Date(2026, 9, 18, 15, 4, 0, 0, time.UTC) }
 
 	for _, q := range []string{
+		// As the recogniser actually writes them, punctuation included. The
+		// device logged heard="Hey boys. What time is it?", and without
+		// punctuation handling the tokens are "it?" and "time." - matching
+		// neither the filler list nor the subject, so the fast path missed
+		// every real query it was written for.
+		"What time is it?",
+		"What's the time?",
+		"Time.",
 		"what time is it",
 		"time",
 		"what is the time",
@@ -59,6 +67,7 @@ func TestShippedDefaultAnswersTheClockWithoutAModel(t *testing.T) {
 		"the time of the meeting",
 		"what day should I book",
 		"what time should we leave",
+		"What time does the shop close?",
 		"is the date on the letter right",
 		"what day is the concert",
 	} {
