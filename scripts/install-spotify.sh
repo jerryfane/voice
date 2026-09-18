@@ -130,5 +130,5 @@ echo
 echo "Installed. The client is pinned to the Pebble by name and cannot open the microphone."
 echo
 echo "NOT done, and needs the owner: Spotify login. Run"
-echo "  sudo -u $account -H env ALSA_CONFIG_PATH=$alsa_conf XDG_CONFIG_HOME=$state/config /usr/local/bin/spotify_player authenticate"
+echo "  sudo -u $account -H /usr/local/bin/spotify-player-run -c $state/config -C $state/cache authenticate"
 echo "and follow the prompt. Then: sudo systemctl enable --now spotify-player"

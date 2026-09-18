@@ -11,6 +11,7 @@
 # The second is what makes the first safe to rely on: a config the client could
 # ignore is advice, a permission it cannot escape is a boundary.
 set -eu
+umask 077
 
 if [ "$(id -un)" != "spotify-player" ]; then
   exec sudo -n -H -u spotify-player /usr/local/bin/spotify-player-run "$@"

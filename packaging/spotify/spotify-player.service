@@ -5,10 +5,11 @@ After=sound.target network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=forking
 User=spotify-player
 Group=spotify-player
-ExecStart=/usr/local/bin/spotify-player-run -d
+UMask=0077
+ExecStart=/usr/local/bin/spotify-player-run -c /var/lib/spotify-player/config -C /var/lib/spotify-player/cache -d
 Restart=on-failure
 RestartSec=5s
 
@@ -31,8 +32,6 @@ MemoryDenyWriteExecute=no
 LockPersonality=yes
 
 Environment=ALSA_CONFIG_PATH=/etc/voice/spotify-alsa.conf
-Environment=XDG_CONFIG_HOME=/var/lib/spotify-player/config
-Environment=XDG_CACHE_HOME=/var/lib/spotify-player/cache
 
 [Install]
 WantedBy=multi-user.target
