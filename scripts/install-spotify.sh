@@ -68,11 +68,25 @@ fi
 
 proof=$(mktemp -d)
 trap 'rm -rf "$proof"' EXIT
+# The bogus namespace MUST mirror the real one's structure - self-contained,
+# no base-config include - or the arms are not comparable. The first version
+# included /usr/share/alsa/alsa.conf here, which is what made the real file
+# decorative: the base config's trailing @hooks load /etc/alsa/conf.d/* after
+# parsing, and PipeWire's file there redefines pcm.!default. The nonexistent
+# card was overridden, playback succeeded, and the control reported
+# "ALSA_CONFIG_PATH is being IGNORED" - which would have blocked every install
+# while the thing it was testing was fine.
+#
+# A control whose two arms differ in anything but the value under test is not
+# a control.
 cat > "$proof/bogus.conf" <<CONF
-</usr/share/alsa/alsa.conf>
 pcm.!default {
-    type hw
-    card "NoSuchCardExists"
+    type plug
+    slave.pcm {
+        type hw
+        card "NoSuchCardExists"
+        device 0
+    }
 }
 CONF
 
