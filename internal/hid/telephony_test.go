@@ -1,8 +1,10 @@
 package hid
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -214,5 +216,146 @@ func TestConcurrentWritersNeverEmitATornReport(t *testing.T) {
 	}
 	if got[1]&0x01 == 0 {
 		t.Fatalf("final report = % x: indicator writes cleared the off-hook bit", got)
+	}
+}
+
+// A successful report write logged nothing, so a light that did not come on
+// was indistinguishable from a write that never happened - which is exactly
+// what happened on the device: the raw report 02 09 00 lit the ring while
+// Voice's own path lit nothing and reported no error.
+//
+// The bytes and the LENGTH both matter: firmware treats a report of the wrong
+// length as a different report, so a log line without the length cannot
+// explain a silent failure.
+func TestWriteLogsTheExactReportBytesAndLength(t *testing.T) {
+	node := filepath.Join(t.TempDir(), "hidraw-test")
+	if err := os.WriteFile(node, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tel := &Telephony{path: node, state: map[byte][]byte{}}
+	var lines []string
+	tel.SetLogger(func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+	if err := tel.SetReportBit(StandardOffHook, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("want one log line per write, got %d: %v", len(lines), lines)
+	}
+	for _, want := range []string{"stage=hid", "bytes=", "len=", "on=true"} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("log line lacks %q: %s", want, lines[0])
+		}
+	}
+	// The retained state must be visible across writes: a second bit written
+	// into the same report has to show BOTH bits on the wire, which is the
+	// property that would have explained the missing light on the device.
+	outs, err := ParseOutputs(powerConfDescriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := &Telephony{path: node, outs: outs, state: map[byte][]byte{}}
+	var wire []string
+	dev.SetLogger(func(format string, args ...any) {
+		wire = append(wire, fmt.Sprintf(format, args...))
+	})
+	if err := dev.SetReportBit(StandardOffHook, true); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := dev.Set(PageLED, LEDHold, true); err != nil || !ok {
+		t.Fatalf("hold LED write: ok=%v err=%v", ok, err)
+	}
+	if len(wire) != 2 {
+		t.Fatalf("want two log lines, got %d: %v", len(wire), wire)
+	}
+	// Off-hook is bit 0 and hold is bit 3, so the second report must carry
+	// both: 0x09. A report showing only 0x08 would be the missing-light bug,
+	// and before this logging existed nothing could tell the two apart.
+	//
+	// The assertion reads the bytes FIELD, not the whole line. Matching "09"
+	// anywhere in the line passed 6.8% of the time on a deliberately broken
+	// payload, because t.TempDir() puts a random number in path= - a check
+	// that could pass for the wrong reason, inside the test written to prove
+	// the bytes are right.
+	got := bytesField(t, wire[1])
+	if got != "02 09 00" {
+		t.Errorf("second report carried %q, want %q (the retained off-hook bit plus hold)", got, wire[1])
+	}
+}
+
+// bytesField extracts the bytes= field so an assertion cannot accidentally
+// match the random path or the length instead of the payload.
+func bytesField(t *testing.T, line string) string {
+	t.Helper()
+	const key = "bytes="
+	i := strings.Index(line, key)
+	if i < 0 {
+		t.Fatalf("log line has no %s field: %s", key, line)
+	}
+	rest := line[i+len(key):]
+	if j := strings.Index(rest, " len="); j >= 0 {
+		return rest[:j]
+	}
+	t.Fatalf("log line has no len= field after the bytes: %s", line)
+	return ""
+}
+
+// A successful-write log cannot distinguish "wrote the wrong bytes" from
+// "never wrote at all", because the second case leaves no line. The ready
+// line is what makes that absence meaningful: present, with no write lines
+// after it, is a diagnosis rather than a gap.
+func TestLogReadyRecordsThePathAndCapabilities(t *testing.T) {
+	outs, err := ParseOutputs(powerConfDescriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := &Telephony{path: "/dev/hidraw-test", outs: outs, state: map[byte][]byte{}}
+	var lines []string
+	dev.SetLogger(func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+	dev.LogReady()
+	if len(lines) != 1 {
+		t.Fatalf("want one ready line, got %d: %v", len(lines), lines)
+	}
+	for _, want := range []string{"stage=hid", "state=ready", "/dev/hidraw-test", "LED"} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("ready line lacks %q: %s", want, lines[0])
+		}
+	}
+
+	// Nil-safe: an unconfigured device must not panic, and must not claim to
+	// be ready either.
+	var none *Telephony
+	none.SetLogger(func(string, ...any) { t.Error("nil device logged a ready line") })
+	none.LogReady()
+
+	// The point of the ready line is that an ABSENCE becomes readable, so the
+	// two states must be distinguishable in one stream: ready with no write
+	// lines is "never wrote", ready followed by a write line is "wrote". A
+	// reader cannot draw the first conclusion unless the second looks
+	// different.
+	node := filepath.Join(t.TempDir(), "hidraw-stream")
+	if err := os.WriteFile(node, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live := &Telephony{path: node, outs: outs, state: map[byte][]byte{}}
+	var stream []string
+	live.SetLogger(func(format string, args ...any) {
+		stream = append(stream, fmt.Sprintf(format, args...))
+	})
+	live.LogReady()
+	if len(stream) != 1 || !strings.Contains(stream[0], "state=ready") {
+		t.Fatalf("expected exactly one ready line, got %v", stream)
+	}
+	if strings.Contains(stream[0], "state=written") {
+		t.Error("a ready line must not read as a write, or an absence proves nothing")
+	}
+	if ok, err := live.Set(PageLED, LEDHold, true); err != nil || !ok {
+		t.Fatalf("write failed: ok=%v err=%v", ok, err)
+	}
+	if len(stream) != 2 || !strings.Contains(stream[1], "state=written") {
+		t.Fatalf("a successful write must add a distinguishable line, got %v", stream)
 	}
 }

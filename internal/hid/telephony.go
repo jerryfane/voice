@@ -22,6 +22,7 @@ type Telephony struct {
 
 	mu    sync.Mutex
 	state map[byte][]byte // report ID -> payload, excluding the report ID
+	log   func(format string, args ...any)
 }
 
 // Open resolves the device's report descriptor and returns a handle. The node
@@ -169,6 +170,39 @@ func (t *Telephony) SetReportBit(bit Bit, on bool) error {
 // lock is held across the I/O on purpose: the capture path and the feedback
 // path write the same report, and releasing the lock before the write would
 // let a stale snapshot land on the device after a newer one.
+// Log, if set, receives the exact report bytes written. The device seat could
+// not tell whether a light that did not come on was a write that never
+// happened, a write of the wrong bytes, or firmware ignoring a correct
+// report - because a successful write logged nothing at all. Bytes on the
+// wire are the only evidence that separates those.
+func (t *Telephony) SetLogger(f func(format string, args ...any)) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.log = f
+}
+
+// LogReady records that the device is open and what it can drive, so that the
+// ABSENCE of later write lines is itself a diagnosis. A successful-write log
+// cannot distinguish "wrote the wrong bytes" from "never wrote at all",
+// because the second case leaves no line at all; a ready line with nothing
+// after it answers that on its own.
+func (t *Telephony) LogReady() {
+	if t == nil {
+		return
+	}
+	t.logf("stage=hid state=ready path=%s caps=%s", t.path, t.Describe())
+}
+
+func (t *Telephony) logf(format string, args ...any) {
+	if t == nil || t.log == nil {
+		return
+	}
+	t.log(format, args...)
+}
+
 func (t *Telephony) write(bit Bit, on bool) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -195,6 +229,12 @@ func (t *Telephony) write(bit Bit, on bool) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close %s after report %d: %w", t.path, bit.ReportID, err)
 	}
+	// The bytes, the length and the state, because a light that does not come
+	// on is otherwise indistinguishable from a light that was never written:
+	// firmware treats a report of the wrong length as a different report, so
+	// the length is part of the evidence rather than a detail.
+	t.logf("stage=hid state=written path=%s report=%d bytes=% x len=%d bit=byte%d/mask%#02x on=%v",
+		t.path, bit.ReportID, report, len(report), bit.Byte, bit.Mask, on)
 	return nil
 }
 
