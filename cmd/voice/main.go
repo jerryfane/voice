@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -17,6 +19,7 @@ import (
 	"github.com/jerryfane/voice/internal/config"
 	"github.com/jerryfane/voice/internal/device"
 	"github.com/jerryfane/voice/internal/proc"
+	"github.com/jerryfane/voice/internal/requests"
 	"github.com/jerryfane/voice/internal/session"
 	"github.com/jerryfane/voice/internal/wake"
 )
@@ -64,6 +67,90 @@ func (p *printer) print(a ...any) {
 		return
 	}
 	_, p.err = fmt.Fprint(p.w, a...)
+}
+
+// agentAccount is the restricted account the voice agent runs as, matching
+// packaging/voice.service and packaging/voice-agent-run.
+const agentAccount = "voice-agent"
+
+// agentHome resolves that account's home directory. It is a variable so the
+// resolution can be tested on a host that has no such account: without a
+// seam, the test for "look in the AGENT's home, not the caller's" skips
+// everywhere except a real device, which is another check that cannot fail.
+// Production uses the real lookup below and nothing flips it.
+var agentHome = func() (string, bool) {
+	u, err := user.Lookup(agentAccount)
+	if err != nil || u.HomeDir == "" {
+		return "", false
+	}
+	return u.HomeDir, true
+}
+
+// requestCandidate is one place the journal could be, and whether a failure
+// to read it is a fault or merely worth mentioning.
+type requestCandidate struct {
+	path     string
+	required bool
+}
+
+// requestsPaths lists every place the voice agent's journal could be, most
+// specific first, deduplicated by file identity.
+//
+// It returns a LIST rather than a single answer on purpose. The reader and the
+// writer resolve this path in different processes with different environments:
+// the wrapper runs under `sudo -n -H`, which strips VOICE_AGENT_WORKSPACE out
+// of the service environment, so a workspace relocated in voice.service is
+// honoured by one side and invisible to the other. Picking one candidate means
+// doctor can report "no requests" while a real request sits in the other
+// location - a silent wrong answer, which is the defect this whole feature
+// exists to end. So doctor reads them all and says which file it found.
+func requestsPaths() []requestCandidate {
+	var paths []requestCandidate
+	add := func(p string, required bool) {
+		if p == "" {
+			return
+		}
+		p = filepath.Clean(p)
+		// Deduplicate by file IDENTITY, not by string. A relocated
+		// workspace is often a symlink or a bind mount of the agent's own,
+		// so two different strings name one file: counting it twice would
+		// report two requests where one was spoken and print it twice, and
+		// a reader that invents requests is no more trustworthy than one
+		// that hides them.
+		info, err := os.Stat(p)
+		for _, existing := range paths {
+			if existing.path == p {
+				return
+			}
+			if err != nil {
+				continue
+			}
+			other, otherErr := os.Stat(existing.path)
+			if otherErr == nil && os.SameFile(info, other) {
+				return
+			}
+		}
+		paths = append(paths, requestCandidate{path: p, required: required})
+	}
+
+	// Required candidates are the places the journal is MEANT to be, named
+	// by an operator or by the service account. The caller's own home is a
+	// backstop, so a stray unreadable file there must not fail a device
+	// whose real journal is healthy.
+	add(os.Getenv("VOICE_REQUESTS"), true)
+	if ws := os.Getenv("VOICE_AGENT_WORKSPACE"); ws != "" {
+		add(filepath.Join(ws, "REQUESTS.tsv"), true)
+	}
+	if home, ok := agentHome(); ok {
+		add(filepath.Join(home, "voice-workspace", "REQUESTS.tsv"), true)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, "voice-workspace", "REQUESTS.tsv"), false)
+	}
+	if len(paths) == 0 {
+		add(filepath.Join("voice-workspace", "REQUESTS.tsv"), false)
+	}
+	return paths
 }
 
 func main() {
@@ -249,6 +336,59 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant) error {
 	for _, phrase := range c.Wake.Phrases {
 		stdout.printf("%-12s %-4s %q: %s\n", "wake phrase", "INFO", phrase,
 			wake.DescribeMatching(phrase, c.Wake.Fuzz))
+	}
+	// Requests the voice agent recorded because it could not act on them
+	// itself. Reported here because the alternative is what already
+	// happened: a spoken request refused politely, written nowhere, and
+	// found days later only because someone thought to ask.
+	candidates := requestsPaths()
+	found := map[string][]requests.Request{}
+	total := 0
+	for _, candidate := range candidates {
+		reqs, err := requests.Load(candidate.path)
+		if err != nil {
+			if candidate.required {
+				check("requests", false, err.Error())
+			} else {
+				// A leftover file in whoever-ran-doctor's own home is not
+				// the device's problem, but it is not nothing either: say
+				// it and carry on rather than failing a healthy install or
+				// swallowing it silently.
+				stdout.printf("%-12s %-4s ignoring an unreadable backstop: %v\n", "requests", "INFO", err)
+			}
+			continue
+		}
+		if len(reqs) > 0 {
+			found[candidate.path] = reqs
+			total += len(reqs)
+		}
+	}
+	if total > 0 {
+		stdout.printf("%-12s %-4s %d spoken request(s) need someone with code access:\n", "requests", "INFO", total)
+		for _, candidate := range candidates {
+			reqs, ok := found[candidate.path]
+			if !ok {
+				continue
+			}
+			// Name the file whenever more than one location holds
+			// requests, so a relocated workspace is visible rather than
+			// looking like one merged list.
+			if len(found) > 1 {
+				stdout.printf("%-12s      in %s:\n", "", candidate.path)
+			}
+			for _, r := range reqs {
+				// A line the loader could not parse is marked, not shown
+				// as if it were a clean entry: the writer is an agent
+				// following prose instructions, so a mangled line is
+				// likely and reading it as dated-and-fine would misreport
+				// what was actually recorded.
+				when := "unparsed"
+				if !r.When.IsZero() {
+					when = r.When.Local().Format("2 Jan 15:04")
+				}
+				stdout.printf("%-12s      %-13s %s\n", "", when, r.Text)
+			}
+		}
 	}
 	if c.Timers.Enabled {
 		if a.Timers == nil {

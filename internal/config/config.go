@@ -64,9 +64,15 @@ type Feedback struct {
 	// the question. It starts only after the answer has already taken longer
 	// than a moment, so a locally answered query stays silent.
 	//
-	// It is rendered at a THIRD of Volume, deliberately: it plays underneath
-	// someone waiting rather than at them, where the acknowledgement plays at
-	// Volume in full. Raising Volume raises both, in that ratio.
+	// ThinkingVolume scales it independently of Volume, between 0 (silent)
+	// and 1 (full scale). It defaults to a third of Volume, which is where it
+	// was fixed before: the sound plays underneath someone waiting rather
+	// than at them. Set it explicitly to override that.
+	//
+	// It is its own field because the fixed ratio was asked about twice - by
+	// the reviewer, and by the owner speaking to the device, which answered
+	// "I can't adjust the thinking sound volume from the controls available
+	// to me." Two requests for the same knob is enough.
 	Thinking string `json:"thinking"`
 	// Light selects which speakerphone LED shows that Voice is listening:
 	// "auto" takes the first indicator the configured input.telephony_hid
@@ -81,6 +87,14 @@ type Feedback struct {
 	Sound string `json:"sound"`
 	// Volume scales the earcon between 0 (silent) and 1 (full scale).
 	Volume float64 `json:"volume"`
+	// ThinkingVolume scales the thinking sound, between 0 (silent) and 1.
+	//
+	// A POINTER so absence and zero are different things. With a plain
+	// float64, an explicit thinking_volume of 0 is indistinguishable from an
+	// omitted field, so the one value a user most obviously wants - silence,
+	// from the very setting added to control it - would have been read as
+	// "derive it from Volume" and quietly ignored.
+	ThinkingVolume *float64 `json:"thinking_volume,omitempty"`
 }
 
 // Timers configures local spoken timers.
@@ -387,6 +401,18 @@ func Save(cfg Config, path string) error {
 	return os.WriteFile(path, append(b, '\n'), 0o644)
 }
 
+// ResolvedThinkingVolume is the level the thinking sound actually plays at:
+// the explicit setting when given, otherwise a share of Volume. One function
+// answers it so the renderer, the validator and `voice doctor` cannot
+// disagree — two places deriving the same number is how a report drifts from
+// the behaviour it describes, which this repo has already been caught doing.
+func (f Feedback) ResolvedThinkingVolume() float64 {
+	if f.ThinkingVolume != nil {
+		return *f.ThinkingVolume
+	}
+	return f.Volume * audio.ThinkingVolumeRatio
+}
+
 // Validate rejects configurations that cannot work, with messages that say
 // what to change.
 func (c Config) Validate() error {
@@ -436,7 +462,10 @@ func (c Config) Validate() error {
 	// Validated here for the same reason as the acknowledgement: a typo must
 	// be reported at startup, not discovered as silence while someone waits
 	// for an answer.
-	if _, err := audio.Thinking(c.Feedback.Thinking, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.Volume); err != nil {
+	if v := c.Feedback.ThinkingVolume; v != nil && (*v < 0 || *v > 1) {
+		return fmt.Errorf("feedback.thinking_volume must be between 0 and 1, got %v", *v)
+	}
+	if _, err := audio.Thinking(c.Feedback.Thinking, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.ResolvedThinkingVolume()); err != nil {
 		return fmt.Errorf("feedback.thinking: %w", err)
 	}
 	switch c.Brain.Mode {
