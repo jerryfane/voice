@@ -187,3 +187,47 @@ func TestAnAmbiguousDeviceNameAsksInsteadOfGuessing(t *testing.T) {
 		t.Errorf("a single match must still act, got %+v", p.Actions)
 	}
 }
+
+// Common transport commands must not spend a model round-trip or rely on the
+// model discovering a shell command. The inventory is the authority: the rule
+// targets the configured music device and emits only capabilities it advertises.
+func TestMusicTransportCommandsStayLocal(t *testing.T) {
+	reached := false
+	r := NewRules(&refusingPlanner{onCall: func() { reached = true }})
+	inv := []device.Info{{
+		ID:           "spotify",
+		Kind:         "music",
+		Capabilities: []string{string(device.OpPlay), string(device.OpPause), string(device.OpResume), string(device.OpNext), string(device.OpPrevious)},
+	}}
+
+	for _, tt := range []struct {
+		said string
+		op   device.Op
+	}{
+		{said: "start some music", op: device.OpPlay},
+		{said: "pause the music", op: device.OpPause},
+		{said: "continue music", op: device.OpResume},
+		{said: "skip the track", op: device.OpNext},
+		{said: "go back one song", op: device.OpPrevious},
+	} {
+		p, err := r.Plan(context.Background(), tt.said, inv)
+		if err != nil {
+			t.Fatalf("%q: %v", tt.said, err)
+		}
+		if reached {
+			t.Fatalf("%q reached the planner", tt.said)
+		}
+		if len(p.Actions) != 1 || p.Actions[0].Device != "spotify" || p.Actions[0].Op != tt.op {
+			t.Errorf("%q actions = %+v, want spotify %s", tt.said, p.Actions, tt.op)
+		}
+	}
+
+	// A named selection needs semantic interpretation and therefore remains a
+	// planner request rather than being misparsed as a generic transport verb.
+	if _, err := r.Plan(context.Background(), "play Kind of Blue by Miles Davis", inv); err != nil {
+		t.Fatal(err)
+	}
+	if !reached {
+		t.Fatal("a named music request did not reach the planner")
+	}
+}

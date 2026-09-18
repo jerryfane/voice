@@ -52,6 +52,8 @@ type Config struct {
 	Lights []Light `json:"lights"`
 	// TVs are HDMI-CEC displays.
 	TVs []TV `json:"tvs"`
+	// Spotify is an optional local spotify_player playback daemon.
+	Spotify *Spotify `json:"spotify,omitempty"`
 }
 
 // Feedback configures the immediate acknowledgement of an accepted wake
@@ -228,6 +230,16 @@ type TV struct {
 	Adapter string `json:"adapter"`
 	// LogicalAddress is the CEC target; 0 is always the TV.
 	LogicalAddress int `json:"logical_address"`
+}
+
+// Spotify describes the local playback endpoint exposed by spotify_player.
+type Spotify struct {
+	// ID is what the planner calls this music device.
+	ID string `json:"id"`
+	// Device is the Spotify Connect endpoint name exposed by the daemon.
+	Device string `json:"device,omitempty"`
+	// Command is the spotify_player CLI used to reach its loopback daemon.
+	Command Command `json:"command"`
 }
 
 // Duration is a time.Duration that marshals as a human string ("1.5s", "800ms")
@@ -575,6 +587,18 @@ func (c Config) Validate() error {
 			return fmt.Errorf("duplicate device id %q (already used by a %s)", t.ID, prev)
 		}
 		seen[k] = "tv"
+	}
+	if c.Spotify != nil {
+		if c.Spotify.ID == "" {
+			return fmt.Errorf("spotify has no id")
+		}
+		if len(c.Spotify.Command) == 0 {
+			return fmt.Errorf("spotify %q has no command", c.Spotify.ID)
+		}
+		k := strings.ToLower(c.Spotify.ID)
+		if prev, dup := seen[k]; dup {
+			return fmt.Errorf("duplicate device id %q (already used by a %s)", c.Spotify.ID, prev)
+		}
 	}
 	return nil
 }

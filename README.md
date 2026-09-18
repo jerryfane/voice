@@ -194,11 +194,21 @@ voice tv <id> mute
 
 ## Spotify
 
-Optional, and deliberately separate from the assistant. `scripts/install-spotify.sh`
-installs a Spotify client that plays to a second speaker and **cannot reach the
-microphone**.
+The optional Spotify integration installs an isolated playback daemon and adds
+it to Voice's device inventory:
 
     scripts/install-spotify.sh
+
+After authentication, spoken requests can start shuffled liked songs, resume or
+pause playback, skip tracks, go back, or play a named track, album, artist, or
+playlist. The equivalent direct controls are:
+
+    voice music spotify play
+    voice music spotify play artist "Miles Davis"
+    voice music spotify pause
+    voice music spotify next
+
+Spotify plays to a second speaker and **cannot reach the microphone**.
 
 Two independent guarantees, because one of them is only advice:
 

@@ -32,6 +32,9 @@ func (r *Rules) Plan(ctx context.Context, text string, inv []device.Info) (Plan,
 	if n == "stop" || n == "cancel" || n == "never mind" {
 		return Plan{Speak: "Okay.", Source: "rules"}, nil
 	}
+	if op, ok := musicCommand(n); ok {
+		return musicPlan(inv, op)
+	}
 	// Which devices does this utterance name? Collected rather than acted on
 	// immediately, because normalising both sides created a collision the
 	// review found: "lamp-2" and "lamp_2" reduce to the same text, and the
@@ -158,6 +161,54 @@ func asksClock(n string) bool {
 func asksDate(n string) bool {
 	c := content(n)
 	return len(c) == 1 && (c[0] == "date" || c[0] == "day")
+}
+
+func musicCommand(n string) (device.Op, bool) {
+	switch n {
+	case "play music", "play some music", "play me some music", "start music", "start some music", "put on music", "put some music on":
+		return device.OpPlay, true
+	case "pause music", "pause the music", "stop music", "stop the music":
+		return device.OpPause, true
+	case "resume music", "resume the music", "continue music", "continue the music":
+		return device.OpResume, true
+	case "next song", "next track", "skip song", "skip the song", "skip track", "skip the track":
+		return device.OpNext, true
+	case "previous song", "previous track", "go back a song", "go back one song":
+		return device.OpPrevious, true
+	default:
+		return "", false
+	}
+}
+
+func musicPlan(inv []device.Info, op device.Op) (Plan, error) {
+	var music []device.Info
+	for _, d := range inv {
+		if d.Kind == "music" {
+			music = append(music, d)
+		}
+	}
+	if len(music) == 0 {
+		return Plan{Speak: "No music player is configured.", Source: "rules"}, nil
+	}
+	if len(music) > 1 {
+		ids := make([]string, 0, len(music))
+		for _, d := range music {
+			ids = append(ids, d.ID)
+		}
+		return Plan{Speak: fmt.Sprintf("Which music player: %s?", strings.Join(ids, ", ")), Source: "rules"}, nil
+	}
+	p, err := actionPlan(music[0], op, nil)
+	if err != nil {
+		return Plan{}, err
+	}
+	p.Speak = map[device.Op]string{
+		device.OpPlay:     "Playing some music.",
+		device.OpPause:    "Pausing the music.",
+		device.OpResume:   "Resuming the music.",
+		device.OpNext:     "Skipping.",
+		device.OpPrevious: "Going back.",
+	}[op]
+	return p, nil
 }
 
 func actionPlan(d device.Info, op device.Op, args map[string]any) (Plan, error) {

@@ -30,6 +30,11 @@ const (
 	OpVolumeDown Op = "volume_down"
 	OpMute       Op = "mute"
 	OpInput      Op = "input" // args: source
+	OpPlay       Op = "play"  // args: optional query and type (track, album, artist, playlist)
+	OpResume     Op = "resume"
+	OpPause      Op = "pause"
+	OpNext       Op = "next"
+	OpPrevious   Op = "previous"
 )
 
 // Command is a single instruction for one device.

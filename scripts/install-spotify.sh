@@ -12,11 +12,16 @@ set -eu
 alsa_conf=/etc/voice/spotify-alsa.conf
 account=spotify-player
 state=/var/lib/spotify-player
+voice_account=voice-agent
 
 cd "$(dirname "$0")/.."
 
 if ! command -v setfacl > /dev/null; then
   echo "setfacl is required (package acl): the udev rule uses it to grant the client access to the Pebble only" >&2
+  exit 1
+fi
+if ! command -v jq > /dev/null; then
+  echo "jq is required to add Spotify to the Voice device inventory" >&2
   exit 1
 fi
 
@@ -126,6 +131,28 @@ if ! command -v spotify_player > /dev/null; then
 fi
 
 sudo systemctl daemon-reload
+
+# Expose the daemon as a validated Voice device. Build the candidate beside the
+# live file and ask the installed binary to load it before replacing anything:
+# an older Voice binary rejects the new field, and must not be allowed to turn a
+# working device into a restart loop.
+if [ -f /etc/voice/config.json ]; then
+  jq '.spotify //= {
+    "id": "spotify",
+    "device": "spotify-player",
+    "command": ["/usr/local/bin/spotify_player"]
+  }' /etc/voice/config.json > "$proof/voice-config.json"
+  if ! /usr/local/bin/voice --config "$proof/voice-config.json" config > /dev/null; then
+    echo "The installed Voice binary does not support Spotify controls." >&2
+    echo "Install the current Voice build first, then re-run this script." >&2
+    exit 1
+  fi
+  sudo install -o root -g "$voice_account" -m 0640 "$proof/voice-config.json" /etc/voice/config.json
+  sudo setfacl -m "u:$(id -un):r" /etc/voice/config.json
+  if systemctl is-active --quiet voice.service; then
+    sudo systemctl restart voice.service
+  fi
+fi
 echo
 echo "Installed. The client is pinned to the Pebble by name and cannot open the microphone."
 echo

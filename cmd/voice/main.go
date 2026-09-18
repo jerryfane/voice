@@ -235,6 +235,8 @@ func run(args []string) error {
 		return commandDevice(ctx, a, "light", args[1:])
 	case "tv":
 		return commandDevice(ctx, a, "tv", args[1:])
+	case "music":
+		return commandDevice(ctx, a, "music", args[1:])
 	case "config":
 		b, err := json.MarshalIndent(cfg, "", "  ")
 		if err != nil {
@@ -263,11 +265,13 @@ Usage: voice [--config PATH] COMMAND
   wake TRANSCRIPT           report whether those words would wake Voice
   light ID OP [VALUE]       control a Magic Home light
   tv ID OP                  control an HDMI-CEC TV
+  music ID OP [TYPE QUERY]  control a configured music player
   config                    print effective config
   version                   print version
 
 Light ops: on, off, toggle, color NAME, white 0-100, brightness 0-100
 TV ops: on, off, volume-up, volume-down, mute
+Music ops: play [track|album|artist|playlist QUERY], resume, pause, next, previous
 `)
 	return nil
 }
@@ -502,6 +506,22 @@ func commandDevice(ctx context.Context, a *session.Assistant, kind string, args 
 			return e
 		}
 		cmd.Args = map[string]any{"level": n}
+	}
+	if kind == "music" && cmd.Op == device.OpPlay && len(args) > 2 {
+		mediaType := "track"
+		queryAt := 2
+		switch args[2] {
+		case "track", "album", "artist", "playlist":
+			mediaType = args[2]
+			queryAt = 3
+		}
+		if queryAt >= len(args) {
+			return fmt.Errorf("%s requires a query", mediaType)
+		}
+		cmd.Args = map[string]any{
+			"query": strings.Join(args[queryAt:], " "),
+			"type":  mediaType,
+		}
 	}
 	if !device.Supports(d, cmd.Op) {
 		return fmt.Errorf("%s does not support %s", d.ID(), cmd.Op)

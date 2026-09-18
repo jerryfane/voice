@@ -11,5 +11,8 @@ func Build(cfg config.Config) *Registry {
 	for _, t := range cfg.TVs {
 		r.Add(NewCEC(t.ID, t.Adapter, t.LogicalAddress))
 	}
+	if cfg.Spotify != nil {
+		r.Add(NewSpotify(cfg.Spotify.ID, cfg.Spotify.Device, cfg.Spotify.Command))
+	}
 	return r
 }
