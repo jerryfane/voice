@@ -113,6 +113,35 @@ function runVoiceCommand(args: string, context: CommandContext): void {
   context.ui.notify("Spoken.", "info");
 }
 
+function runVoicePlan(output: string, context: CommandContext): void {
+  let plan = output;
+  try {
+    const parsed: unknown = JSON.parse(output);
+    if (!record(parsed)) throw new Error("plan is not an object");
+    plan = JSON.stringify(parsed);
+  } catch {
+    plan = JSON.stringify({ speak: output, actions: [] });
+  }
+  const result = spawnSync(
+    "/usr/local/bin/voice",
+    ["--config", "/etc/voice/config.json", "execute", plan],
+    {
+      encoding: "utf8",
+      timeout: 120_000,
+      env: { ...process.env, HOME: "/home/voice-agent" },
+    },
+  );
+  if (result.error || result.status !== 0) {
+    let detail = result.error?.message ?? "";
+    if (!detail && typeof result.stderr === "string") {
+      detail = result.stderr.trim();
+    }
+    context.ui.notify(detail || "Voice plan failed", "error");
+    return;
+  }
+  context.ui.notify("Voice plan completed.", "info");
+}
+
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("voice", {
@@ -186,20 +215,7 @@ export default function (pi: ExtensionAPI) {
       } else if (!output) {
         commandContext.ui.notify("Voice agent returned no answer.", "error");
       } else {
-        let spoken = output;
-        try {
-          const response: unknown = JSON.parse(output);
-          if (record(response) && typeof response.speak === "string") {
-            spoken = response.speak;
-          }
-        } catch {
-          // A plain-text agent answer is already suitable for speech.
-        }
-        if (spoken.trim()) {
-          runVoiceCommand(`say ${spoken}`, commandContext);
-        } else {
-          commandContext.ui.notify("Voice agent returned no spoken answer.", "warning");
-        }
+        runVoicePlan(output, commandContext);
       }
     }
     report("idle");

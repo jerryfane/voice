@@ -62,24 +62,33 @@ func (a *Assistant) HandleText(ctx context.Context, text string) (brain.Plan, er
 	if err != nil {
 		return p, err
 	}
+	if err := a.ApplyActions(ctx, p.Actions); err != nil {
+		return p, err
+	}
 	if p.Source == "rules" {
 		a.logf("stage=route state=local source=rules ms=%.3f", sinceMS(started))
 	}
-	for _, act := range p.Actions {
+	return p, nil
+}
+
+// ApplyActions validates and executes an already-produced structured plan.
+// It is the common boundary for microphone, CLI and OMP-extension requests.
+func (a *Assistant) ApplyActions(ctx context.Context, actions []brain.Action) error {
+	for _, act := range actions {
 		dev, err := a.Devices.Get(act.Device)
 		if err != nil {
-			return p, err
+			return err
 		}
 		if !device.Supports(dev, act.Op) {
-			return p, fmt.Errorf("%s does not support %s", dev.ID(), act.Op)
+			return fmt.Errorf("%s does not support %s", dev.ID(), act.Op)
 		}
 		state, err := dev.Apply(ctx, device.Command{Op: act.Op, Args: act.Args})
 		if err != nil {
-			return p, fmt.Errorf("%s %s: %w", act.Device, act.Op, err)
+			return fmt.Errorf("%s %s: %w", act.Device, act.Op, err)
 		}
 		a.logf("action device=%s op=%s state=%v", act.Device, act.Op, state)
 	}
-	return p, nil
+	return nil
 }
 
 const speechLeadIn = 250 * time.Millisecond

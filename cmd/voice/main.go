@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/jerryfane/voice/internal/brain"
 	"github.com/jerryfane/voice/internal/config"
 	"github.com/jerryfane/voice/internal/device"
 	"github.com/jerryfane/voice/internal/proc"
@@ -232,6 +233,22 @@ func run(args []string) error {
 			return a.Speak(ctx, p.Speak)
 		}
 		return nil
+	case "execute":
+		if len(args) != 2 {
+			return errors.New("usage: voice execute PLAN_JSON")
+		}
+		var p brain.Plan
+		if err := json.Unmarshal([]byte(args[1]), &p); err != nil {
+			return fmt.Errorf("decode plan: %w", err)
+		}
+		if err := a.ApplyActions(ctx, p.Actions); err != nil {
+			return err
+		}
+		if p.Speak == "" {
+			return nil
+		}
+		stdout.println(p.Speak)
+		return a.Speak(ctx, p.Speak)
 	case "light":
 		return commandDevice(ctx, a, "light", args[1:])
 	case "tv":
@@ -262,6 +279,7 @@ Usage: voice [--config PATH] COMMAND
   listen                    run the wake-word voice loop
   ask TEXT                  process one text command through the same brain
   say TEXT                  synthesize and play speech
+  execute PLAN_JSON         execute structured actions and spoken response
   devices                   list configured devices and live state
   wake TRANSCRIPT           report whether those words would wake Voice
   light ID OP [VALUE]       control a Magic Home light
