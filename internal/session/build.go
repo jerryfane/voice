@@ -104,7 +104,7 @@ func Build(c config.Config) *Assistant {
 	// a config assembled in code rather than loaded from disk.
 	sound, err := audio.Earcon(c.Feedback.Sound, f, c.Feedback.Volume)
 	if audio.IsSoundFile(c.Feedback.Sound) {
-		sound, err = audio.SoundFromFile(c.Feedback.Sound, f, c.Feedback.Volume)
+		sound, err = audio.SoundFromFile(c.Feedback.Sound, f, c.Feedback.Volume, audio.AcknowledgementSound)
 	}
 	if err != nil {
 		logger.Printf("wake sound: %v", err)
@@ -116,7 +116,7 @@ func Build(c config.Config) *Assistant {
 	// renders a built-in.
 	working, err := audio.Thinking(c.Feedback.Thinking, f, c.Feedback.ResolvedThinkingVolume())
 	if audio.IsSoundFile(c.Feedback.Thinking) {
-		working, err = audio.SoundFromFile(c.Feedback.Thinking, f, c.Feedback.ResolvedThinkingVolume())
+		working, err = audio.SoundFromFile(c.Feedback.Thinking, f, c.Feedback.ResolvedThinkingVolume(), audio.ThinkingSound)
 	}
 	if err != nil {
 		logger.Printf("thinking sound: %v", err)

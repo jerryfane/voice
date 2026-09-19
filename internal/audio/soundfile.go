@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // maxSoundFile bounds a custom acknowledgement sound. This is a blip played
@@ -231,9 +232,32 @@ func TrimTrailingSilence(pcm []int16) []int16 {
 	return pcm[:end]
 }
 
-// SoundFromFile loads a custom acknowledgement sound, conformed to f and
-// scaled by volume.
-func SoundFromFile(path string, f Format, volume float64) ([]int16, error) {
+// SoundOptions describes how a loaded sound will be used, because the two
+// settings that accept a file want opposite treatment of trailing silence.
+type SoundOptions struct {
+	// Setting names the config field, so a failure points at the thing the
+	// operator has to change rather than at whichever loader was reused.
+	Setting string
+	// KeepTrailingSilence preserves padding at the end of the file.
+	//
+	// For the acknowledgement, padding is dead time while the microphone is
+	// already listening, so it goes. For the THINKING sound the file is
+	// looped, the silence after the pulse IS the gap between pulses, and
+	// trimming it turns a once-per-second tick into a continuous rattle -
+	// while the documentation tells the user to put that silence there.
+	KeepTrailingSilence bool
+	// MinDuration rejects a sound too short to be used the way this setting
+	// plays it. A 20 ms looped file restarts the player forty times a
+	// second.
+	MinDuration time.Duration
+}
+
+// SoundFromFile loads a custom sound, conformed to f and scaled by volume.
+func SoundFromFile(path string, f Format, volume float64, opt SoundOptions) ([]int16, error) {
+	setting := opt.Setting
+	if setting == "" {
+		setting = "sound"
+	}
 	// Opened ONCE and inspected through that descriptor. Stat-then-ReadFile
 	// checked one file and read another: review showed a FIFO reporting size
 	// zero and hanging startup until the process was killed, and a path
@@ -243,28 +267,28 @@ func SoundFromFile(path string, f Format, volume float64) ([]int16, error) {
 	// the flag, a pipe opens immediately and is then refused below.
 	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, fmt.Errorf("wake sound: %w", err)
+		return nil, fmt.Errorf("%s: %w", setting, err)
 	}
 	info, statErr := file.Stat()
 	if statErr != nil {
-		return nil, errors.Join(fmt.Errorf("wake sound: %w", statErr), file.Close())
+		return nil, errors.Join(fmt.Errorf("%s: %w", setting, statErr), file.Close())
 	}
 	if !info.Mode().IsRegular() {
 		return nil, errors.Join(
-			fmt.Errorf("wake sound %s is not a regular file (%s); a pipe or device can never finish loading", path, info.Mode().Type()),
+			fmt.Errorf("%s %s is not a regular file (%s); a pipe or device can never finish loading", setting, path, info.Mode().Type()),
 			file.Close())
 	}
 	raw, readErr := io.ReadAll(io.LimitReader(file, maxSoundFile+1))
 	closeErr := file.Close()
 	if readErr != nil || closeErr != nil {
-		return nil, errors.Join(fmt.Errorf("wake sound %s", path), readErr, closeErr)
+		return nil, errors.Join(fmt.Errorf("%s %s", setting, path), readErr, closeErr)
 	}
 	if len(raw) > maxSoundFile {
-		return nil, fmt.Errorf("wake sound %s exceeds %d bytes; an acknowledgement sound is a blip, not a track", path, maxSoundFile)
+		return nil, fmt.Errorf("%s %s exceeds %d bytes", setting, path, maxSoundFile)
 	}
 	pcm, from, err := DecodeWAV(raw)
 	if err != nil {
-		return nil, fmt.Errorf("wake sound %s: %w", path, err)
+		return nil, fmt.Errorf("%s %s: %w", setting, path, err)
 	}
 	// Checked BEFORE conforming, and reported rather than silently clamped:
 	// a sound quietly cut to ten seconds is still wrong, and the caller
@@ -275,12 +299,25 @@ func SoundFromFile(path string, f Format, volume float64) ([]int16, error) {
 	if f.SampleRate > 0 && from.SampleRate > 0 {
 		out := frames * int64(f.SampleRate) / int64(from.SampleRate)
 		if out > int64(maxSoundSamples) || out > int64(f.SampleRate)*int64(maxSoundSeconds) {
-			return nil, fmt.Errorf("wake sound %s is longer than %d seconds once converted; an acknowledgement sound is a blip", path, maxSoundSeconds)
+			return nil, fmt.Errorf("%s %s is longer than %d seconds once converted", setting, path, maxSoundSeconds)
 		}
 	}
-	pcm = TrimTrailingSilence(Conform(pcm, from, f))
+	pcm = Conform(pcm, from, f)
+	if !opt.KeepTrailingSilence {
+		pcm = TrimTrailingSilence(pcm)
+	} else if len(TrimTrailingSilence(pcm)) == 0 {
+		// Keeping the padding is right, but a file that is ONLY padding is
+		// not a sound.
+		return nil, fmt.Errorf("%s %s contains no audible audio", setting, path)
+	}
 	if len(pcm) == 0 {
-		return nil, fmt.Errorf("wake sound %s contains no audible audio", path)
+		return nil, fmt.Errorf("%s %s contains no audible audio", setting, path)
+	}
+	if opt.MinDuration > 0 && f.SampleRate > 0 {
+		if got := time.Duration(len(pcm)) * time.Second / time.Duration(f.SampleRate); got < opt.MinDuration {
+			return nil, fmt.Errorf("%s %s is %v once converted; it must be at least %v, or looping it restarts the player continuously",
+				setting, path, got.Round(time.Millisecond), opt.MinDuration)
+		}
 	}
 	volume = math.Max(0, math.Min(1, volume))
 	if volume == 0 {
@@ -293,3 +330,20 @@ func SoundFromFile(path string, f Format, volume float64) ([]int16, error) {
 	}
 	return pcm, nil
 }
+
+// The two settings that accept a file, and how each one needs it treated.
+var (
+	// AcknowledgementSound plays once when a wake phrase is accepted.
+	// Trailing silence is dead time while the microphone is already
+	// listening, so it is removed.
+	AcknowledgementSound = SoundOptions{Setting: "feedback.sound"}
+
+	// ThinkingSound is LOOPED while an answer is slow. The silence after the
+	// pulse is the gap between pulses, so it is kept, and a file too short
+	// to loop calmly is refused rather than turned into a rattle.
+	ThinkingSound = SoundOptions{
+		Setting:             "feedback.thinking",
+		KeepTrailingSilence: true,
+		MinDuration:         250 * time.Millisecond,
+	}
+)

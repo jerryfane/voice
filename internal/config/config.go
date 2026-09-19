@@ -742,7 +742,7 @@ func (c Config) Validate() error {
 	// missing or unreadable file is reported at startup rather than
 	// discovered as silence the first time someone speaks to the device.
 	if audio.IsSoundFile(c.Feedback.Sound) {
-		if _, err := audio.SoundFromFile(c.Feedback.Sound, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.Volume); err != nil {
+		if _, err := audio.SoundFromFile(c.Feedback.Sound, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.Volume, audio.AcknowledgementSound); err != nil {
 			return err
 		}
 	} else if _, err := audio.Earcon(c.Feedback.Sound, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.Volume); err != nil {
@@ -758,7 +758,7 @@ func (c Config) Validate() error {
 	// reported at startup rather than as silence during the one moment the
 	// user is waiting and listening for reassurance.
 	if audio.IsSoundFile(c.Feedback.Thinking) {
-		if _, err := audio.SoundFromFile(c.Feedback.Thinking, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.ResolvedThinkingVolume()); err != nil {
+		if _, err := audio.SoundFromFile(c.Feedback.Thinking, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.ResolvedThinkingVolume(), audio.ThinkingSound); err != nil {
 			return err
 		}
 	} else if _, err := audio.Thinking(c.Feedback.Thinking, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.ResolvedThinkingVolume()); err != nil {

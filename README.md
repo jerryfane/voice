@@ -310,8 +310,15 @@ required for playback through this client.
 
 `feedback.thinking` takes a file the same way, for the sound played while an
 answer is slow. That one LOOPS until the answer arrives, so the silence after
-the sound belongs inside the file - and a long file delays the spoken reply,
-which waits for the current cycle to finish.
+the sound belongs inside the file and is **kept** - it is the gap between
+pulses, and trimming it would turn a tick into a rattle. A file shorter than
+250 ms once converted is refused, because looping it restarts the player
+continuously.
+
+The reply does not wait for the cycle to finish: the loop is cancelled and
+the playback process killed when the answer arrives, so a long file is cut
+off rather than delaying speech. Device buffering can still leave a moment of
+audible tail.
 
 Both are loaded and checked when the config loads, so a missing or
 undecodable file is reported at startup rather than discovered as silence the
