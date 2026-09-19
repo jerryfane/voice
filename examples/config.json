@@ -46,6 +46,7 @@
       "keywords_score": 4,
       "keywords_threshold": 0.05
     },
+    "follow_up_timeout": "6s",
     "vad": {
       "threshold": 0,
       "min_speech": "250ms",
@@ -57,7 +58,7 @@
   "feedback": {
     "light": "auto",
     "sound": "chime",
-    "volume": 0.35
+    "volume": 0.65
   },
   "timers": {
     "enabled": true

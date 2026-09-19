@@ -120,8 +120,15 @@ Voice runs a small streaming keyword model over microphone frames and starts a
 bounded command capture only after a configured wake phrase is detected. It
 does not run Whisper over ambient segments. With OpenRouter configured, the
 accepted command is transcribed by the hosted primary; resident Whisper and
-`whisper-cli` remain ordered local fallbacks. A standalone wake phrase is
-handled locally and does not call the agent.
+`whisper-cli` remain ordered local fallbacks.
+
+Both interaction styles work:
+
+- Say `Hey Voice`, wait for the acknowledgement, then speak one command. Voice
+  waits up to `wake.follow_up_timeout` (6 seconds by default), accepts one
+  utterance, and rearms. A timeout stays local and does not call the agent.
+- Say `Hey Voice, what's the time?` continuously. Voice retains the original
+  inline command behavior instead of playing over the command.
 
 Say `Hey Voice, turn off` to stop the listener without an LLM call; run
 `voice on` to start it again.
@@ -132,18 +139,21 @@ Speech engines and models are external. `scripts/setup-speech.sh` installs the S
 
 ## Activation feedback
 
-When the exact wake phrase is accepted, Voice acknowledges it locally before
-the request reaches the agent: a speakerphone LED switches to a listening
-state, and a short generated tone plays once. Both are emitted by the session
-layer, so they cost no model call and work with no network. Ambient noise, an
-embedded mention, or an approximate phrase produce neither. The light returns
-to idle on success, failure, timeout, cancellation, and shutdown.
+When a standalone wake phrase is accepted, Voice immediately switches the
+speakerphone LED to a listening state and starts a short generated tone. The
+PowerConf receives a silent lead-in so its output path wakes before the tone;
+the captured lead-in and tone are discarded rather than transcribed as the
+follow-up command. Inline wake commands play the acknowledgement only after the
+whole utterance is captured, so the sound cannot mask the command. All feedback
+is local, costs no model call, and works with no network. Ambient noise, an
+embedded mention, or an approximate phrase produce none. The light returns to
+idle on success, failure, timeout, cancellation, and shutdown.
 
 ```json
 "feedback": {
   "light": "auto",
   "sound": "chime",
-  "volume": 0.35
+  "volume": 0.65
 }
 ```
 

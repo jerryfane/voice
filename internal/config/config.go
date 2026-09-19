@@ -156,6 +156,9 @@ type Wake struct {
 	// streaming audio; "stt" keeps the slower whole-utterance Whisper gate.
 	Detector string      `json:"detector"`
 	Sherpa   *SherpaWake `json:"sherpa,omitempty"`
+	// FollowUpTimeout is how long a standalone wake keeps one unwaked command
+	// slot open after its acknowledgement sound finishes.
+	FollowUpTimeout Duration `json:"follow_up_timeout"`
 	// VAD tunes speech segmentation.
 	VAD VAD `json:"vad"`
 }
@@ -372,6 +375,7 @@ func Default() Config {
 				KeywordsScore:     4,
 				KeywordsThreshold: 0.05,
 			},
+			FollowUpTimeout: Duration(6 * time.Second),
 			VAD: VAD{
 				Threshold:    0,
 				MinSpeech:    Duration(250 * time.Millisecond),
@@ -384,7 +388,7 @@ func Default() Config {
 			Light:    "auto",
 			Sound:    audio.EarconChime,
 			Thinking: audio.ThinkingTick,
-			Volume:   0.35,
+			Volume:   0.65,
 		},
 		Timers: Timers{Enabled: true},
 		STT: STT{
@@ -654,6 +658,9 @@ func (c Config) Validate() error {
 	}
 	if c.Wake.Fuzz < 0 || c.Wake.Fuzz > 1 {
 		return fmt.Errorf("wake.fuzz must be between 0 and 1, got %v", c.Wake.Fuzz)
+	}
+	if c.Wake.FollowUpTimeout.D() <= 0 {
+		return fmt.Errorf("wake.follow_up_timeout must be positive")
 	}
 	if c.Wake.VAD.Silence.D() <= 0 {
 		return fmt.Errorf("wake.vad.silence must be positive, else an utterance never ends")

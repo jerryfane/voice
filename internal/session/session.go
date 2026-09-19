@@ -91,7 +91,7 @@ func (a *Assistant) ApplyActions(ctx context.Context, actions []brain.Action) er
 	return nil
 }
 
-const speechLeadIn = 250 * time.Millisecond
+const playbackLeadIn = 250 * time.Millisecond
 
 // Speak synthesizes and plays one response.
 func (a *Assistant) Speak(ctx context.Context, text string) error {
@@ -102,7 +102,7 @@ func (a *Assistant) Speak(ctx context.Context, text string) error {
 	if err != nil {
 		return err
 	}
-	wav, err = audio.PrependWAVSilence(wav, speechLeadIn)
+	wav, err = audio.PrependWAVSilence(wav, playbackLeadIn)
 	if err != nil {
 		return fmt.Errorf("pad speech lead-in: %w", err)
 	}
@@ -172,11 +172,17 @@ func (a *Assistant) Run(ctx context.Context) error {
 				text, err := a.STT.Transcribe(ctx, u.PCM, u.Format)
 				if err != nil {
 					a.logf("stage=transcribe state=failed err=%v", err)
+					if u.WakeAcknowledged {
+						a.Feedback.Restore()
+					}
 					continue
 				}
 				text = strings.TrimSpace(text)
 				if text == "" {
 					a.logf("stage=transcribe state=empty peak=%.4f", u.Peak)
+					if u.WakeAcknowledged {
+						a.Feedback.Restore()
+					}
 					continue
 				}
 				a.logf("stage=transcribe state=ok heard=%q peak=%.4f", text, u.Peak)
@@ -184,8 +190,8 @@ func (a *Assistant) Run(ctx context.Context) error {
 				if cloudMatched, cloudCommand, _ := wake.Match(text, a.WakePhrases, a.WakeFuzz); cloudMatched {
 					command = cloudCommand
 				}
-				a.logf("stage=wake state=accepted source=streaming keyword=%q command=%q", u.Keyword, command)
-				if stop := a.accepted(ctx, command); stop {
+				a.logf("stage=wake state=accepted source=streaming keyword=%q command=%q follow_up=%v", u.Keyword, command, u.WakeAcknowledged)
+				if stop := a.accepted(ctx, command, !u.WakeAcknowledged); stop {
 					return nil
 				}
 				continue
@@ -206,7 +212,7 @@ func (a *Assistant) Run(ctx context.Context) error {
 				a.logf("stage=wake state=matched source=local-stt ms=%.3f", sinceMS(started))
 				if command == "" {
 					a.logf("stage=wake state=accepted command=%q", command)
-					if stop := a.accepted(ctx, command); stop {
+					if stop := a.accepted(ctx, command, true); stop {
 						return nil
 					}
 					continue
@@ -227,7 +233,7 @@ func (a *Assistant) Run(ctx context.Context) error {
 					command = cloudCommand
 				}
 				a.logf("stage=wake state=accepted command=%q", command)
-				if stop := a.accepted(ctx, command); stop {
+				if stop := a.accepted(ctx, command, true); stop {
 					return nil
 				}
 				continue
@@ -250,7 +256,7 @@ func (a *Assistant) Run(ctx context.Context) error {
 				continue
 			}
 			a.logf("stage=wake state=matched command=%q", command)
-			if stop := a.accepted(ctx, command); stop {
+			if stop := a.accepted(ctx, command, true); stop {
 				return nil
 			}
 		}
@@ -286,9 +292,13 @@ func (a *Assistant) awaitCaptureStop(pcm <-chan []int16) {
 
 // accepted handles one utterance that passed the wake gate. All local feedback
 // happens here and nowhere else, so ambient noise, an embedded mention or an
-// approximate phrase can never produce a light or a sound.
-func (a *Assistant) accepted(ctx context.Context, command string) (stop bool) {
-	a.Feedback.Accepted(ctx)
+// approximate phrase can never produce a light or a sound. acknowledge is
+// false only when the streaming segmenter already played feedback for a
+// standalone wake before collecting this follow-up command.
+func (a *Assistant) accepted(ctx context.Context, command string, acknowledge bool) (stop bool) {
+	if acknowledge {
+		a.Feedback.Accepted(ctx)
+	}
 	defer a.Feedback.Restore()
 	if command == "" {
 		a.speakLogged(ctx, "Please say Hey Voice followed by your request.")

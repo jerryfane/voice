@@ -28,6 +28,10 @@ type Utterance struct {
 	WakeMatched bool
 	// Keyword is the local detector label that opened the command capture.
 	Keyword string
+	// WakeAcknowledged means the keyword segmenter already played feedback for
+	// a standalone wake before capturing this one follow-up command. The
+	// session must not play the acknowledgement twice.
+	WakeAcknowledged bool
 }
 
 // Params tunes the gate. All durations are converted from config.

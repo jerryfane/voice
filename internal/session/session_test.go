@@ -56,6 +56,22 @@ func TestStreamingWakeSegmentReachesPlannerWithoutWakeText(t *testing.T) {
 	}
 }
 
+func TestAcknowledgedFollowUpDoesNotReplayWakeSound(t *testing.T) {
+	planner := &countingPlanner{}
+	a, _, player := feedbackAssistant(t, planner)
+	a.VAD = wakeMatchedSegmenter{acknowledged: true}
+	a.STT = &queuedTranscriber{texts: []string{"what time is it"}}
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if player.pcm != 0 {
+		t.Fatalf("follow-up replayed acknowledgement sound %d times", player.pcm)
+	}
+	if planner.calls != 1 {
+		t.Fatalf("planner called %d times, want 1", planner.calls)
+	}
+}
+
 func TestLocalControlStopsWithoutPlanner(t *testing.T) {
 	reply, stop, handled := localControl("turn yourself off")
 	if !handled || !stop || reply != "Turning off." {
@@ -107,15 +123,16 @@ func (s testSegmenter) Run(context.Context, <-chan []int16, audio.Format) <-chan
 	return out
 }
 
-type wakeMatchedSegmenter struct{}
+type wakeMatchedSegmenter struct{ acknowledged bool }
 
-func (wakeMatchedSegmenter) Run(context.Context, <-chan []int16, audio.Format) <-chan vad.Utterance {
+func (s wakeMatchedSegmenter) Run(context.Context, <-chan []int16, audio.Format) <-chan vad.Utterance {
 	out := make(chan vad.Utterance, 1)
 	out <- vad.Utterance{
-		PCM:         []int16{1, 2, 3},
-		Format:      audio.Default(),
-		WakeMatched: true,
-		Keyword:     "HEY_VOICE",
+		PCM:              []int16{1, 2, 3},
+		Format:           audio.Default(),
+		WakeMatched:      true,
+		WakeAcknowledged: s.acknowledged,
+		Keyword:          "HEY_VOICE",
 	}
 	close(out)
 	return out

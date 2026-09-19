@@ -232,6 +232,21 @@ func wavBuffer(dataLen int, f Format) []byte {
 	return wav
 }
 
+// PrependPCMSilence keeps a playback device open before a short sound begins.
+// USB speakerphones can otherwise wake after an entire earcon has passed.
+func PrependPCMSilence(pcm []int16, f Format, lead time.Duration) []int16 {
+	if len(pcm) == 0 || lead <= 0 || f.SampleRate <= 0 || f.Channels <= 0 {
+		return pcm
+	}
+	silence := int(int64(f.SampleRate) * int64(f.Channels) * int64(lead) / int64(time.Second))
+	if silence <= 0 {
+		return pcm
+	}
+	out := make([]int16, silence+len(pcm))
+	copy(out[silence:], pcm)
+	return out
+}
+
 // PrependWAVSilence keeps a playback device open before speech begins. USB
 // speakerphones can discard their first audio frames while waking, which
 // otherwise clips the first phoneme even though playback exits successfully.

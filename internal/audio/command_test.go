@@ -3,6 +3,7 @@ package audio
 import (
 	"bytes"
 	"encoding/binary"
+	"slices"
 	"testing"
 	"time"
 )
@@ -29,5 +30,23 @@ func TestPrependWAVSilencePreservesHeaderAndSpeech(t *testing.T) {
 	}
 	if speech := got[44+silenceBytes:]; !bytes.Equal(speech, original[44:]) {
 		t.Fatal("padding changed the synthesized speech payload")
+	}
+}
+
+func TestPrependPCMSilencePreservesEarcon(t *testing.T) {
+	original := []int16{1, -2, 300, -400}
+	got := PrependPCMSilence(original, Format{SampleRate: 16000, Channels: 1}, 250*time.Millisecond)
+
+	const silenceSamples = 16000 / 4
+	if want := len(original) + silenceSamples; len(got) != want {
+		t.Fatalf("padded length = %d, want %d", len(got), want)
+	}
+	for i, sample := range got[:silenceSamples] {
+		if sample != 0 {
+			t.Fatalf("lead-in sample %d = %d, want silence", i, sample)
+		}
+	}
+	if !slices.Equal(got[silenceSamples:], original) {
+		t.Fatalf("earcon = %v, want %v", got[silenceSamples:], original)
 	}
 }

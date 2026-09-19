@@ -95,6 +95,24 @@ func Build(c config.Config) *Assistant {
 		}
 		return n
 	}
+	light, why := feedback.NewLight(tel, c.Feedback.Light)
+	if _, off := light.(feedback.Nop); off && c.Feedback.Light != feedback.LightNone {
+		logger.Printf("wake light: %s", why)
+	}
+	sound, err := audio.Earcon(c.Feedback.Sound, f, c.Feedback.Volume)
+	if err != nil {
+		// Validate rejects unknown names, so this only happens for a config
+		// built in code.
+		logger.Printf("wake sound: %v", err)
+	}
+	sound = audio.PrependPCMSilence(sound, f, playbackLeadIn)
+	// The thinking sound is rendered at startup like the acknowledgement, so
+	// a config typo is reported once here rather than discovered mid-answer.
+	working, err := audio.Thinking(c.Feedback.Thinking, f, c.Feedback.ResolvedThinkingVolume())
+	if err != nil {
+		logger.Printf("thinking sound: %v", err)
+	}
+	fb := &feedback.Notifier{Indicator: light, Player: player, Sound: sound, Working: working, Format: f, Logger: logger}
 	params := vad.Params{Threshold: c.Wake.VAD.Threshold, MinSpeech: frames(c.Wake.VAD.MinSpeech), Silence: frames(c.Wake.VAD.Silence), MaxUtterance: frames(c.Wake.VAD.MaxUtterance), PreRoll: frames(c.Wake.VAD.PreRoll), FrameSize: frame}
 	var seg vad.Segmenter = vad.NewEnergy(params)
 	if c.Wake.Detector == "sherpa" && c.Wake.Sherpa != nil {
@@ -110,7 +128,9 @@ func Build(c config.Config) *Assistant {
 			KeywordsScore:     float32(s.KeywordsScore),
 			KeywordsThreshold: float32(s.KeywordsThreshold),
 		})
-		seg = vad.NewKeyword(params, detector, logger)
+		keyword := vad.NewKeyword(params, detector, logger)
+		keyword.SetFollowUp(frames(c.Wake.FollowUpTimeout), fb.Accepted, fb.Restore)
+		seg = keyword
 	}
 	var timers *timer.Scheduler
 	var missed []timer.Timer
@@ -137,22 +157,5 @@ func Build(c config.Config) *Assistant {
 			}
 		}
 	}
-	light, why := feedback.NewLight(tel, c.Feedback.Light)
-	if _, off := light.(feedback.Nop); off && c.Feedback.Light != feedback.LightNone {
-		logger.Printf("wake light: %s", why)
-	}
-	sound, err := audio.Earcon(c.Feedback.Sound, f, c.Feedback.Volume)
-	if err != nil {
-		// Validate rejects unknown names, so this only happens for a config
-		// built in code.
-		logger.Printf("wake sound: %v", err)
-	}
-	// The thinking sound is rendered at startup like the acknowledgement, so
-	// a config typo is reported once here rather than discovered mid-answer.
-	working, err := audio.Thinking(c.Feedback.Thinking, f, c.Feedback.ResolvedThinkingVolume())
-	if err != nil {
-		logger.Printf("thinking sound: %v", err)
-	}
-	fb := &feedback.Notifier{Indicator: light, Player: player, Sound: sound, Working: working, Format: f, Logger: logger}
 	return &Assistant{Recorder: rec, Player: player, VAD: seg, WakeSTT: wakeSTT, STT: stt, TTS: tts, Brain: planner, Devices: device.Build(c), Feedback: fb, Timers: timers, Missed: missed, WakePhrases: c.Wake.Phrases, WakeFuzz: c.Wake.Fuzz, Logger: logger}
 }

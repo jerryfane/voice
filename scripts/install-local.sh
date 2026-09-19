@@ -126,7 +126,7 @@ fi
 # when the value it writes is the documented default.
 wake_filter='.'
 if [ "$fresh_config" = 1 ]; then
-  wake_filter='.wake.phrases = ["hey voice", "hey boys"] | .wake.fuzz = 0.2 | del(.wake.follow_up)'
+  wake_filter='.wake.phrases = ["hey voice", "hey boys"] | .wake.fuzz = 0.2'
 else
   printf 'keeping existing wake phrases: %s\n' "$(sudo jq -c '.wake.phrases' /etc/voice/config.json)"
 fi
@@ -141,6 +141,9 @@ fi
 config_filter="$wake_filter |
   .wake.detector = \"sherpa\" |
   .wake.sherpa = {\"encoder\":\"/var/lib/voice/models/sherpa-kws/encoder.int8.onnx\",\"decoder\":\"/var/lib/voice/models/sherpa-kws/decoder.onnx\",\"joiner\":\"/var/lib/voice/models/sherpa-kws/joiner.int8.onnx\",\"tokens\":\"/var/lib/voice/models/sherpa-kws/tokens.txt\",\"keywords\":\"/var/lib/voice/models/sherpa-kws/keywords.txt\",\"num_threads\":1,\"max_active_paths\":4,\"keywords_score\":4,\"keywords_threshold\":0.05} |
+  del(.wake.follow_up) |
+  .wake.follow_up_timeout //= \"6s\" |
+  .feedback.volume = (if .feedback.volume == null or .feedback.volume == 0.35 then 0.65 else .feedback.volume end) |
   .wake.vad.max_utterance = \"6s\" |
   .wake.vad.pre_roll = \"1.5s\" |
   .stt.model = \"/var/lib/voice/models/ggml-base.en.bin\" |

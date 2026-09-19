@@ -3,9 +3,9 @@ package vad
 import (
 	"context"
 	"errors"
-	"testing"
-
 	"github.com/jerryfane/voice/internal/audio"
+	"testing"
+	"time"
 )
 
 type fakeKeywordDetector struct {
@@ -124,6 +124,153 @@ func TestKeywordSegmenterFailsClosedOnDetectorError(t *testing.T) {
 	close(in)
 	if _, ok := <-segmenter.Run(context.Background(), in, audio.Format{SampleRate: 16000, Channels: 1}); ok {
 		t.Fatal("detector error emitted audio")
+	}
+}
+
+func TestStandaloneWakeAcknowledgesThenCapturesOneFollowUp(t *testing.T) {
+	detector := &fakeKeywordDetector{matchAt: 1}
+	segmenter := NewKeyword(Params{Threshold: .01, FrameSize: 4, PreRoll: 2, MinSpeech: 1, Silence: 2, MaxUtterance: 10}, detector, nil)
+	in := make(chan []int16, 8)
+	acknowledged := make(chan struct{})
+	var acknowledgements, restores int
+	segmenter.SetFollowUp(20, func(context.Context) {
+		acknowledgements++
+		in <- sampleFrame(3000, 4) // speaker feedback buffered during playback
+		close(acknowledged)
+	}, func() { restores++ })
+	if err := segmenter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer segmenter.Close() // discard: Close has no result and only releases fake detector state.
+
+	out := segmenter.Run(context.Background(), in, audio.Format{SampleRate: 40, Channels: 1})
+	in <- sampleFrame(2000, 4) // wake match
+	in <- sampleFrame(0, 4)    // standalone-wake probe
+	<-acknowledged
+	waitDrained(t, in)
+	in <- sampleFrame(3000, 4) // hardware feedback tail: must be discarded
+	in <- sampleFrame(2000, 4) // follow-up command
+	in <- sampleFrame(0, 4)
+	in <- sampleFrame(0, 4)
+	close(in)
+
+	u, ok := <-out
+	if !ok {
+		t.Fatal("follow-up command was not emitted")
+	}
+	if !u.WakeMatched || !u.WakeAcknowledged || u.Keyword != "HEY_VOICE" {
+		t.Fatalf("follow-up metadata = %+v", u)
+	}
+	for _, sample := range u.PCM {
+		if sample == 3000 {
+			t.Fatal("acknowledgement audio leaked into the follow-up command")
+		}
+	}
+	if acknowledgements != 1 || restores != 0 {
+		t.Fatalf("acknowledgements=%d restores=%d before session handling", acknowledgements, restores)
+	}
+	if _, ok := <-out; ok {
+		t.Fatal("one standalone wake emitted more than one command")
+	}
+}
+
+func TestStandaloneWakeTimesOutWithoutEmittingAmbientAudio(t *testing.T) {
+	detector := &fakeKeywordDetector{matchAt: 1}
+	segmenter := NewKeyword(Params{Threshold: .01, FrameSize: 4, PreRoll: 2, MinSpeech: 1, Silence: 2, MaxUtterance: 10}, detector, nil)
+	in := make(chan []int16, 8)
+	acknowledged := make(chan struct{})
+	var restores int
+	segmenter.SetFollowUp(3, func(context.Context) {
+		in <- sampleFrame(3000, 4)
+		close(acknowledged)
+	}, func() { restores++ })
+	if err := segmenter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer segmenter.Close() // discard: Close has no result and only releases fake detector state.
+
+	out := segmenter.Run(context.Background(), in, audio.Format{SampleRate: 40, Channels: 1})
+	in <- sampleFrame(2000, 4)
+	in <- sampleFrame(0, 4)
+	<-acknowledged
+	waitDrained(t, in)
+	in <- sampleFrame(3000, 4) // feedback tail
+	for range 3 {
+		in <- sampleFrame(0, 4)
+	}
+	close(in)
+
+	if _, ok := <-out; ok {
+		t.Fatal("follow-up timeout emitted ambient audio")
+	}
+	if restores != 1 {
+		t.Fatalf("indicator restores = %d, want 1", restores)
+	}
+}
+
+func TestStandaloneWakeCancellationRestoresIdleState(t *testing.T) {
+	detector := &fakeKeywordDetector{matchAt: 1}
+	segmenter := NewKeyword(Params{Threshold: .01, FrameSize: 4, PreRoll: 1, MinSpeech: 1, Silence: 2, MaxUtterance: 10}, detector, nil)
+	in := make(chan []int16, 8)
+	acknowledged := make(chan struct{})
+	var restores int
+	segmenter.SetFollowUp(20, func(context.Context) {
+		in <- sampleFrame(3000, 4)
+		close(acknowledged)
+	}, func() { restores++ })
+	if err := segmenter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer segmenter.Close() // discard: Close has no result and only releases fake detector state.
+
+	ctx, cancel := context.WithCancel(context.Background())
+	out := segmenter.Run(ctx, in, audio.Format{SampleRate: 40, Channels: 1})
+	in <- sampleFrame(2000, 4)
+	in <- sampleFrame(0, 4)
+	<-acknowledged
+	waitDrained(t, in)
+	cancel()
+	if _, ok := <-out; ok {
+		t.Fatal("cancelled follow-up emitted audio")
+	}
+	if restores != 1 {
+		t.Fatalf("indicator restores = %d, want 1", restores)
+	}
+}
+
+func TestInlineCommandDoesNotPlayFollowUpAcknowledgement(t *testing.T) {
+	detector := &fakeKeywordDetector{matchAt: 1}
+	segmenter := NewKeyword(Params{Threshold: .01, FrameSize: 4, PreRoll: 1, MinSpeech: 1, Silence: 2, MaxUtterance: 10}, detector, nil)
+	var acknowledgements int
+	segmenter.SetFollowUp(20, func(context.Context) { acknowledgements++ }, func() {})
+	if err := segmenter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer segmenter.Close() // discard: Close has no result and only releases fake detector state.
+
+	in := make(chan []int16, 4)
+	in <- sampleFrame(2000, 4) // wake match
+	in <- sampleFrame(2000, 4) // speech continues: inline command
+	in <- sampleFrame(0, 4)
+	in <- sampleFrame(0, 4)
+	close(in)
+	u := <-segmenter.Run(context.Background(), in, audio.Format{SampleRate: 40, Channels: 1})
+	if acknowledgements != 0 || u.WakeAcknowledged {
+		t.Fatalf("inline command acknowledgements=%d metadata=%+v", acknowledgements, u)
+	}
+	if len(u.PCM) == 0 {
+		t.Fatal("inline command audio was discarded")
+	}
+}
+
+func waitDrained(t *testing.T, ch chan []int16) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for len(ch) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("feedback audio was not drained")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

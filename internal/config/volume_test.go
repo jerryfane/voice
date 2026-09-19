@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/jerryfane/voice/internal/audio"
 )
@@ -89,5 +90,19 @@ func TestAnExplicitZeroMutesTheThinkingSound(t *testing.T) {
 	c.Feedback.ThinkingVolume = &zero
 	if err := c.Validate(); err != nil {
 		t.Errorf("thinking_volume 0 was rejected: %v", err)
+	}
+}
+
+func TestShippedWakeFeedbackIsAudibleAndFollowUpIsBounded(t *testing.T) {
+	c := Default()
+	if c.Feedback.Volume != 0.65 {
+		t.Fatalf("feedback volume = %v, want owner-selected 0.65", c.Feedback.Volume)
+	}
+	if c.Wake.FollowUpTimeout.D() != 6*time.Second {
+		t.Fatalf("follow-up timeout = %s, want 6s", c.Wake.FollowUpTimeout.D())
+	}
+	c.Wake.FollowUpTimeout = 0
+	if err := c.Validate(); err == nil {
+		t.Fatal("zero follow-up timeout was accepted")
 	}
 }
