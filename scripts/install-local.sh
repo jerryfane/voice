@@ -8,9 +8,31 @@ agent_user=voice-agent
 agent_home=/home/voice-agent
 workspace=$agent_home/voice-workspace
 start_service=${VOICE_INSTALL_START:-1}
+# Find the REAL herdr, not the bridge wrapper this script installs under the
+# same name. Once the wrapper exists, `command -v herdr` finds it first, so a
+# genuinely upgraded herdr sitting further along PATH would be invisible and
+# the copy in libexec would stay at whatever version it was - silently stale,
+# which is worse than the copy-onto-itself failure it replaced.
 herdr_bin=$(command -v herdr 2>/dev/null || true)
-if [ "$herdr_bin" = /usr/local/bin/herdr ] && [ -x /usr/local/libexec/voice-herdr-real ]; then
-  herdr_bin=/usr/local/libexec/voice-herdr-real
+if [ "$herdr_bin" = /usr/local/bin/herdr ]; then
+  herdr_bin=""
+  saved_ifs=$IFS
+  IFS=:
+  for dir in $PATH; do
+    candidate="${dir:-.}/herdr"
+    [ -x "$candidate" ] || continue
+    case "$candidate" in
+      /usr/local/bin/herdr | /usr/local/libexec/voice-herdr-real) continue ;;
+    esac
+    herdr_bin=$candidate
+    break
+  done
+  IFS=$saved_ifs
+  # Nothing newer anywhere: keep what is already installed rather than
+  # copying the wrapper over the binary it delegates to.
+  if [ -z "$herdr_bin" ] && [ -x /usr/local/libexec/voice-herdr-real ]; then
+    herdr_bin=/usr/local/libexec/voice-herdr-real
+  fi
 fi
 
 run_as_agent() {
