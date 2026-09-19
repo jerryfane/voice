@@ -1,9 +1,12 @@
 package audio
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func writeWAV(t *testing.T, dir string, pcm []int16, f Format) string {
@@ -163,5 +166,120 @@ func TestIsSoundFileDistinguishesPathsFromNames(t *testing.T) {
 		if !IsSoundFile(path) {
 			t.Errorf("%q not treated as a file", path)
 		}
+	}
+}
+
+// A tiny WAV declaring an absurd sample rate asks Conform to scale the sample
+// count by the rate ratio. Review reproduced a 46-byte file claiming 1 Hz
+// panicking with "makeslice: len out of range" while the service was
+// STARTING - a file the owner could be handed is a way to stop his speaker
+// booting, so this must be an error, not a crash.
+func TestDecodeWAVRefusesAbsurdSampleRates(t *testing.T) {
+	for _, rate := range []int{1, 100, 3999, 192001, 1 << 30} {
+		wav := EncodeWAV([]int16{1, 2, 3, 4}, Format{SampleRate: rate, Channels: 1})
+		if _, _, err := DecodeWAV(wav); err == nil {
+			t.Errorf("sample rate %d was accepted; resampling it would allocate without bound", rate)
+		}
+	}
+	for _, rate := range []int{8000, 16000, 22050, 44100, 48000, 192000} {
+		wav := EncodeWAV([]int16{1, 2, 3, 4}, Format{SampleRate: rate, Channels: 1})
+		if _, _, err := DecodeWAV(wav); err != nil {
+			t.Errorf("ordinary rate %d was rejected: %v", rate, err)
+		}
+	}
+}
+
+// Even within accepted rates the conformed result must be bounded: upsampling
+// a legitimately large file must not try to allocate the machine.
+func TestConformBoundsTheResult(t *testing.T) {
+	from := Format{SampleRate: 4000, Channels: 1}
+	to := Format{SampleRate: 192000, Channels: 1}
+	got := Conform(make([]int16, 4000*60), from, to) // a minute, upsampled 48x
+	if max := to.SampleRate * maxSoundSeconds; len(got) > max {
+		t.Errorf("conformed to %d samples, want at most %d", len(got), max)
+	}
+}
+
+// A FIFO reports size zero and never ends. Stat-then-ReadFile checked one
+// thing and read another; review hung startup this way until the process was
+// killed.
+func TestSoundFromFileRefusesAPipe(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "sound.wav")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Skipf("cannot create a FIFO here: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := SoundFromFile(fifo, Format{SampleRate: 16000, Channels: 1}, 0.65)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a FIFO was accepted as a sound file")
+		}
+		// The REASON matters: with O_NONBLOCK a pipe also fails later as
+		// "not a RIFF file", so a test that accepts any error passes even
+		// when the regular-file check is removed. Assert the check that is
+		// actually protecting startup.
+		if !contains(err.Error(), "not a regular file") {
+			t.Errorf("error %q does not name the pipe; the regular-file guard may be gone", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("SoundFromFile blocked on a FIFO; startup would hang")
+	}
+}
+
+// Damaged audio must be reported, not quietly shortened: a truncated sound
+// that still plays hides the fact that the file is wrong.
+func TestDecodeWAVRejectsIncompleteSamplesAndFrames(t *testing.T) {
+	base := EncodeWAV([]int16{1, 2, 3, 4}, Format{SampleRate: 16000, Channels: 1})
+
+	// A data chunk of three bytes: not a whole number of 16-bit samples.
+	odd := wavWithData(t, Format{SampleRate: 16000, Channels: 1}, []byte{1, 2, 3})
+	if _, _, err := DecodeWAV(odd); err == nil {
+		t.Error("a data chunk with a dangling byte was accepted")
+	}
+	_ = base
+
+	stereo := EncodeWAV([]int16{1, 2, 3}, Format{SampleRate: 16000, Channels: 2})
+	if _, _, err := DecodeWAV(stereo); err == nil {
+		t.Error("three samples in a two-channel file was accepted; that is not a whole number of frames")
+	}
+}
+
+// wavWithData builds a RIFF file with an arbitrary data payload, so a
+// malformed body can be tested without hand-patching offsets in a valid file.
+func wavWithData(t *testing.T, f Format, data []byte) []byte {
+	t.Helper()
+	out := []byte("RIFF")
+	out = binary.LittleEndian.AppendUint32(out, uint32(36+len(data)))
+	out = append(out, "WAVEfmt "...)
+	out = binary.LittleEndian.AppendUint32(out, 16)
+	out = binary.LittleEndian.AppendUint16(out, 1)
+	out = binary.LittleEndian.AppendUint16(out, uint16(f.Channels))
+	out = binary.LittleEndian.AppendUint32(out, uint32(f.SampleRate))
+	out = binary.LittleEndian.AppendUint32(out, uint32(f.SampleRate*f.Channels*2))
+	out = binary.LittleEndian.AppendUint16(out, uint16(f.Channels*2))
+	out = binary.LittleEndian.AppendUint16(out, 16)
+	out = append(out, "data"...)
+	out = binary.LittleEndian.AppendUint32(out, uint32(len(data)))
+	return append(out, data...)
+}
+
+// A deliberately quiet sound must survive. An absolute floor destroyed a
+// valid file peaking at amplitude 32 and then rejected it as inaudible.
+func TestTrimKeepsADeliberatelyQuietSound(t *testing.T) {
+	quiet := []int16{30, -32, 28, -30, 25}
+	got := TrimTrailingSilence(quiet)
+	if len(got) != len(quiet) {
+		t.Errorf("a quiet sound trimmed from %d to %d samples; softness is not silence", len(quiet), len(got))
+	}
+
+	// ...while padding after a quiet sound still goes.
+	padded := append(append([]int16{}, quiet...), make([]int16, 500)...)
+	if got := TrimTrailingSilence(padded); len(got) != len(quiet) {
+		t.Errorf("padding after a quiet sound trimmed to %d samples, want %d", len(got), len(quiet))
 	}
 }

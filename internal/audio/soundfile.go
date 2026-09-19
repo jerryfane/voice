@@ -4,10 +4,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // maxSoundFile bounds a custom acknowledgement sound. This is a blip played
@@ -16,9 +18,24 @@ import (
 const maxSoundFile = 8 << 20
 
 // silenceFloor is the amplitude below which a trailing sample counts as
-// silence when trimming. About -60 dBFS: inaudible next to speech, but well
-// above the dither in a generated file.
+// silence when trimming, unless the sound is quieter than that throughout.
+// About -60 dBFS: inaudible next to speech, but well above the dither in a
+// generated file.
 const silenceFloor = 32
+
+// Sample rates outside this range are not audio anyone meant to play. The
+// bound exists because Conform scales the sample count by the rate ratio: a
+// 46-byte WAV declaring 1 Hz asks for gigabytes at the session rate, which
+// review reproduced as a startup panic - makeslice: len out of range - on the
+// owner's device.
+const (
+	minSampleRate = 4000
+	maxSampleRate = 192000
+)
+
+// maxSoundSeconds bounds the CONFORMED result. The size cap alone cannot: a
+// small file can legitimately decode to an enormous one after resampling.
+const maxSoundSeconds = 10
 
 // IsSoundFile reports whether a feedback.sound value names a FILE rather than
 // one of the built-in generated sounds.
@@ -97,8 +114,14 @@ func DecodeWAV(wav []byte) ([]int16, Format, error) {
 		return nil, Format{}, fmt.Errorf("WAVE is %d-bit; only 16-bit PCM is supported, convert with: ffmpeg -i in -c:a pcm_s16le out.wav", bits)
 	case format.Channels < 1:
 		return nil, Format{}, errors.New("WAVE reports no channels")
-	case format.SampleRate <= 0:
-		return nil, Format{}, errors.New("WAVE reports no sample rate")
+	case format.SampleRate < minSampleRate || format.SampleRate > maxSampleRate:
+		return nil, Format{}, fmt.Errorf("WAVE sample rate %d is outside %d-%d Hz", format.SampleRate, minSampleRate, maxSampleRate)
+	case len(data)%2 != 0:
+		// F3: a dangling byte means the file is damaged or mis-declared.
+		// Dropping it silently would play a truncated sound and hide that.
+		return nil, Format{}, fmt.Errorf("WAVE data chunk is %d bytes, not a whole number of 16-bit samples", len(data))
+	case (len(data)/2)%format.Channels != 0:
+		return nil, Format{}, fmt.Errorf("WAVE data holds %d samples, not a whole number of %d-channel frames", len(data)/2, format.Channels)
 	}
 	pcm := make([]int16, len(data)/2)
 	for i := range pcm {
@@ -135,7 +158,13 @@ func Conform(pcm []int16, from, to Format) []int16 {
 		return pcm
 	}
 	ratio := float64(to.SampleRate) / float64(from.SampleRate)
-	out := make([]int16, int(float64(len(pcm))*ratio))
+	want := float64(len(pcm)) * ratio
+	if limit := float64(to.SampleRate * maxSoundSeconds); want > limit {
+		// Refusing to allocate beats allocating and dying: this runs while
+		// the service is starting on a Raspberry Pi.
+		want = limit
+	}
+	out := make([]int16, int(want))
 	for i := range out {
 		pos := float64(i) / ratio
 		left := int(pos)
@@ -157,10 +186,35 @@ func Conform(pcm []int16, from, to Format) []int16 {
 // the microphone is already listening for the command, so the trailing
 // silence is dead time between the user hearing the sound and being heard.
 func TrimTrailingSilence(pcm []int16) []int16 {
+	// The threshold follows the sound rather than being absolute. A fixed
+	// floor destroys a deliberately quiet blip entirely - review showed a
+	// valid file peaking at amplitude 32 trimmed to nothing and then
+	// rejected as inaudible. Relative to its own peak, a soft sound keeps
+	// its shape and only genuine padding goes.
+	peak := 0
+	for _, v := range pcm {
+		a := int(v)
+		if a < 0 {
+			a = -a
+		}
+		if a > peak {
+			peak = a
+		}
+	}
+	if peak == 0 {
+		return nil
+	}
+	floor := peak / 64
+	if floor > silenceFloor {
+		floor = silenceFloor
+	}
 	end := len(pcm)
 	for end > 0 {
-		v := pcm[end-1]
-		if v > silenceFloor || v < -silenceFloor {
+		v := int(pcm[end-1])
+		if v < 0 {
+			v = -v
+		}
+		if v > floor {
 			break
 		}
 		end--
@@ -171,16 +225,33 @@ func TrimTrailingSilence(pcm []int16) []int16 {
 // SoundFromFile loads a custom acknowledgement sound, conformed to f and
 // scaled by volume.
 func SoundFromFile(path string, f Format, volume float64) ([]int16, error) {
-	info, err := os.Stat(path)
+	// Opened ONCE and inspected through that descriptor. Stat-then-ReadFile
+	// checked one file and read another: review showed a FIFO reporting size
+	// zero and hanging startup until the process was killed, and a path
+	// swapped between the two calls bypassing the size check entirely.
+	// O_NONBLOCK because opening a FIFO for reading BLOCKS until a writer
+	// appears - the open itself hangs, before any Stat can reject it. With
+	// the flag, a pipe opens immediately and is then refused below.
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, fmt.Errorf("wake sound: %w", err)
 	}
-	if info.Size() > maxSoundFile {
-		return nil, fmt.Errorf("wake sound %s is %d bytes; an acknowledgement sound is a blip, not a track", path, info.Size())
+	info, statErr := file.Stat()
+	if statErr != nil {
+		return nil, errors.Join(fmt.Errorf("wake sound: %w", statErr), file.Close())
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("wake sound: %w", err)
+	if !info.Mode().IsRegular() {
+		return nil, errors.Join(
+			fmt.Errorf("wake sound %s is not a regular file (%s); a pipe or device can never finish loading", path, info.Mode().Type()),
+			file.Close())
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(file, maxSoundFile+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return nil, errors.Join(fmt.Errorf("wake sound %s", path), readErr, closeErr)
+	}
+	if len(raw) > maxSoundFile {
+		return nil, fmt.Errorf("wake sound %s exceeds %d bytes; an acknowledgement sound is a blip, not a track", path, maxSoundFile)
 	}
 	pcm, from, err := DecodeWAV(raw)
 	if err != nil {
