@@ -118,16 +118,6 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, context) => runVoiceCommand(args, context),
   });
 
-  // Herdr's agent prompt API submits through OMP's RPC input path, where slash
-  // commands are intentionally not expanded. Intercept the same syntax there
-  // so typing in the pane and prompting it remotely have identical behavior.
-  pi.on("input", (event: unknown, context: unknown) => {
-    if (!record(event) || typeof event.text !== "string") return;
-    const match = /^\s*\/voice(?:\s+([\s\S]*))?\s*$/.exec(event.text);
-    if (!match) return;
-    runVoiceCommand(match[1] ?? "", context as CommandContext);
-    return { action: "handled" };
-  });
 
   pi.on("session_start", (_event: unknown, context: unknown) => {
     if (markerPath) {
