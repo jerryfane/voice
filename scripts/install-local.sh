@@ -10,24 +10,21 @@ workspace=$agent_home/voice-workspace
 start_service=${VOICE_INSTALL_START:-1}
 # Find the REAL herdr, not the bridge wrapper this script installs under the
 # same name. Once the wrapper exists, `command -v herdr` finds it first, so a
-# genuinely upgraded herdr sitting further along PATH would be invisible and
-# the copy in libexec would stay at whatever version it was - silently stale,
-# which is worse than the copy-onto-itself failure it replaced.
-# Find the REAL herdr, not the bridge wrapper this script installs under the
-# same name. Once the wrapper exists, `command -v herdr` finds it first, so a
 # genuinely upgraded herdr further along PATH would be invisible and the copy
 # in libexec would stay at whatever version it was - silently stale.
-herdr_bin=$(command -v herdr 2>/dev/null || true)
-if [ "$herdr_bin" = /usr/local/bin/herdr ]; then
-  # Compare CANONICAL paths, not spellings. A PATH entry that is a symlink to
-  # /usr/local/bin, or simply written with a trailing slash, is the same file
-  # under a different name - and accepting it would copy the wrapper over the
-  # binary the wrapper delegates to, leaving a script that execs itself
-  # forever. Review reproduced exactly that, byte for byte.
-  canonical() { readlink -f "$1" 2>/dev/null || printf '%s\n' "$1"; }
-  wrapper_real=$(canonical /usr/local/bin/herdr)
-  backend_real=$(canonical /usr/local/libexec/voice-herdr-real)
+canonical() { readlink -f "$1" 2>/dev/null || printf '%s\n' "$1"; }
+is_script() { [ "$(head -c 2 "$1" 2>/dev/null)" = "#!" ]; }
 
+wrapper_real=$(canonical /usr/local/bin/herdr)
+backend_real=$(canonical /usr/local/libexec/voice-herdr-real)
+
+herdr_bin=$(command -v herdr 2>/dev/null || true)
+# Canonicalised BEFORE the comparison. A literal test here was the hole:
+# with a symlinked directory first on PATH `command -v` answers
+# <alias>/herdr, and with a trailing slash it answers /usr/local/bin//herdr -
+# neither string equals the wrapper path, so the whole protective block below
+# was skipped and the wrapper was copied over the backend it delegates to.
+if [ -n "$herdr_bin" ] && [ "$(canonical "$herdr_bin")" = "$wrapper_real" ]; then
   herdr_bin=""
   saved_ifs=$IFS
   IFS=:
@@ -38,18 +35,15 @@ if [ "$herdr_bin" = /usr/local/bin/herdr ]; then
     case "$dir" in
       "" | [!/]*) continue ;;
     esac
-    candidate="$dir/herdr"
+    candidate=$(canonical "$dir/herdr")
     [ -x "$candidate" ] || continue
-    candidate_real=$(canonical "$candidate")
-    [ "$candidate_real" = "$wrapper_real" ] && continue
-    [ "$candidate_real" = "$backend_real" ] && continue
+    [ "$candidate" = "$wrapper_real" ] && continue
+    [ "$candidate" = "$backend_real" ] && continue
     # The real herdr is a compiled binary; every wrapper here is a shell
-    # script. Refusing scripts is a second, independent guard against
-    # installing a wrapper as the backend.
-    case $(head -c 2 "$candidate_real" 2>/dev/null) in
-      "#!") continue ;;
-    esac
-    herdr_bin=$candidate_real
+    # script. An independent second guard against installing a wrapper as
+    # the backend.
+    is_script "$candidate" && continue
+    herdr_bin=$candidate
     break
   done
   IFS=$saved_ifs
@@ -105,7 +99,14 @@ sudo chmod 0644 /etc/voice/herdr-owner
 # that file onto itself and aborted with "are the same file", taking every
 # later step with it. An installer that only works on a clean machine is not
 # an installer.
-if [ "$herdr_bin" != /usr/local/libexec/voice-herdr-real ]; then
+# Last line of defence, independent of how herdr_bin was resolved: never
+# install the wrapper, a script, or the backend onto itself. Whatever route
+# the value arrived by, the backend must end up being a real herdr.
+if [ -n "$herdr_bin" ] && [ "$(canonical "$herdr_bin")" != "$backend_real" ]; then
+  if [ "$(canonical "$herdr_bin")" = "$wrapper_real" ] || is_script "$herdr_bin"; then
+    echo "refusing to install $herdr_bin as the Herdr backend: it is the bridge wrapper, which delegates to that path and would exec itself forever" >&2
+    exit 1
+  fi
   sudo install -m 0755 "$herdr_bin" /usr/local/libexec/voice-herdr-real
 fi
 sudo install -m 0755 packaging/voice-herdr /usr/local/libexec/voice-herdr
