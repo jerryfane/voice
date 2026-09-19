@@ -125,7 +125,7 @@ func TestSoundFromFileConformsScalesAndTrims(t *testing.T) {
 	}
 	path := writeWAV(t, dir, append(loud, make([]int16, 4800)...), Format{SampleRate: 48000, Channels: 1})
 
-	got, err := SoundFromFile(path, Format{SampleRate: 16000, Channels: 1}, 0.5)
+	got, err := SoundFromFile(path, Format{SampleRate: 16000, Channels: 1}, 0.5, AcknowledgementSound)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestSoundFromFileConformsScalesAndTrims(t *testing.T) {
 // A missing file must fail at load, when someone can read the message, rather
 // than at the moment the owner speaks to the device.
 func TestSoundFromFileReportsAMissingFile(t *testing.T) {
-	_, err := SoundFromFile(filepath.Join(t.TempDir(), "nope.wav"), Default(), 0.65)
+	_, err := SoundFromFile(filepath.Join(t.TempDir(), "nope.wav"), Default(), 0.65, AcknowledgementSound)
 	if err == nil {
 		t.Fatal("a missing sound file was accepted")
 	}
@@ -212,7 +212,7 @@ func TestSoundFromFileRefusesAPipe(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := SoundFromFile(fifo, Format{SampleRate: 16000, Channels: 1}, 0.65)
+		_, err := SoundFromFile(fifo, Format{SampleRate: 16000, Channels: 1}, 0.65, AcknowledgementSound)
 		done <- err
 	}()
 	select {
@@ -321,11 +321,88 @@ func TestSoundFromFileRejectsAnOverlongSoundInsteadOfTruncating(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := SoundFromFile(path, Format{SampleRate: 8000, Channels: 1}, 0.65)
+	_, err := SoundFromFile(path, Format{SampleRate: 8000, Channels: 1}, 0.65, AcknowledgementSound)
 	if err == nil {
 		t.Fatal("a 30 second sound was accepted; it must be refused, not clamped")
 	}
 	if !contains(err.Error(), "blip") && !contains(err.Error(), "longer than") {
 		t.Errorf("error %q should say the sound is too long", err)
+	}
+}
+
+// The thinking sound LOOPS, and the documentation tells the user to put the
+// gap inside the file. Trimming that silence off turns a once-a-second tick
+// into a continuous rattle - and it is the exact instruction the owner
+// followed, so this is a promise the code has to keep.
+func TestThinkingSoundKeepsTheGapTheUserWasToldToInclude(t *testing.T) {
+	dir := t.TempDir()
+	pulse := make([]int16, 1600) // 100 ms of sound
+	for i := range pulse {
+		pulse[i] = 8000
+	}
+	withGap := append(pulse, make([]int16, 14400)...) // then 900 ms of gap
+	path := filepath.Join(dir, "think.wav")
+	if err := os.WriteFile(path, EncodeWAV(withGap, Format{SampleRate: 16000, Channels: 1}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := SoundFromFile(path, Format{SampleRate: 16000, Channels: 1}, 1, ThinkingSound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(withGap) {
+		t.Errorf("loaded %d samples from a %d sample file: the loop gap was trimmed away", len(got), len(withGap))
+	}
+
+	// ...while the acknowledgement, played once, still loses its padding.
+	ack, err := SoundFromFile(path, Format{SampleRate: 16000, Channels: 1}, 1, AcknowledgementSound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ack) >= len(withGap) {
+		t.Errorf("acknowledgement kept %d samples; its padding is dead time and must go", len(ack))
+	}
+}
+
+// A very short loop restarts the player dozens of times a second, spawning
+// and killing a playback process each time.
+func TestThinkingSoundRefusesAFileTooShortToLoop(t *testing.T) {
+	dir := t.TempDir()
+	short := make([]int16, 320) // 20 ms
+	for i := range short {
+		short[i] = 8000
+	}
+	path := filepath.Join(dir, "tiny.wav")
+	if err := os.WriteFile(path, EncodeWAV(short, Format{SampleRate: 16000, Channels: 1}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := SoundFromFile(path, Format{SampleRate: 16000, Channels: 1}, 1, ThinkingSound)
+	if err == nil {
+		t.Fatal("a 20 ms looping sound was accepted")
+	}
+	if !contains(err.Error(), "feedback.thinking") {
+		t.Errorf("error %q does not name the setting the operator must change", err)
+	}
+
+	// The same file is fine as a one-shot acknowledgement.
+	if _, err := SoundFromFile(path, Format{SampleRate: 16000, Channels: 1}, 1, AcknowledgementSound); err != nil {
+		t.Errorf("a short acknowledgement was rejected: %v", err)
+	}
+}
+
+// A failure must name the setting it came from. Both settings share a loader,
+// and reporting a thinking-sound problem as a "wake sound" failure sends the
+// operator to the wrong line of the config.
+func TestSoundErrorsNameTheSettingThatFailed(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope.wav")
+	for _, opt := range []SoundOptions{AcknowledgementSound, ThinkingSound} {
+		_, err := SoundFromFile(missing, Format{SampleRate: 16000, Channels: 1}, 1, opt)
+		if err == nil {
+			t.Fatalf("%s: a missing file was accepted", opt.Setting)
+		}
+		if !contains(err.Error(), opt.Setting) {
+			t.Errorf("error %q does not name %q", err, opt.Setting)
+		}
 	}
 }

@@ -308,7 +308,19 @@ required for playback through this client.
 "feedback": { "sound": "/etc/voice/sounds/bubble.wav", "volume": 0.65 }
 ```
 
-The file is loaded and checked when the config loads, so a missing or
+`feedback.thinking` takes a file the same way, for the sound played while an
+answer is slow. That one LOOPS until the answer arrives, so the silence after
+the sound belongs inside the file and is **kept** - it is the gap between
+pulses, and trimming it would turn a tick into a rattle. A file shorter than
+250 ms once converted is refused, because looping it restarts the player
+continuously.
+
+The reply does not wait for the cycle to finish: the loop is cancelled and
+the playback process killed when the answer arrives, so a long file is cut
+off rather than delaying speech. Device buffering can still leave a moment of
+audible tail.
+
+Both are loaded and checked when the config loads, so a missing or
 undecodable file is reported at startup rather than discovered as silence the
 first time someone speaks.
 
@@ -316,10 +328,12 @@ first time someone speaks.
   that converts them. Accepting a file and playing noise would be worse.
 - **Stereo is mixed down and the rate is resampled** to the session format, so
   a file downloaded from any generator works without hand-conversion.
-- **Trailing silence is trimmed.** Generators pad to round durations - a real
-  example arrived as 0.504 s of file containing 0.186 s of sound - and that
-  padding holds the speaker open while the microphone is already listening for
-  the command.
+- **Trailing silence is trimmed for `feedback.sound` only.** Generators pad to
+  round durations - a real example arrived as 0.504 s of file containing
+  0.186 s of sound - and for a one-shot acknowledgement that padding holds the
+  speaker open while the microphone is already listening for the command.
+  `feedback.thinking` is the exception: it loops, so its padding is the gap
+  between pulses and is kept.
 
 ## Security boundary
 
