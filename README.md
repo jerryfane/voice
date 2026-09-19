@@ -328,10 +328,12 @@ first time someone speaks.
   that converts them. Accepting a file and playing noise would be worse.
 - **Stereo is mixed down and the rate is resampled** to the session format, so
   a file downloaded from any generator works without hand-conversion.
-- **Trailing silence is trimmed.** Generators pad to round durations - a real
-  example arrived as 0.504 s of file containing 0.186 s of sound - and that
-  padding holds the speaker open while the microphone is already listening for
-  the command.
+- **Trailing silence is trimmed for `feedback.sound` only.** Generators pad to
+  round durations - a real example arrived as 0.504 s of file containing
+  0.186 s of sound - and for a one-shot acknowledgement that padding holds the
+  speaker open while the microphone is already listening for the command.
+  `feedback.thinking` is the exception: it loops, so its padding is the gap
+  between pulses and is kept.
 
 ## Security boundary
 
