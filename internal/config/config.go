@@ -11,6 +11,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -47,7 +48,7 @@ type Config struct {
 	// STT configures local and optional remote speech-to-text engines.
 	STT STT `json:"stt"`
 	// TTS is text-to-speech.
-	TTS Engine `json:"tts"`
+	TTS TTS `json:"tts"`
 	// Brain is the reasoning layer.
 	Brain Brain `json:"brain"`
 	// Lights are Zengge/Magic Home controllers (local protocol, port 5577).
@@ -215,6 +216,30 @@ type STT struct {
 type ResidentSTT struct {
 	Endpoint string   `json:"endpoint"`
 	Timeout  Duration `json:"timeout"`
+}
+
+// TTS is speech output: a local engine, optionally fronted by a cloud voice.
+//
+// The local engine is never optional. A remote voice sounds better and needs
+// the network; the assistant must still answer when the network is gone, so
+// the local one stays as the fallback rather than being replaced.
+type TTS struct {
+	Engine
+	OpenRouter *OpenRouterTTS `json:"openrouter,omitempty"`
+}
+
+// OpenRouterTTS describes the cloud voice. APIKeyEnv names the environment
+// variable; the secret itself never belongs in config.
+//
+// Model must be one that emits audio - openai/gpt-audio-mini or
+// openai/gpt-audio at the time of writing. OpenRouter has no text-to-speech
+// endpoint, so this drives a chat model that happens to speak.
+type OpenRouterTTS struct {
+	Endpoint  string   `json:"endpoint"`
+	Model     string   `json:"model"`
+	Voice     string   `json:"voice"`
+	APIKeyEnv string   `json:"api_key_env"`
+	Timeout   Duration `json:"timeout"`
 }
 
 // OpenRouterSTT describes the cloud transcription endpoint. APIKeyEnv names
@@ -391,14 +416,15 @@ func Default() Config {
 				Timeout:   Duration(5 * time.Second),
 			},
 		},
-		TTS: Engine{
+		TTS: TTS{Engine: Engine{
 			Name:    "piper",
 			Model:   "models/en_US-amy-medium.onnx",
 			Timeout: Duration(30 * time.Second),
 			Command: Command{
 				"piper", "--model", "{model}", "--output_file", "-",
 			},
-		},
+		}},
+
 		Brain: Brain{
 			Mode:    "agent",
 			Timeout: Duration(10 * time.Minute),
@@ -675,6 +701,23 @@ func (c Config) Validate() error {
 	}
 	if c.Feedback.Light != feedback.LightAuto && c.Feedback.Light != feedback.LightNone && c.Input.TelephonyHID == "" {
 		return fmt.Errorf("feedback.light is %q but input.telephony_hid is empty: no device can show it", c.Feedback.Light)
+	}
+	if r := c.TTS.OpenRouter; r != nil {
+		if _, err := url.ParseRequestURI(r.Endpoint); err != nil {
+			return fmt.Errorf("tts.openrouter.endpoint is not a URL: %w", err)
+		}
+		if strings.TrimSpace(r.Model) == "" {
+			return errors.New("tts.openrouter.model is empty")
+		}
+		if strings.TrimSpace(r.Voice) == "" {
+			return errors.New("tts.openrouter.voice is empty: the model needs a named voice")
+		}
+		if strings.TrimSpace(r.APIKeyEnv) == "" {
+			return errors.New("tts.openrouter.api_key_env is empty: name the variable holding the key, never the key itself")
+		}
+		if r.Timeout.D() <= 0 {
+			return errors.New("tts.openrouter.timeout must be positive")
+		}
 	}
 	if c.Feedback.Volume < 0 || c.Feedback.Volume > 1 {
 		return fmt.Errorf("feedback.volume must be between 0 and 1, got %v", c.Feedback.Volume)

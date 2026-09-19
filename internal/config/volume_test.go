@@ -1,7 +1,9 @@
 package config
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/jerryfane/voice/internal/audio"
 )
@@ -89,5 +91,66 @@ func TestAnExplicitZeroMutesTheThinkingSound(t *testing.T) {
 	c.Feedback.ThinkingVolume = &zero
 	if err := c.Validate(); err != nil {
 		t.Errorf("thinking_volume 0 was rejected: %v", err)
+	}
+}
+
+// The cloud voice is optional and absent by default: an existing install must
+// not start making network calls because it upgraded.
+func TestOpenRouterVoiceIsOffByDefault(t *testing.T) {
+	if c := Default(); c.TTS.OpenRouter != nil {
+		t.Errorf("tts.openrouter defaults to %+v; it must be unset", c.TTS.OpenRouter)
+	}
+	if got := Default().TTS.Name; got != "piper" {
+		t.Errorf("default TTS engine = %q, want the local piper", got)
+	}
+}
+
+// Configuring the cloud voice must be all-or-nothing. A half-filled block -
+// no voice, no key variable - would be accepted and then fail at the moment
+// the user speaks, which is the worst time to discover it.
+func TestOpenRouterVoiceIsValidatedUpFront(t *testing.T) {
+	good := OpenRouterTTS{
+		Endpoint:  "https://openrouter.ai/api/v1/chat/completions",
+		Model:     "openai/gpt-audio-mini",
+		Voice:     "marin",
+		APIKeyEnv: "OPENROUTER_API_KEY",
+		Timeout:   Duration(30 * time.Second),
+	}
+	c := Default()
+	c.TTS.OpenRouter = &good
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a complete cloud voice was rejected: %v", err)
+	}
+
+	for name, break_ := range map[string]func(*OpenRouterTTS){
+		"endpoint": func(r *OpenRouterTTS) { r.Endpoint = "not a url" },
+		"model":    func(r *OpenRouterTTS) { r.Model = "" },
+		"voice":    func(r *OpenRouterTTS) { r.Voice = "" },
+		"key env":  func(r *OpenRouterTTS) { r.APIKeyEnv = "" },
+		"timeout":  func(r *OpenRouterTTS) { r.Timeout = 0 },
+	} {
+		broken := good
+		break_(&broken)
+		c := Default()
+		c.TTS.OpenRouter = &broken
+		if err := c.Validate(); err == nil {
+			t.Errorf("missing %s was accepted; it would fail only when the user spoke", name)
+		}
+	}
+}
+
+// The existing shape must still decode: tts.name and friends sit at the top
+// level of the tts object, and an upgrade must not silently lose them.
+func TestExistingTTSConfigStillDecodes(t *testing.T) {
+	var c Config
+	body := `{"tts":{"name":"piper","model":"/var/lib/voice/models/en_US-amy-medium.onnx","timeout":"30s","command":["piper","--model","{model}"]}}`
+	if err := json.Unmarshal([]byte(body), &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.TTS.Name != "piper" || c.TTS.Model == "" || len(c.TTS.Command) != 3 {
+		t.Errorf("decoded %+v; the existing tts fields must survive the new nesting", c.TTS)
+	}
+	if c.TTS.OpenRouter != nil {
+		t.Error("a config with no openrouter block must not gain one")
 	}
 }
