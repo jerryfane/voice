@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+agent_user=voice-agent
+workspace=${VOICE_AGENT_WORKSPACE:-/home/voice-agent/voice-workspace}
+sessions=${VOICE_AGENT_SESSIONS:-/home/voice-agent/.local/share/voice/sessions}
+responses=${VOICE_AGENT_RESPONSES:-/home/voice-agent/.local/share/voice/responses}
+marker=$sessions/.initialized
+omp=${VOICE_AGENT_OMP:-/usr/local/libexec/voice-omp}
+
+if [ "$(id -un)" != "$agent_user" ]; then
+  sudo -n -H --preserve-env=HERDR_AGENT -u "$agent_user" /usr/local/bin/voice-agent-session \
+    "${HERDR_WORKSPACE_ID:-}" "${HERDR_TAB_ID:-}" "${HERDR_PANE_ID:-}"
+  exit $?
+fi
+
+if [ "$#" -eq 3 ]; then
+  export HERDR_WORKSPACE_ID=$1
+  export HERDR_TAB_ID=$2
+  export HERDR_PANE_ID=$3
+elif [ "$#" -ne 0 ]; then
+  echo "voice-agent-session expects Herdr workspace, tab and pane ids" >&2
+  exit 2
+fi
+export HOME=/home/voice-agent
+export PATH=/usr/local/bin:/usr/bin:/bin
+export HERDR_ENV=1
+export VOICE_AGENT_WORKSPACE=$workspace
+export VOICE_AGENT_SESSIONS=$sessions
+export VOICE_AGENT_RESPONSES=$responses
+export VOICE_AGENT_MARKER=$marker
+
+mkdir -p "$workspace" "$sessions" "$responses"
+chmod 0700 "$sessions" "$responses"
+cd "$workspace"
+
+if [ -f "$marker" ]; then
+  exec "$omp" --continue --cwd "$workspace" --session-dir "$sessions" --auto-approve --no-title
+fi
+exec "$omp" --cwd "$workspace" --session-dir "$sessions" --auto-approve --no-title

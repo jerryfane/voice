@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+owner_file=/etc/voice/herdr-owner
+herdr=/usr/local/libexec/voice-herdr-real
+agent_name=voice
+workspace_label=voice
+
+[ -r "$owner_file" ] || { echo "Herdr owner is not configured" >&2; exit 1; }
+owner=$(cat "$owner_file")
+if [ "$(id -un)" != "$owner" ]; then
+  exec sudo -n -H -u "$owner" /usr/local/bin/voice-herdr-ensure
+fi
+
+agents=$($herdr agent list)
+if printf '%s\n' "$agents" | jq -e --arg name "$agent_name" '.result.agents[]? | select(.name == $name)' >/dev/null; then
+  printf 'Herdr agent %s is already running.\n' "$agent_name"
+  exit 0
+fi
+
+workspaces=$($herdr workspace list)
+workspace=$(printf '%s\n' "$workspaces" | jq -r --arg wanted "$workspace_label" '.result.workspaces[]? | select(.label == $wanted) | .workspace_id' | sed -n '1p')
+pane=
+if [ -z "$workspace" ]; then
+  created=$($herdr workspace create --cwd "$HOME" --label "$workspace_label" --no-focus)
+  workspace=$(printf '%s\n' "$created" | jq -r '.result.workspace.workspace_id')
+  pane=$(printf '%s\n' "$created" | jq -r '.result.root_pane.pane_id')
+else
+  if printf '%s\n' "$agents" | jq -e --arg prefix "$workspace:" '.result.agents[]? | select((.pane_id | startswith($prefix)) and .agent == "omp")' >/dev/null; then
+    pane=$(printf '%s\n' "$agents" | jq -r --arg prefix "$workspace:" '.result.agents[]? | select((.pane_id | startswith($prefix)) and .agent == "omp") | .pane_id' | sed -n '1p')
+    $herdr agent rename "$pane" "$agent_name" >/dev/null
+    printf 'Recovered Herdr agent %s in %s.\n' "$agent_name" "$pane"
+    exit 0
+  fi
+  created=$($herdr tab create --workspace "$workspace" --cwd "$HOME" --label agent --no-focus)
+  pane=$(printf '%s\n' "$created" | jq -r '.result.root_pane.pane_id')
+fi
+
+[ -n "$pane" ] && [ "$pane" != null ] || { echo "Herdr did not return an agent pane" >&2; exit 1; }
+$herdr pane run "$pane" "HERDR_AGENT=omp exec /usr/local/bin/voice-agent-session" >/dev/null
+
+attempt=0
+while ! $herdr agent get "$pane" >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 60 ]; then
+    echo "OMP was not detected in Herdr pane $pane" >&2
+    exit 1
+  fi
+  sleep 0.5
+done
+$herdr agent rename "$pane" "$agent_name" >/dev/null
+printf 'Started Herdr agent %s in %s.\n' "$agent_name" "$pane"

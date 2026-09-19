@@ -8,6 +8,11 @@ agent_user=voice-agent
 agent_home=/home/voice-agent
 workspace=$agent_home/voice-workspace
 start_service=${VOICE_INSTALL_START:-1}
+herdr_bin=$(command -v herdr 2>/dev/null || true)
+if [ "$herdr_bin" = /usr/local/bin/herdr ] && [ -x /usr/local/libexec/voice-herdr-real ]; then
+  herdr_bin=/usr/local/libexec/voice-herdr-real
+fi
+
 run_as_agent() {
   sudo -u "$agent_user" env HOME="$agent_home" sh -c 'cd "$1"; shift; exec "$@"' sh "$workspace" "$@"
 }
@@ -15,16 +20,21 @@ run_as_agent() {
 command -v sudo >/dev/null 2>&1 || { echo "sudo is required" >&2; exit 1; }
 command -v omp >/dev/null 2>&1 || { echo "omp is required" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
+[ -n "$herdr_bin" ] || { echo "herdr is required" >&2; exit 1; }
+
 
 CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o /tmp/voice-install ./cmd/voice
+CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /tmp/voice-herdr-report-install ./cmd/voice-herdr-report
+
 
 if ! getent passwd "$agent_user" >/dev/null; then
   sudo useradd --system --user-group --create-home --home-dir "$agent_home" --shell /bin/bash "$agent_user"
 fi
-sudo install -d -o "$agent_user" -g "$agent_user" -m 0750 "$workspace" "$agent_home/.local/share/voice/sessions" "$agent_home/.omp/agent" /var/cache/voice /var/lib/voice
+sudo install -d -o "$agent_user" -g "$agent_user" -m 0750 "$workspace" "$agent_home/.local/share/voice/sessions" "$agent_home/.local/share/voice/responses" "$agent_home/.omp/agent" "$agent_home/.omp/agent/extensions" "$agent_home/.omp/agent/skills" "$agent_home/.omp/agent/skills/herdr" /var/cache/voice /var/lib/voice
 sudo chown -R "$agent_user:$agent_user" "$agent_home"
 sudo install -d -o root -g root -m 0755 /usr/local/libexec /etc/voice
 sudo install -m 0755 /tmp/voice-install /usr/local/bin/voice
+sudo install -m 0755 /tmp/voice-herdr-report-install /usr/local/libexec/voice-herdr-report
 sherpa_module=$(go list -m -f '{{.Dir}}' github.com/k2-fsa/sherpa-onnx-go-linux)
 case "$(uname -m)" in
   aarch64|arm64) sherpa_arch=aarch64-unknown-linux-gnu ;;
@@ -36,10 +46,21 @@ sudo install -m 0644 "$sherpa_module/lib/$sherpa_arch/"*.so /usr/local/lib/voice
 printf '%s\n' /usr/local/lib/voice | sudo tee /etc/ld.so.conf.d/voice.conf >/dev/null
 sudo ldconfig
 sudo install -m 0755 "$(command -v omp)" /usr/local/libexec/voice-omp
-printf '%s ALL=(voice-agent) NOPASSWD: /usr/local/bin/voice-agent-run *\n%s ALL=(root) NOPASSWD: /usr/bin/systemctl start voice.service, /usr/bin/systemctl stop voice.service\n' "$owner" "$owner" | sudo tee /etc/sudoers.d/voice-agent >/dev/null
+printf '%s ALL=(voice-agent) NOPASSWD: SETENV: /usr/local/bin/voice-agent-run *, /usr/local/bin/voice-agent-session *\nvoice-agent ALL=(%s) NOPASSWD: /usr/local/libexec/voice-herdr *, /usr/local/bin/voice-herdr-ensure\n%s ALL=(root) NOPASSWD: /usr/bin/systemctl start voice.service, /usr/bin/systemctl stop voice.service\n' "$owner" "$owner" "$owner" | sudo tee /etc/sudoers.d/voice-agent >/dev/null
 sudo chmod 0440 /etc/sudoers.d/voice-agent
 sudo visudo -cf /etc/sudoers.d/voice-agent >/dev/null
+printf '%s\n' "$owner" | sudo tee /etc/voice/herdr-owner >/dev/null
+sudo chmod 0644 /etc/voice/herdr-owner
+sudo install -m 0755 "$herdr_bin" /usr/local/libexec/voice-herdr-real
+sudo install -m 0755 packaging/voice-herdr /usr/local/libexec/voice-herdr
+sudo install -m 0755 packaging/voice-herdr /usr/local/bin/herdr
+sudo install -m 0755 packaging/voice-herdr-ensure /usr/local/bin/voice-herdr-ensure
+sudo install -m 0755 packaging/voice-agent-session /usr/local/bin/voice-agent-session
 sudo install -m 0755 packaging/voice-agent-run /usr/local/bin/voice-agent-run
+sudo install -o "$agent_user" -g "$agent_user" -m 0644 packaging/voice-response.ts "$agent_home/.omp/agent/extensions/voice-response.ts"
+"$herdr_bin" --skill > /tmp/voice-herdr-skill.md
+sudo install -o "$agent_user" -g "$agent_user" -m 0644 /tmp/voice-herdr-skill.md "$agent_home/.omp/agent/skills/herdr/SKILL.md"
+rm -f /tmp/voice-herdr-skill.md
 sudo install -m 0644 packaging/voice.service /etc/systemd/system/voice.service
 sudo install -m 0644 packaging/voice-whisper.service /etc/systemd/system/voice-whisper.service
 sudo install -m 0644 packaging/voice-auth-broker@.service /etc/systemd/system/voice-auth-broker@.service
@@ -134,6 +155,10 @@ fi
 token=$(omp auth-broker token)
 run_as_agent /usr/local/libexec/voice-omp config set auth.broker.url http://127.0.0.1:9444 >/dev/null
 run_as_agent /usr/local/libexec/voice-omp config set auth.broker.token "$token" >/dev/null
+if ! /usr/local/bin/voice-herdr-ensure; then
+  echo "warning: Herdr voice agent is unavailable; local commands will still work" >&2
+fi
+
 
 sudo systemctl daemon-reload
 sudo udevadm control --reload-rules
@@ -152,7 +177,7 @@ else
   # speaker process stopped until the owner explicitly starts it.
   sudo systemctl stop voice.service
 fi
-rm -f /tmp/voice-install
+rm -f /tmp/voice-install /tmp/voice-herdr-report-install
 
 installed_hash=$(sha256sum /usr/local/bin/voice | cut -d' ' -f1)
 echo "Installed /usr/local/bin/voice with restricted agent account $agent_user ($installed_hash)."

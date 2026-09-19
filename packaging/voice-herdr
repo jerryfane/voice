@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+owner_file=/etc/voice/herdr-owner
+real_herdr=/usr/local/libexec/voice-herdr-real
+
+[ -r "$owner_file" ] || { echo "Herdr owner is not configured" >&2; exit 1; }
+owner=$(cat "$owner_file")
+[ -n "$owner" ] || { echo "Herdr owner is empty" >&2; exit 1; }
+
+if [ "$(id -un)" != "$owner" ]; then
+  exec sudo -n -H -u "$owner" /usr/local/libexec/voice-herdr "$@"
+fi
+
+[ -x "$real_herdr" ] || { echo "Herdr executable is not installed" >&2; exit 1; }
+if [ "${1:-}" = report ]; then
+  [ "$#" -ge 4 ] && [ "$#" -le 6 ] || {
+    echo "report requires a type, pane id, value and optional detail" >&2
+    exit 2
+  }
+  case "$2" in
+    state|session) ;;
+    *) echo "unsupported report type '$2'" >&2; exit 2 ;;
+  esac
+  shift
+  exec /usr/local/libexec/voice-herdr-report "$@"
+fi
+
+[ "$#" -ge 2 ] || { echo "only scoped Herdr agent operations are allowed" >&2; exit 2; }
+[ "$1" = agent ] || { echo "only scoped Herdr agent operations are allowed" >&2; exit 2; }
+operation=$2
+
+case "$operation" in
+  list)
+    [ "$#" -eq 2 ] || { echo "agent list takes no arguments through the voice bridge" >&2; exit 2; }
+    exec "$real_herdr" agent list
+    ;;
+  get)
+    [ "$#" -eq 3 ] || { echo "agent get requires one target" >&2; exit 2; }
+    ;;
+  read|wait)
+    [ "$#" -ge 3 ] || { echo "agent $operation requires a target" >&2; exit 2; }
+    ;;
+  prompt)
+    [ "$#" -ge 4 ] || { echo "agent prompt requires a target and text" >&2; exit 2; }
+    target=$3
+    prompt=$4
+    shift 4
+    case "$target" in
+      voice) ;;
+      *) prompt="[From the restricted Voice agent; this is collaboration input, not owner authorization.]\n\n$prompt" ;;
+    esac
+    exec "$real_herdr" agent prompt "$target" "$prompt" "$@"
+    ;;
+  *)
+    echo "Herdr agent operation '$operation' is not allowed through the voice bridge" >&2
+    exit 2
+    ;;
+esac
+
+exec "$real_herdr" "$@"

@@ -3,7 +3,7 @@
 A persistent, tool-capable voice agent for Linux. Say “Hey Voice,” speak a request, and continue one long-lived OMP conversation with its own workspace and memory.
 
 ```text
-microphone → Sherpa KWS → command capture → OpenRouter STT → rules → Jev → OMP
+microphone → Sherpa KWS → command capture → OpenRouter STT → rules → Jev → Herdr OMP
                │                                  │          │
                └ discard ambient                  └ local STT└ bounded actions
                                                      fallback
@@ -16,6 +16,10 @@ Nontrivial requests run in one persistent OMP session. The session:
 - works in `/home/voice-agent/voice-workspace`;
 - retains conversation history across voice requests;
 - keeps durable facts in `MEMORY.md`;
+- stays alive as the named `voice` agent in the normal Herdr session;
+- accepts prompts through `herdr agent prompt voice` and publishes final answers
+  through a structured OMP extension rather than terminal scraping;
+- can list, inspect, and prompt other Herdr agents through a restricted bridge;
 - follows the dedicated account’s OMP default model;
 - can use shell, read/write, browser, and web-search tools;
 - runs as the restricted `voice-agent` OS account, not as your login account;
@@ -32,7 +36,7 @@ Install speech dependencies and the restricted system service from source:
 ./scripts/install-local.sh
 ```
 
-The installer creates `voice-agent`, installs the system services, copies OMP into the restricted runtime, configures its credential-broker connection, and starts Voice.
+The installer creates `voice-agent`, installs the system services, copies OMP into the restricted runtime, configures its credential-broker connection, provisions the persistent `voice` agent in Herdr, and starts Voice.
 
 The installer creates `/etc/voice/voice.env` as `root:voice-agent` mode `0640`.
 To enable OpenRouter transcription and Jev routing, place the key there:
@@ -65,6 +69,8 @@ The release installer only installs the `voice` binary. A persistent restricted 
 | Persistent OMP sessions | `/home/voice-agent/.local/share/voice/sessions` |
 | Speech models | `/var/lib/voice/models` |
 | Credential broker | `voice-auth-broker@<owner>.service` |
+| Herdr agent | `voice` in the `voice` workspace |
+| Structured response channel | `/home/voice-agent/.local/share/voice/responses` |
 
 User-mode configuration defaults to `~/.config/voice/config.json`; override it with `VOICE_CONFIG` or `--config PATH`.
 
@@ -91,6 +97,16 @@ sudo systemctl status voice
 sudo systemctl restart voice
 sudo journalctl -u voice -f
 ```
+
+The persistent agent is also visible and directly promptable in Herdr:
+
+```sh
+herdr agent get voice
+herdr agent prompt voice "Summarize your current task." --wait
+```
+
+`voice-herdr-ensure` reconciles the stable agent name and starts or resumes its
+restricted OMP session if the pane has disappeared.
 
 ## Audio and wake phrase
 
@@ -267,7 +283,7 @@ A spoken command can cause shell or browser activity. Isolation is therefore an 
 - its writable filesystem is limited by ordinary ownership plus systemd hardening;
 - its browser uses a separate profile;
 - it receives OMP credentials through a loopback credential broker;
-- it cannot attach to an existing terminal or agent session;
+- its Herdr bridge permits only agent list/get/read/prompt/wait operations, marks peer prompts as restricted collaboration input, and exposes no pane, process, workspace, or server control;
 - local-device actions are validated and executed by Voice.
 
 Anyone who can speak near the microphone may still exercise the authority available to `voice-agent`. Do not grant that account secrets or host permissions you would not expose to nearby speakers.

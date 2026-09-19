@@ -1,32 +1,62 @@
 #!/bin/sh
 set -eu
-if [ "$(id -un)" != "voice-agent" ]; then
-  exec sudo -n -H -u voice-agent /usr/local/bin/voice-agent-run "$@"
+
+agent_user=voice-agent
+responses=${VOICE_AGENT_RESPONSES:-/home/voice-agent/.local/share/voice/responses}
+herdr=${VOICE_AGENT_HERDR:-/usr/local/bin/herdr}
+ensure=${VOICE_AGENT_HERDR_ENSURE:-/usr/local/bin/voice-herdr-ensure}
+timeout_ms=${VOICE_AGENT_HERDR_TIMEOUT_MS:-600000}
+
+if [ "$(id -un)" != "$agent_user" ]; then
+  exec sudo -n -H -u "$agent_user" /usr/local/bin/voice-agent-run "$@"
 fi
+[ "$#" -eq 1 ] || { echo "voice-agent-run requires one prompt" >&2; exit 2; }
 
-workspace=${VOICE_AGENT_WORKSPACE:-"$HOME/voice-workspace"}
-sessions=${VOICE_AGENT_SESSIONS:-"$HOME/.local/share/voice/sessions"}
-marker=$sessions/.initialized
-omp=${VOICE_AGENT_OMP:-/usr/local/libexec/voice-omp}
-
-mkdir -p "$workspace" "$sessions"
-cd "$workspace"
-exec 9>"$sessions/.lock"
+mkdir -p "$responses"
+chmod 0700 "$responses"
+exec 9>"$responses/.prompt.lock"
 flock 9
 
-invoke() {
-  "$omp" -p --cwd "$workspace" --session-dir "$sessions" --auto-approve --no-title "$@"
-}
-
-if [ -f "$marker" ]; then
-  exec "$omp" -p --continue --cwd "$workspace" --session-dir "$sessions" --auto-approve --no-title "$1"
+if ! "$herdr" agent get voice >/dev/null 2>&1; then
+  "$ensure" >/dev/null
 fi
 
-if output=$(invoke "$1"); then
-  touch "$marker"
-  printf '%s\n' "$output"
-  exit 0
+status=$($herdr agent get voice | jq -r '.result.agent.agent_status')
+case "$status" in
+  working)
+    "$herdr" agent wait voice --timeout "$timeout_ms" >/dev/null
+    ;;
+  blocked)
+    echo "the Herdr voice agent is blocked and needs attention" >&2
+    exit 1
+    ;;
+esac
+
+request_id="$(date +%s%N)-$$"
+response=$responses/$request_id.json
+trap 'rm -f "$response"' EXIT HUP INT TERM
+prompt="$1
+
+<voice-request id=\"$request_id\">
+Use this identifier only for the structured response channel; do not mention it in your answer."
+
+if ! "$herdr" agent prompt voice "$prompt" --wait --timeout "$timeout_ms" >/dev/null; then
+  echo "failed to prompt the Herdr voice agent" >&2
+  exit 1
 fi
-status=$?
-printf '%s\n' "$output"
-exit "$status"
+
+attempt=0
+while [ ! -s "$response" ]; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 100 ]; then
+    echo "the Herdr voice agent finished without a structured response" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+
+if [ "$(jq -r '.ok' "$response")" != true ]; then
+  jq -r '.error // "the Herdr voice agent failed"' "$response" >&2
+  exit 1
+fi
+jq -r '.output' "$response"
