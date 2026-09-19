@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/jerryfane/voice/internal/faults"
 	"github.com/jerryfane/voice/internal/hid"
@@ -226,4 +227,69 @@ func EncodeWAV(pcm []int16, f Format) []byte {
 		put(s)
 	}
 	return b.Bytes()
+}
+
+// PrependWAVSilence keeps a playback device open before speech begins. USB
+// speakerphones can discard their first audio frames while waking, which
+// otherwise clips the first phoneme even though playback exits successfully.
+func PrependWAVSilence(wav []byte, lead time.Duration) ([]byte, error) {
+	if lead <= 0 {
+		return wav, nil
+	}
+	if len(wav) < 12 || string(wav[:4]) != "RIFF" || string(wav[8:12]) != "WAVE" {
+		return nil, errors.New("audio is not RIFF/WAVE")
+	}
+
+	var byteRate uint32
+	var blockAlign uint16
+	for offset := 12; offset+8 <= len(wav); {
+		size := int(binary.LittleEndian.Uint32(wav[offset+4 : offset+8]))
+		data := offset + 8
+		end := data + size
+		if size < 0 || end < data || end > len(wav) {
+			return nil, errors.New("WAVE chunk exceeds payload")
+		}
+		switch string(wav[offset : offset+4]) {
+		case "fmt ":
+			if size < 16 {
+				return nil, errors.New("WAVE fmt chunk is too short")
+			}
+			if binary.LittleEndian.Uint16(wav[data:data+2]) != 1 {
+				return nil, errors.New("WAVE audio is not PCM")
+			}
+			byteRate = binary.LittleEndian.Uint32(wav[data+8 : data+12])
+			blockAlign = binary.LittleEndian.Uint16(wav[data+12 : data+14])
+			if byteRate == 0 || blockAlign == 0 {
+				return nil, errors.New("WAVE fmt chunk has an invalid rate")
+			}
+		case "data":
+			if byteRate == 0 || blockAlign == 0 {
+				return nil, errors.New("WAVE data precedes its fmt chunk")
+			}
+			silence := uint64(byteRate) * uint64(lead) / uint64(time.Second)
+			alignment := uint64(blockAlign)
+			if alignment%2 != 0 {
+				alignment *= 2
+			}
+			silence -= silence % alignment
+			if silence == 0 {
+				return wav, nil
+			}
+			maxUint32 := uint64(^uint32(0))
+			riffSize := uint64(binary.LittleEndian.Uint32(wav[4:8]))
+			if uint64(size)+silence > maxUint32 || riffSize+silence > maxUint32 {
+				return nil, errors.New("padded WAVE exceeds RIFF size limits")
+			}
+
+			n := int(silence)
+			out := make([]byte, len(wav)+n)
+			copy(out, wav[:data])
+			copy(out[data+n:], wav[data:])
+			binary.LittleEndian.PutUint32(out[offset+4:offset+8], uint32(uint64(size)+silence))
+			binary.LittleEndian.PutUint32(out[4:8], uint32(riffSize+silence))
+			return out, nil
+		}
+		offset = end + size%2
+	}
+	return nil, errors.New("WAVE has no data chunk")
 }

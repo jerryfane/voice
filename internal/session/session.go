@@ -82,6 +82,8 @@ func (a *Assistant) HandleText(ctx context.Context, text string) (brain.Plan, er
 	return p, nil
 }
 
+const speechLeadIn = 250 * time.Millisecond
+
 // Speak synthesizes and plays one response.
 func (a *Assistant) Speak(ctx context.Context, text string) error {
 	if strings.TrimSpace(text) == "" {
@@ -90,6 +92,10 @@ func (a *Assistant) Speak(ctx context.Context, text string) error {
 	wav, err := a.TTS.Synthesize(ctx, text)
 	if err != nil {
 		return err
+	}
+	wav, err = audio.PrependWAVSilence(wav, speechLeadIn)
+	if err != nil {
+		return fmt.Errorf("pad speech lead-in: %w", err)
 	}
 	return a.Player.PlayWAV(ctx, wav)
 }

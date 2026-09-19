@@ -136,9 +136,11 @@ func (*queuedTranscriber) Available() (bool, string) { return true, "available" 
 
 type testSynthesizer struct{}
 
-func (testSynthesizer) Synthesize(context.Context, string) ([]byte, error) { return nil, nil }
-func (testSynthesizer) Name() string                                       { return "test synthesizer" }
-func (testSynthesizer) Available() (bool, string)                          { return true, "available" }
+func (testSynthesizer) Synthesize(context.Context, string) ([]byte, error) {
+	return audio.EncodeWAV([]int16{1}, audio.Default()), nil
+}
+func (testSynthesizer) Name() string              { return "test synthesizer" }
+func (testSynthesizer) Available() (bool, string) { return true, "available" }
 
 type countingPlanner struct{ calls int }
 
