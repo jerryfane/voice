@@ -51,7 +51,15 @@ sudo chmod 0440 /etc/sudoers.d/voice-agent
 sudo visudo -cf /etc/sudoers.d/voice-agent >/dev/null
 printf '%s\n' "$owner" | sudo tee /etc/voice/herdr-owner >/dev/null
 sudo chmod 0644 /etc/voice/herdr-owner
-sudo install -m 0755 "$herdr_bin" /usr/local/libexec/voice-herdr-real
+# Only when it is a DIFFERENT file. Once the wrapper is installed, `command
+# -v herdr` resolves to it and the lines above rewrite herdr_bin to the real
+# binary the wrapper already delegates to - so a second install asked to copy
+# that file onto itself and aborted with "are the same file", taking every
+# later step with it. An installer that only works on a clean machine is not
+# an installer.
+if [ "$herdr_bin" != /usr/local/libexec/voice-herdr-real ]; then
+  sudo install -m 0755 "$herdr_bin" /usr/local/libexec/voice-herdr-real
+fi
 sudo install -m 0755 packaging/voice-herdr /usr/local/libexec/voice-herdr
 sudo install -m 0755 packaging/herdr /usr/local/bin/herdr
 sudo install -m 0755 packaging/voice-herdr-ensure /usr/local/bin/voice-herdr-ensure
