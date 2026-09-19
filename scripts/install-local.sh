@@ -115,7 +115,7 @@ fi
 # replaced aborted instead. Introduced by me and caught in review.
 config_filter="$wake_filter |
   .wake.detector = \"sherpa\" |
-  .wake.sherpa = {\"encoder\":\"/var/lib/voice/models/sherpa-kws/encoder.int8.onnx\",\"decoder\":\"/var/lib/voice/models/sherpa-kws/decoder.onnx\",\"joiner\":\"/var/lib/voice/models/sherpa-kws/joiner.int8.onnx\",\"tokens\":\"/var/lib/voice/models/sherpa-kws/tokens.txt\",\"keywords\":\"/var/lib/voice/models/sherpa-kws/keywords.txt\",\"num_threads\":1,\"max_active_paths\":4,\"keywords_score\":4,\"keywords_threshold\":0.15} |
+  .wake.sherpa = {\"encoder\":\"/var/lib/voice/models/sherpa-kws/encoder.int8.onnx\",\"decoder\":\"/var/lib/voice/models/sherpa-kws/decoder.onnx\",\"joiner\":\"/var/lib/voice/models/sherpa-kws/joiner.int8.onnx\",\"tokens\":\"/var/lib/voice/models/sherpa-kws/tokens.txt\",\"keywords\":\"/var/lib/voice/models/sherpa-kws/keywords.txt\",\"num_threads\":1,\"max_active_paths\":4,\"keywords_score\":4,\"keywords_threshold\":0.05} |
   .wake.vad.max_utterance = \"6s\" |
   .wake.vad.pre_roll = \"1.5s\" |
   .stt.model = \"/var/lib/voice/models/ggml-base.en.bin\" |

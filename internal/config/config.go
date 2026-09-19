@@ -352,7 +352,7 @@ func Default() Config {
 				NumThreads:        1,
 				MaxActivePaths:    4,
 				KeywordsScore:     4,
-				KeywordsThreshold: 0.15,
+				KeywordsThreshold: 0.05,
 			},
 			VAD: VAD{
 				Threshold:    0,

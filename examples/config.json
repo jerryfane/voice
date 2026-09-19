@@ -44,7 +44,7 @@
       "num_threads": 1,
       "max_active_paths": 4,
       "keywords_score": 4,
-      "keywords_threshold": 0.15
+      "keywords_threshold": 0.05
     },
     "vad": {
       "threshold": 0,
