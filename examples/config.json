@@ -43,8 +43,8 @@
       "keywords": "/var/lib/voice/models/sherpa-kws/keywords.txt",
       "num_threads": 1,
       "max_active_paths": 4,
-      "keywords_score": 3,
-      "keywords_threshold": 0.25
+      "keywords_score": 4,
+      "keywords_threshold": 0.15
     },
     "vad": {
       "threshold": 0,

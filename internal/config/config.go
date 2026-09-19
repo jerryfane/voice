@@ -351,8 +351,8 @@ func Default() Config {
 				Keywords:          "/var/lib/voice/models/sherpa-kws/keywords.txt",
 				NumThreads:        1,
 				MaxActivePaths:    4,
-				KeywordsScore:     3,
-				KeywordsThreshold: 0.25,
+				KeywordsScore:     4,
+				KeywordsThreshold: 0.15,
 			},
 			VAD: VAD{
 				Threshold:    0,

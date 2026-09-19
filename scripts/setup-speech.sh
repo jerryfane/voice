@@ -81,8 +81,8 @@ if [ ! -s "$kws_dir/encoder.int8.onnx" ] ||
   install -m 0644 "$extracted/tokens.txt" "$kws_dir/tokens.txt"
 fi
 printf '%s\n' \
-  'HH EY1 V OY1 S :3.0 #0.25 @HEY_VOICE' \
-  'HH EY1 B OY1 Z :3.0 #0.25 @HEY_BOYS' \
+  'HH EY1 V OY1 S :4.0 #0.15 @HEY_VOICE' \
+  'HH EY1 B OY1 Z :4.0 #0.15 @HEY_BOYS' \
   > "$kws_dir/keywords.txt"
 
 voice_base=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium
