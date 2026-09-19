@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+owner_file=/etc/voice/herdr-owner
+real_herdr=/usr/local/libexec/voice-herdr-real
+
+[ -r "$owner_file" ] || { echo "Herdr owner is not configured" >&2; exit 1; }
+owner=$(cat "$owner_file")
+[ -n "$owner" ] || { echo "Herdr owner is empty" >&2; exit 1; }
+
+if [ "$(id -un)" != "$owner" ]; then
+  exec sudo -n -H -u "$owner" /usr/local/libexec/voice-herdr "$@"
+fi
+
+[ -x "$real_herdr" ] || { echo "Herdr executable is not installed" >&2; exit 1; }
+exec "$real_herdr" "$@"

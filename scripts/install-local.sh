@@ -53,7 +53,7 @@ printf '%s\n' "$owner" | sudo tee /etc/voice/herdr-owner >/dev/null
 sudo chmod 0644 /etc/voice/herdr-owner
 sudo install -m 0755 "$herdr_bin" /usr/local/libexec/voice-herdr-real
 sudo install -m 0755 packaging/voice-herdr /usr/local/libexec/voice-herdr
-sudo install -m 0755 packaging/voice-herdr /usr/local/bin/herdr
+sudo install -m 0755 packaging/herdr /usr/local/bin/herdr
 sudo install -m 0755 packaging/voice-herdr-ensure /usr/local/bin/voice-herdr-ensure
 sudo install -m 0755 packaging/voice-agent-session /usr/local/bin/voice-agent-session
 sudo install -m 0755 packaging/voice-agent-run /usr/local/bin/voice-agent-run
