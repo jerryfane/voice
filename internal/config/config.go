@@ -734,7 +734,14 @@ func (c Config) Validate() error {
 	if c.Feedback.Volume < 0 || c.Feedback.Volume > 1 {
 		return fmt.Errorf("feedback.volume must be between 0 and 1, got %v", c.Feedback.Volume)
 	}
-	if _, err := audio.Earcon(c.Feedback.Sound, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.Volume); err != nil {
+	// A custom sound FILE is loaded and decoded here, at validation, so a
+	// missing or unreadable file is reported at startup rather than
+	// discovered as silence the first time someone speaks to the device.
+	if audio.IsSoundFile(c.Feedback.Sound) {
+		if _, err := audio.SoundFromFile(c.Feedback.Sound, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.Volume); err != nil {
+			return err
+		}
+	} else if _, err := audio.Earcon(c.Feedback.Sound, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.Volume); err != nil {
 		return fmt.Errorf("feedback.sound: %w", err)
 	}
 	// Validated here for the same reason as the acknowledgement: a typo must

@@ -299,6 +299,28 @@ Login is not automated. The installer prints the one command that needs a person
 because it opens a browser flow against the owner's Spotify account. Premium is
 required for playback through this client.
 
+## A custom wake sound
+
+`feedback.sound` takes either a built-in name (`chime`, `blip`, `two-up`,
+`none`) or a **path to a WAV file**:
+
+```json
+"feedback": { "sound": "/etc/voice/sounds/bubble.wav", "volume": 0.65 }
+```
+
+The file is loaded and checked when the config loads, so a missing or
+undecodable file is reported at startup rather than discovered as silence the
+first time someone speaks.
+
+- **16-bit PCM WAV only.** Other encodings are refused with the `ffmpeg` line
+  that converts them. Accepting a file and playing noise would be worse.
+- **Stereo is mixed down and the rate is resampled** to the session format, so
+  a file downloaded from any generator works without hand-conversion.
+- **Trailing silence is trimmed.** Generators pad to round durations - a real
+  example arrived as 0.504 s of file containing 0.186 s of sound - and that
+  padding holds the speaker open while the microphone is already listening for
+  the command.
+
 ## Security boundary
 
 A spoken command can cause shell or browser activity. Isolation is therefore an OS boundary, not merely a prompt instruction:
