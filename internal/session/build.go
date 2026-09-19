@@ -72,7 +72,14 @@ func Build(c config.Config) *Assistant {
 			)
 		}
 	}
-	tts := speech.NewCommandSynthesizer(c.TTS.Name, c.TTS.Command, c.TTS.Model, c.TTS.Timeout.D(), faults.Log(logger, "text-to-speech"))
+	localTTS := speech.NewCommandSynthesizer(c.TTS.Name, c.TTS.Command, c.TTS.Model, c.TTS.Timeout.D(), faults.Log(logger, "text-to-speech"))
+	var tts speech.Synthesizer = localTTS
+	if remote := c.TTS.OpenRouter; remote != nil {
+		tts = speech.NewSynthesizerCascade(logger,
+			speech.NewOpenRouterSynthesizer(remote.Endpoint, remote.Model, remote.Voice, os.Getenv(remote.APIKeyEnv), remote.Timeout.D(), logger),
+			localTTS,
+		)
+	}
 	ext := brain.NewExternal("brain", c.Brain.Command, c.Brain.Persona, c.Brain.Timeout.D(), c.Brain.Mode)
 	var planner brain.Planner = ext
 	if jev := c.Brain.Jev; jev != nil {

@@ -46,8 +46,8 @@ type Config struct {
 	Timers Timers `json:"timers"`
 	// STT configures local and optional remote speech-to-text engines.
 	STT STT `json:"stt"`
-	// TTS is text-to-speech.
-	TTS Engine `json:"tts"`
+	// TTS configures local speech plus an optional remote primary.
+	TTS TTS `json:"tts"`
 	// Brain is the reasoning layer.
 	Brain Brain `json:"brain"`
 	// Lights are Zengge/Magic Home controllers (local protocol, port 5577).
@@ -226,6 +226,24 @@ type OpenRouterSTT struct {
 	Timeout   Duration `json:"timeout"`
 }
 
+// TTS keeps the command engine as the offline fallback and optionally puts
+// OpenRouter speech in front of it.
+type TTS struct {
+	Engine
+	OpenRouter *OpenRouterTTS `json:"openrouter,omitempty"`
+}
+
+// OpenRouterTTS describes conversational audio output through chat
+// completions. APIKeyEnv names the environment variable; the secret itself
+// never belongs in config.
+type OpenRouterTTS struct {
+	Endpoint  string   `json:"endpoint"`
+	Model     string   `json:"model"`
+	Voice     string   `json:"voice"`
+	APIKeyEnv string   `json:"api_key_env"`
+	Timeout   Duration `json:"timeout"`
+}
+
 // Brain configures reasoning.
 type Brain struct {
 	// Mode is "plan" (model returns JSON) or "agent" (a persistent session with
@@ -391,12 +409,21 @@ func Default() Config {
 				Timeout:   Duration(5 * time.Second),
 			},
 		},
-		TTS: Engine{
-			Name:    "piper",
-			Model:   "models/en_US-amy-medium.onnx",
-			Timeout: Duration(30 * time.Second),
-			Command: Command{
-				"piper", "--model", "{model}", "--output_file", "-",
+		TTS: TTS{
+			Engine: Engine{
+				Name:    "piper",
+				Model:   "models/en_US-amy-medium.onnx",
+				Timeout: Duration(30 * time.Second),
+				Command: Command{
+					"piper", "--model", "{model}", "--output_file", "-",
+				},
+			},
+			OpenRouter: &OpenRouterTTS{
+				Endpoint:  "https://openrouter.ai/api/v1/chat/completions",
+				Model:     "openai/gpt-audio-mini",
+				Voice:     "marin",
+				APIKeyEnv: "OPENROUTER_API_KEY",
+				Timeout:   Duration(5 * time.Second),
 			},
 		},
 		Brain: Brain{
@@ -666,6 +693,27 @@ func (c Config) Validate() error {
 		}
 		if c.STT.OpenRouter.Timeout.D() <= 0 {
 			return fmt.Errorf("stt.openrouter.timeout must be positive")
+		}
+	}
+	if c.TTS.OpenRouter != nil {
+		if strings.TrimSpace(c.TTS.OpenRouter.Endpoint) == "" {
+			return fmt.Errorf("tts.openrouter.endpoint is empty")
+		}
+		u, err := url.Parse(c.TTS.OpenRouter.Endpoint)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return fmt.Errorf("tts.openrouter.endpoint must be an HTTPS URL")
+		}
+		if strings.TrimSpace(c.TTS.OpenRouter.Model) == "" {
+			return fmt.Errorf("tts.openrouter.model is empty")
+		}
+		if strings.TrimSpace(c.TTS.OpenRouter.Voice) == "" {
+			return fmt.Errorf("tts.openrouter.voice is empty")
+		}
+		if strings.TrimSpace(c.TTS.OpenRouter.APIKeyEnv) == "" {
+			return fmt.Errorf("tts.openrouter.api_key_env is empty")
+		}
+		if c.TTS.OpenRouter.Timeout.D() <= 0 {
+			return fmt.Errorf("tts.openrouter.timeout must be positive")
 		}
 	}
 	switch c.Feedback.Light {

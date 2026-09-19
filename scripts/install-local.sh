@@ -58,6 +58,23 @@ sudo install -m 0755 packaging/voice-herdr-ensure /usr/local/bin/voice-herdr-ens
 sudo install -m 0755 packaging/voice-agent-session /usr/local/bin/voice-agent-session
 sudo install -m 0755 packaging/voice-agent-run /usr/local/bin/voice-agent-run
 sudo install -o "$agent_user" -g "$agent_user" -m 0644 packaging/voice-response.ts "$agent_home/.omp/agent/extensions/voice-response.ts"
+
+# The public wrapper has two security domains: the owner keeps the complete
+# Herdr CLI (federation uses `api`), while voice-agent crosses sudo into the
+# scoped bridge. Reinstalls used to leave one side working and silently break
+# the other, so prove both branches immediately after replacing the wrapper.
+if ! /usr/local/bin/herdr api schema --json >/dev/null; then
+  echo "installed Herdr wrapper blocks the owner's API commands" >&2
+  exit 1
+fi
+if sudo -n -H -u "$agent_user" /usr/local/bin/herdr api schema --json >/dev/null 2>&1; then
+  echo "installed Herdr wrapper exposes API commands to $agent_user" >&2
+  exit 1
+fi
+if sudo -n -H -u "$agent_user" /usr/local/bin/herdr kill >/dev/null 2>&1; then
+  echo "installed Herdr wrapper exposes process control to $agent_user" >&2
+  exit 1
+fi
 "$herdr_bin" --skill > /tmp/voice-herdr-skill.md
 sudo install -o "$agent_user" -g "$agent_user" -m 0644 /tmp/voice-herdr-skill.md "$agent_home/.omp/agent/skills/herdr/SKILL.md"
 rm -f /tmp/voice-herdr-skill.md
@@ -130,6 +147,7 @@ config_filter="$wake_filter |
   .stt.resident //= {\"endpoint\":\"http://127.0.0.1:8178/inference\",\"timeout\":\"10s\"} |
   .stt.openrouter //= {\"endpoint\":\"https://openrouter.ai/api/v1/audio/transcriptions\",\"model\":\"openai/whisper-large-v3-turbo\",\"api_key_env\":\"OPENROUTER_API_KEY\",\"timeout\":\"5s\"} |
   .tts.model = \"/var/lib/voice/models/en_US-amy-medium.onnx\" |
+  .tts.openrouter //= {\"endpoint\":\"https://openrouter.ai/api/v1/chat/completions\",\"model\":\"openai/gpt-audio-mini\",\"voice\":\"marin\",\"api_key_env\":\"OPENROUTER_API_KEY\",\"timeout\":\"5s\"} |
   .brain.mode = \"agent\" |
   .brain.command = [\"voice-agent-run\", \"{prompt}\"] |
   .brain.timeout = \"10m0s\" |

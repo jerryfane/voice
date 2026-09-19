@@ -87,6 +87,30 @@ function publish(id: string, payload: Record<string, unknown>): void {
   fs.writeFileSync(temporary, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
   fs.renameSync(temporary, destination);
 }
+function voiceEnvironment(): NodeJS.ProcessEnv {
+  const env = { ...process.env, HOME: "/home/voice-agent" };
+  try {
+    const line = fs
+      .readFileSync("/etc/voice/voice.env", "utf8")
+      .split(/\r?\n/)
+      .find((entry) => /^\s*OPENROUTER_API_KEY\s*=/.test(entry));
+    if (line) {
+      let value = line.slice(line.indexOf("=") + 1).trim();
+      if (
+        value.length >= 2 &&
+        ((value.startsWith("\"") && value.endsWith("\"")) ||
+          (value.startsWith("'") && value.endsWith("'")))
+      ) {
+        value = value.slice(1, -1);
+      }
+      if (value) env.OPENROUTER_API_KEY = value;
+    }
+  } catch {
+    // Missing credentials are expected on offline installs; Voice falls back.
+  }
+  return env;
+}
+
 function runVoiceCommand(args: string, context: CommandContext): void {
   const match = /^\s*say\s+([\s\S]*\S)\s*$/.exec(args);
   if (!match) {
@@ -99,7 +123,7 @@ function runVoiceCommand(args: string, context: CommandContext): void {
     {
       encoding: "utf8",
       timeout: 60_000,
-      env: { ...process.env, HOME: "/home/voice-agent" },
+      env: voiceEnvironment(),
     },
   );
   if (result.error || result.status !== 0) {
@@ -128,7 +152,7 @@ function runVoicePlan(output: string, context: CommandContext): void {
     {
       encoding: "utf8",
       timeout: 120_000,
-      env: { ...process.env, HOME: "/home/voice-agent" },
+      env: voiceEnvironment(),
     },
   );
   if (result.error || result.status !== 0) {

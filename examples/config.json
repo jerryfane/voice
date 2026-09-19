@@ -100,7 +100,14 @@
       "-"
     ],
     "model": "models/en_US-amy-medium.onnx",
-    "timeout": "30s"
+    "timeout": "30s",
+    "openrouter": {
+      "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+      "model": "openai/gpt-audio-mini",
+      "voice": "marin",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "timeout": "5s"
+    }
   },
   "brain": {
     "mode": "agent",

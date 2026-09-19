@@ -160,6 +160,20 @@ reports what was selected and why, and commands keep working.
 `sound` is a generated waveform, not a bundled asset: `chime`, `blip`,
 `two-up`, or `none`. `volume` scales it between 0 and 1.
 
+## Speech output
+
+Piper is the offline speech engine. When `tts.openrouter` is configured and
+its API key environment variable is present, Voice first asks
+`openai/gpt-audio-mini` for streaming 24 kHz mono PCM16 speech through the
+OpenRouter chat-completions endpoint. The shipped voice is `marin`.
+
+The remote model is conversational rather than a strict narrator. Voice checks
+the transcript returned with every audio stream against the requested words
+before playing it. Added, omitted or changed words reject the remote audio and
+fall back to Piper, as do missing credentials, timeouts and network failures.
+The secret belongs in `/etc/voice/voice.env`, which the local installer creates
+as `root:voice-agent` mode `0640`; it never belongs in `config.json`.
+
 ## Timers
 
 Timers are local. "Hey Voice, set a timer for ten minutes" is parsed,
