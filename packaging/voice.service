@@ -23,7 +23,9 @@ Environment=XDG_STATE_HOME=/var/lib
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=6
-NoNewPrivileges=true
+# The restricted Herdr bridge uses sudo only to cross into the owner's Herdr
+# socket; /etc/sudoers.d/voice-agent limits that hop to the scoped wrapper.
+NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
