@@ -99,10 +99,14 @@ func Build(c config.Config) *Assistant {
 	if _, off := light.(feedback.Nop); off && c.Feedback.Light != feedback.LightNone {
 		logger.Printf("wake light: %s", why)
 	}
+	// A path loads a file; a bare name renders a built-in. Validate has
+	// already proved whichever it is can be produced, so a failure here means
+	// a config assembled in code rather than loaded from disk.
 	sound, err := audio.Earcon(c.Feedback.Sound, f, c.Feedback.Volume)
+	if audio.IsSoundFile(c.Feedback.Sound) {
+		sound, err = audio.SoundFromFile(c.Feedback.Sound, f, c.Feedback.Volume)
+	}
 	if err != nil {
-		// Validate rejects unknown names, so this only happens for a config
-		// built in code.
 		logger.Printf("wake sound: %v", err)
 	}
 	sound = audio.PrependPCMSilence(sound, f, playbackLeadIn)

@@ -617,8 +617,12 @@ func (c Config) Validate() error {
 	if len(c.Output.Command) == 0 {
 		return fmt.Errorf("output.command is empty: nothing can play audio")
 	}
-	if c.Input.SampleRate <= 0 {
-		return fmt.Errorf("input.sample_rate must be positive (16000 for whisper)")
+	// Bounded, not merely positive. The session rate scales every audio
+	// buffer derived from it, and review panicked the startup path with a
+	// MaxInt rate: the multiplication overflowed before any limit applied.
+	if c.Input.SampleRate < audio.MinSampleRate || c.Input.SampleRate > audio.MaxSampleRate {
+		return fmt.Errorf("input.sample_rate must be between %d and %d (16000 for whisper), got %d",
+			audio.MinSampleRate, audio.MaxSampleRate, c.Input.SampleRate)
 	}
 	if len(c.Wake.Phrases) == 0 {
 		return fmt.Errorf("wake.phrases is empty: Voice would never wake")
@@ -734,7 +738,14 @@ func (c Config) Validate() error {
 	if c.Feedback.Volume < 0 || c.Feedback.Volume > 1 {
 		return fmt.Errorf("feedback.volume must be between 0 and 1, got %v", c.Feedback.Volume)
 	}
-	if _, err := audio.Earcon(c.Feedback.Sound, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.Volume); err != nil {
+	// A custom sound FILE is loaded and decoded here, at validation, so a
+	// missing or unreadable file is reported at startup rather than
+	// discovered as silence the first time someone speaks to the device.
+	if audio.IsSoundFile(c.Feedback.Sound) {
+		if _, err := audio.SoundFromFile(c.Feedback.Sound, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.Volume); err != nil {
+			return err
+		}
+	} else if _, err := audio.Earcon(c.Feedback.Sound, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.Volume); err != nil {
 		return fmt.Errorf("feedback.sound: %w", err)
 	}
 	// Validated here for the same reason as the acknowledgement: a typo must
