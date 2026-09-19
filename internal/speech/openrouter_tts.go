@@ -154,7 +154,10 @@ func readSpeechStream(r io.Reader, started time.Time) ([]byte, string, float64, 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64<<10), 8<<20)
 	pcm := make([]byte, 0, 256<<10)
-	var transcript strings.Builder
+	// A slice rather than a strings.Builder: Builder.WriteString returns a
+	// result, this repo runs errcheck with no exclude file, and a discarded
+	// result there fails CI - which is exactly how main went red.
+	var transcript []string
 	var firstAudio float64
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -186,7 +189,9 @@ func readSpeechStream(r io.Reader, started time.Time) ([]byte, string, float64, 
 		}
 		for _, choice := range event.Choices {
 			chunk := choice.Delta.Audio
-			transcript.WriteString(chunk.Transcript)
+			if chunk.Transcript != "" {
+				transcript = append(transcript, chunk.Transcript)
+			}
 			if chunk.Data == "" {
 				continue
 			}
@@ -212,10 +217,10 @@ func readSpeechStream(r io.Reader, started time.Time) ([]byte, string, float64, 
 	if len(pcm)%2 != 0 {
 		return nil, "", 0, errors.New("OpenRouter returned an incomplete PCM16 sample")
 	}
-	if strings.TrimSpace(transcript.String()) == "" {
+	if strings.TrimSpace(strings.Join(transcript, "")) == "" {
 		return nil, "", 0, errors.New("OpenRouter returned no speech transcript")
 	}
-	return pcm, transcript.String(), firstAudio, nil
+	return pcm, strings.Join(transcript, ""), firstAudio, nil
 }
 
 func sameSpokenWords(want, got string) bool {

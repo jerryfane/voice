@@ -27,7 +27,12 @@ type response struct {
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		// The write result is handled rather than discarded: this repo
+		// requires errcheck with no exclude file to pass, and a report tool
+		// that cannot even write its own error should still exit nonzero.
+		if _, writeErr := fmt.Fprintln(os.Stderr, err); writeErr != nil {
+			os.Exit(2)
+		}
 		os.Exit(1)
 	}
 }
@@ -82,7 +87,7 @@ func run(args []string) error {
 	return send(req)
 }
 
-func send(req request) error {
+func send(req request) (err error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve Herdr owner home: %w", err)
@@ -91,7 +96,13 @@ func send(req request) error {
 	if err != nil {
 		return fmt.Errorf("connect to Herdr: %w", err)
 	}
-	defer conn.Close() // discard: closing a local socket cannot recover the completed report
+	// The close result joins the returned error rather than being dropped.
+	// This repo runs errcheck with no exclude file, so `defer conn.Close()`
+	// fails the build - and on a socket carrying a report, a close failure
+	// can mean the report never reached Herdr, which the caller should see.
+	defer func() {
+		err = errors.Join(err, conn.Close())
+	}()
 	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		return fmt.Errorf("set Herdr deadline: %w", err)
 	}
