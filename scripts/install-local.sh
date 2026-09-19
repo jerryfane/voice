@@ -8,9 +8,51 @@ agent_user=voice-agent
 agent_home=/home/voice-agent
 workspace=$agent_home/voice-workspace
 start_service=${VOICE_INSTALL_START:-1}
+# Find the REAL herdr, not the bridge wrapper this script installs under the
+# same name. Once the wrapper exists, `command -v herdr` finds it first, so a
+# genuinely upgraded herdr further along PATH would be invisible and the copy
+# in libexec would stay at whatever version it was - silently stale.
+canonical() { readlink -f "$1" 2>/dev/null || printf '%s\n' "$1"; }
+is_script() { [ "$(head -c 2 "$1" 2>/dev/null)" = "#!" ]; }
+
+wrapper_real=$(canonical /usr/local/bin/herdr)
+backend_real=$(canonical /usr/local/libexec/voice-herdr-real)
+
 herdr_bin=$(command -v herdr 2>/dev/null || true)
-if [ "$herdr_bin" = /usr/local/bin/herdr ] && [ -x /usr/local/libexec/voice-herdr-real ]; then
-  herdr_bin=/usr/local/libexec/voice-herdr-real
+# Canonicalised BEFORE the comparison. A literal test here was the hole:
+# with a symlinked directory first on PATH `command -v` answers
+# <alias>/herdr, and with a trailing slash it answers /usr/local/bin//herdr -
+# neither string equals the wrapper path, so the whole protective block below
+# was skipped and the wrapper was copied over the backend it delegates to.
+if [ -n "$herdr_bin" ] && [ "$(canonical "$herdr_bin")" = "$wrapper_real" ]; then
+  herdr_bin=""
+  saved_ifs=$IFS
+  IFS=:
+  for dir in $PATH; do
+    # Empty and relative entries are skipped rather than resolved. An empty
+    # element means the current directory, and an installer that can pick up
+    # a herdr from wherever it happens to be run is a way in, not a feature.
+    case "$dir" in
+      "" | [!/]*) continue ;;
+    esac
+    candidate=$(canonical "$dir/herdr")
+    [ -x "$candidate" ] || continue
+    [ "$candidate" = "$wrapper_real" ] && continue
+    [ "$candidate" = "$backend_real" ] && continue
+    # The real herdr is a compiled binary; every wrapper here is a shell
+    # script. An independent second guard against installing a wrapper as
+    # the backend.
+    is_script "$candidate" && continue
+    herdr_bin=$candidate
+    break
+  done
+  IFS=$saved_ifs
+
+  # Nothing newer anywhere: keep what is already installed rather than
+  # copying the wrapper over the binary it delegates to.
+  if [ -z "$herdr_bin" ] && [ -x /usr/local/libexec/voice-herdr-real ]; then
+    herdr_bin=/usr/local/libexec/voice-herdr-real
+  fi
 fi
 
 run_as_agent() {
@@ -51,7 +93,22 @@ sudo chmod 0440 /etc/sudoers.d/voice-agent
 sudo visudo -cf /etc/sudoers.d/voice-agent >/dev/null
 printf '%s\n' "$owner" | sudo tee /etc/voice/herdr-owner >/dev/null
 sudo chmod 0644 /etc/voice/herdr-owner
-sudo install -m 0755 "$herdr_bin" /usr/local/libexec/voice-herdr-real
+# Only when it is a DIFFERENT file. Once the wrapper is installed, `command
+# -v herdr` resolves to it and the lines above rewrite herdr_bin to the real
+# binary the wrapper already delegates to - so a second install asked to copy
+# that file onto itself and aborted with "are the same file", taking every
+# later step with it. An installer that only works on a clean machine is not
+# an installer.
+# Last line of defence, independent of how herdr_bin was resolved: never
+# install the wrapper, a script, or the backend onto itself. Whatever route
+# the value arrived by, the backend must end up being a real herdr.
+if [ -n "$herdr_bin" ] && [ "$(canonical "$herdr_bin")" != "$backend_real" ]; then
+  if [ "$(canonical "$herdr_bin")" = "$wrapper_real" ] || is_script "$herdr_bin"; then
+    echo "refusing to install $herdr_bin as the Herdr backend: it is the bridge wrapper, which delegates to that path and would exec itself forever" >&2
+    exit 1
+  fi
+  sudo install -m 0755 "$herdr_bin" /usr/local/libexec/voice-herdr-real
+fi
 sudo install -m 0755 packaging/voice-herdr /usr/local/libexec/voice-herdr
 sudo install -m 0755 packaging/herdr /usr/local/bin/herdr
 sudo install -m 0755 packaging/voice-herdr-ensure /usr/local/bin/voice-herdr-ensure
