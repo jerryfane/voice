@@ -77,6 +77,14 @@ if [ -d "$owner_home/.local/share/voice" ]; then
   sudo cp -a "$owner_home/.local/share/voice/." /var/lib/voice/
   sudo chown -R "$agent_user:$agent_user" /var/lib/voice
 fi
+keywords_tmp=$(mktemp)
+printf '%s\n' \
+  'HH EY1 V OY1 S :4.0 #0.05 @HEY_VOICE' \
+  'HH EY1 B OY1 Z :4.0 #0.05 @HEY_BOYS' \
+  'V OY1 S :4.0 #0.05 @VOICE' \
+  > "$keywords_tmp"
+sudo install -o "$agent_user" -g "$agent_user" -m 0644 "$keywords_tmp" /var/lib/voice/models/sherpa-kws/keywords.txt
+rm -f "$keywords_tmp"
 if [ -x "$owner_home/.local/bin/whisper-cli" ]; then
   sudo install -m 0755 "$owner_home/.local/bin/whisper-cli" /usr/local/bin/whisper-cli
 fi

@@ -83,6 +83,7 @@ fi
 printf '%s\n' \
   'HH EY1 V OY1 S :4.0 #0.05 @HEY_VOICE' \
   'HH EY1 B OY1 Z :4.0 #0.05 @HEY_BOYS' \
+  'V OY1 S :4.0 #0.05 @VOICE' \
   > "$kws_dir/keywords.txt"
 
 voice_base=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium
