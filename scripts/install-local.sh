@@ -19,12 +19,21 @@ wrapper_real=$(canonical /usr/local/bin/herdr)
 backend_real=$(canonical /usr/local/libexec/voice-herdr-real)
 
 herdr_bin=$(command -v herdr 2>/dev/null || true)
+# A non-absolute answer is discarded outright. command -v honours empty and
+# relative PATH entries, so on a clean machine - or whenever ./herdr precedes
+# the wrapper - the lookup returns a path relative to wherever this script was
+# run, and the protective walk below never executed. Review installed
+# /bin/false as the Herdr backend that way.
+case "$herdr_bin" in
+  /*) ;;
+  *) herdr_bin="" ;;
+esac
 # Canonicalised BEFORE the comparison. A literal test here was the hole:
 # with a symlinked directory first on PATH `command -v` answers
 # <alias>/herdr, and with a trailing slash it answers /usr/local/bin//herdr -
 # neither string equals the wrapper path, so the whole protective block below
 # was skipped and the wrapper was copied over the backend it delegates to.
-if [ -n "$herdr_bin" ] && [ "$(canonical "$herdr_bin")" = "$wrapper_real" ]; then
+if [ -z "$herdr_bin" ] || [ "$(canonical "$herdr_bin")" = "$wrapper_real" ]; then
   herdr_bin=""
   saved_ifs=$IFS
   IFS=:
@@ -103,6 +112,13 @@ sudo chmod 0644 /etc/voice/herdr-owner
 # install the wrapper, a script, or the backend onto itself. Whatever route
 # the value arrived by, the backend must end up being a real herdr.
 if [ -n "$herdr_bin" ] && [ "$(canonical "$herdr_bin")" != "$backend_real" ]; then
+  case "$herdr_bin" in
+    /*) ;;
+    *)
+      echo "refusing to install $herdr_bin as the Herdr backend: only an absolute path is trusted" >&2
+      exit 1
+      ;;
+  esac
   if [ "$(canonical "$herdr_bin")" = "$wrapper_real" ] || is_script "$herdr_bin"; then
     echo "refusing to install $herdr_bin as the Herdr backend: it is the bridge wrapper, which delegates to that path and would exec itself forever" >&2
     exit 1
