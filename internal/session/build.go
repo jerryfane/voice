@@ -121,7 +121,7 @@ func Build(c config.Config) *Assistant {
 	if err != nil {
 		logger.Printf("thinking sound: %v", err)
 	}
-	fb := &feedback.Notifier{Indicator: light, Player: player, Sound: sound, Working: working, Format: f, Logger: logger}
+	fb := &feedback.Notifier{Indicator: light, Player: player, Sound: sound, Working: working, ThinkingDelay: c.Feedback.ThinkingDelay.D(), Format: f, Logger: logger}
 	params := vad.Params{Threshold: c.Wake.VAD.Threshold, MinSpeech: frames(c.Wake.VAD.MinSpeech), Silence: frames(c.Wake.VAD.Silence), MaxUtterance: frames(c.Wake.VAD.MaxUtterance), PreRoll: frames(c.Wake.VAD.PreRoll), FrameSize: frame}
 	var seg vad.Segmenter = vad.NewEnergy(params)
 	if c.Wake.Detector == "sherpa" && c.Wake.Sherpa != nil {

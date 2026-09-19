@@ -217,6 +217,7 @@ config_filter="$wake_filter |
   del(.wake.follow_up) |
   .wake.follow_up_timeout //= \"6s\" |
   .feedback.volume = (if .feedback.volume == null or .feedback.volume == 0.35 then 0.65 else .feedback.volume end) |
+  .feedback.thinking_delay //= \"250ms\" |
   .wake.vad.max_utterance = \"6s\" |
   .wake.vad.pre_roll = \"1.5s\" |
   .stt.model = \"/var/lib/voice/models/ggml-base.en.bin\" |

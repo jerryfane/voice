@@ -140,19 +140,26 @@ Speech engines and models are external. `scripts/setup-speech.sh` installs the S
 ## Activation feedback
 
 When a standalone wake phrase is accepted, Voice immediately switches the
-speakerphone LED to a listening state and starts a short generated tone. The
-PowerConf receives a silent lead-in so its output path wakes before the tone;
-the captured lead-in and tone are discarded rather than transcribed as the
-follow-up command. Inline wake commands play the acknowledgement only after the
-whole utterance is captured, so the sound cannot mask the command. All feedback
-is local, costs no model call, and works with no network. Ambient noise, an
-embedded mention, or an approximate phrase produce none. The light returns to
-idle on success, failure, timeout, cancellation, and shutdown.
+speakerphone LED to a listening state and starts the acknowledgement sound. The
+PowerConf receives a silent lead-in so its output path wakes before the sound;
+the captured lead-in and sound are discarded rather than transcribed as the
+follow-up command. Inline wake commands acknowledge after the whole utterance
+is captured, so playback cannot mask the command.
+
+Once a wake-authorized utterance closes, processing feedback begins before
+transcription and remains active through routing, device work, and agent
+planning. `thinking_delay` is a short grace period: requests that finish inside
+it stay silent by construction. Processing playback is cancelled and joined
+before response speech starts. Ambient noise, an embedded mention, or an
+approximate wake phrase produce no feedback. The light returns to idle on
+success, failure, timeout, cancellation, and shutdown.
 
 ```json
 "feedback": {
   "light": "auto",
   "sound": "chime",
+  "thinking": "tick",
+  "thinking_delay": "250ms",
   "volume": 0.65
 }
 ```
@@ -167,8 +174,11 @@ up never clears that off-hook bit. A device whose descriptor advertises no
 usable LED, or that cannot be opened, costs only the light: `voice doctor`
 reports what was selected and why, and commands keep working.
 
-`sound` is a generated waveform, not a bundled asset: `chime`, `blip`,
-`two-up`, or `none`. `volume` scales it between 0 and 1.
+`sound` is a generated waveform (`chime`, `blip`, `two-up`, or `none`) or a
+WAV path. `thinking` is `tick`, `hum`, `none`, or a WAV path.
+`thinking_delay` must be positive. `volume` scales acknowledgement playback
+between 0 and 1; `thinking_volume` optionally controls processing playback
+independently.
 
 ## Speech output
 

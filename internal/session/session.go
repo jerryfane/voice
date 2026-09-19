@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jerryfane/voice/internal/audio"
@@ -169,20 +170,23 @@ func (a *Assistant) Run(ctx context.Context) error {
 			a.logf("stage=segment state=ok samples=%d ms=%d peak=%.4f truncated=%v",
 				len(u.PCM), ms, u.Peak, u.Truncated)
 			if u.WakeMatched {
+				// The streaming detector has already proved this utterance is
+				// wake-authorized, so processing feedback can cover STT too.
+				// Inline commands acknowledge here; standalone follow-ups
+				// were acknowledged before their command capture began.
+				stopThinking := a.beginProcessing(ctx, !u.WakeAcknowledged)
 				text, err := a.STT.Transcribe(ctx, u.PCM, u.Format)
 				if err != nil {
+					stopThinking()
+					a.Feedback.Restore()
 					a.logf("stage=transcribe state=failed err=%v", err)
-					if u.WakeAcknowledged {
-						a.Feedback.Restore()
-					}
 					continue
 				}
 				text = strings.TrimSpace(text)
 				if text == "" {
+					stopThinking()
+					a.Feedback.Restore()
 					a.logf("stage=transcribe state=empty peak=%.4f", u.Peak)
-					if u.WakeAcknowledged {
-						a.Feedback.Restore()
-					}
 					continue
 				}
 				a.logf("stage=transcribe state=ok heard=%q peak=%.4f", text, u.Peak)
@@ -191,7 +195,7 @@ func (a *Assistant) Run(ctx context.Context) error {
 					command = cloudCommand
 				}
 				a.logf("stage=wake state=accepted source=streaming keyword=%q command=%q follow_up=%v", u.Keyword, command, u.WakeAcknowledged)
-				if stop := a.accepted(ctx, command, !u.WakeAcknowledged); stop {
+				if stop := a.accepted(ctx, command, stopThinking); stop {
 					return nil
 				}
 				continue
@@ -210,9 +214,12 @@ func (a *Assistant) Run(ctx context.Context) error {
 					continue
 				}
 				a.logf("stage=wake state=matched source=local-stt ms=%.3f", sinceMS(started))
+				// This local transcript is the privacy gate: feedback begins
+				// only after it proves the utterance contains a wake phrase.
+				stopThinking := a.beginProcessing(ctx, true)
 				if command == "" {
 					a.logf("stage=wake state=accepted command=%q", command)
-					if stop := a.accepted(ctx, command, true); stop {
+					if stop := a.accepted(ctx, command, stopThinking); stop {
 						return nil
 					}
 					continue
@@ -220,11 +227,15 @@ func (a *Assistant) Run(ctx context.Context) error {
 
 				text, err := a.STT.Transcribe(ctx, u.PCM, u.Format)
 				if err != nil {
+					stopThinking()
+					a.Feedback.Restore()
 					a.logf("stage=transcribe state=failed err=%v", err)
 					continue
 				}
 				text = strings.TrimSpace(text)
 				if text == "" {
+					stopThinking()
+					a.Feedback.Restore()
 					a.logf("stage=transcribe state=empty peak=%.4f", u.Peak)
 					continue
 				}
@@ -233,7 +244,7 @@ func (a *Assistant) Run(ctx context.Context) error {
 					command = cloudCommand
 				}
 				a.logf("stage=wake state=accepted command=%q", command)
-				if stop := a.accepted(ctx, command, true); stop {
+				if stop := a.accepted(ctx, command, stopThinking); stop {
 					return nil
 				}
 				continue
@@ -256,7 +267,8 @@ func (a *Assistant) Run(ctx context.Context) error {
 				continue
 			}
 			a.logf("stage=wake state=matched command=%q", command)
-			if stop := a.accepted(ctx, command, true); stop {
+			stopThinking := a.beginProcessing(ctx, true)
+			if stop := a.accepted(ctx, command, stopThinking); stop {
 				return nil
 			}
 		}
@@ -290,38 +302,43 @@ func (a *Assistant) awaitCaptureStop(pcm <-chan []int16) {
 	}
 }
 
-// accepted handles one utterance that passed the wake gate. All local feedback
-// happens here and nowhere else, so ambient noise, an embedded mention or an
-// approximate phrase can never produce a light or a sound. acknowledge is
-// false only when the streaming segmenter already played feedback for a
-// standalone wake before collecting this follow-up command.
-func (a *Assistant) accepted(ctx context.Context, command string, acknowledge bool) (stop bool) {
+// beginProcessing starts all local feedback for one wake-authorized request.
+// It is deliberately called before remote transcription whenever the local
+// streaming detector or local STT gate has already established authorization.
+func (a *Assistant) beginProcessing(ctx context.Context, acknowledge bool) func() {
 	if acknowledge {
 		a.Feedback.Accepted(ctx)
 	}
+	return a.Feedback.Thinking(ctx)
+}
+
+// accepted handles one utterance that passed the wake gate. stopThinking owns
+// the processing-feedback lifecycle that may already have covered STT. Every
+// spoken exit stops and joins it first, so processing audio cannot overlap the
+// answer.
+func (a *Assistant) accepted(ctx context.Context, command string, stopThinking func()) (stop bool) {
+	if stopThinking == nil {
+		stopThinking = func() {}
+	}
+	stopThinking = sync.OnceFunc(stopThinking)
+	defer stopThinking()
 	defer a.Feedback.Restore()
 	if command == "" {
+		stopThinking()
 		a.speakLogged(ctx, "Please say Hey Voice followed by your request.")
 		return false
 	}
-	if a.timerControl(ctx, command) {
+	if a.timerControl(ctx, command, stopThinking) {
 		return false
 	}
 	if reply, stop, handled := localControl(command); handled {
+		stopThinking()
 		a.speakLogged(ctx, reply)
 		return stop
 	}
-	// The planner and the speaker are timed because they were the only
-	// unlogged stages, and they turned out to own almost all of a
-	// minute-long interaction on the device: capture, segment, transcribe and
-	// wake were all instrumented and all fast, so the slowest part of a real
-	// request was the one part nobody could see.
+	// The planner and speaker remain timed independently, while the processing
+	// sound now spans the earlier transcription and routing stages as well.
 	started := time.Now()
-	// The thinking sound runs only around the PLANNER, not around the local
-	// fast path or the spoken reply: a query answered on the device returns
-	// in milliseconds, and a loop started for it would be heard as a glitch.
-	// It stops before Speak so the loop never talks over the answer.
-	stopThinking := a.Feedback.Thinking(ctx)
 	p, err := a.HandleText(ctx, command)
 	stopThinking()
 	if err != nil {

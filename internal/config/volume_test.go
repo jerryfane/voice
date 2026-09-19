@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/jerryfane/voice/internal/audio"
+	"github.com/jerryfane/voice/internal/feedback"
 )
 
 // The thinking sound's level must be settable on its own, and an existing
@@ -104,5 +105,16 @@ func TestShippedWakeFeedbackIsAudibleAndFollowUpIsBounded(t *testing.T) {
 	c.Wake.FollowUpTimeout = 0
 	if err := c.Validate(); err == nil {
 		t.Fatal("zero follow-up timeout was accepted")
+	}
+}
+
+func TestThinkingDelayDefaultsToPromptFeedbackAndMustBePositive(t *testing.T) {
+	c := Default()
+	if got := c.Feedback.ThinkingDelay.D(); got != feedback.DefaultThinkingDelay {
+		t.Fatalf("thinking delay = %s, want %s", got, feedback.DefaultThinkingDelay)
+	}
+	c.Feedback.ThinkingDelay = 0
+	if err := c.Validate(); err == nil {
+		t.Fatal("zero thinking delay was accepted")
 	}
 }

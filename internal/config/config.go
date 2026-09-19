@@ -62,11 +62,10 @@ type Config struct {
 // phrase. It is emitted by the session layer, so it works with no network and
 // no model.
 type Feedback struct {
-	// Thinking is the sound played on a loop while the planner works: "tick",
-	// "hum" or "none". A request that leaves the device takes seconds, and
-	// silence during that wait is indistinguishable from Voice having missed
-	// the question. It starts only after the answer has already taken longer
-	// than a moment, so a locally answered query stays silent.
+	// Thinking is the sound played on a loop while a wake-gated request is
+	// transcribed, routed and handled: "tick", "hum", "none", or a WAV path.
+	// A request that leaves the device takes seconds, and silence during that
+	// wait is indistinguishable from Voice having missed the question.
 	//
 	// ThinkingVolume scales it independently of Volume, between 0 (silent)
 	// and 1 (full scale). It defaults to a third of Volume, which is where it
@@ -78,6 +77,9 @@ type Feedback struct {
 	// "I can't adjust the thinking sound volume from the controls available
 	// to me." Two requests for the same knob is enough.
 	Thinking string `json:"thinking"`
+	// ThinkingDelay keeps requests that complete immediately silent. It starts
+	// at the completed-utterance boundary, before transcription.
+	ThinkingDelay Duration `json:"thinking_delay"`
 	// Light selects which speakerphone LED shows that Voice is listening:
 	// "auto" takes the first indicator the configured input.telephony_hid
 	// device advertises, "none" disables the light, or name one explicitly
@@ -385,10 +387,11 @@ func Default() Config {
 			},
 		},
 		Feedback: Feedback{
-			Light:    "auto",
-			Sound:    audio.EarconChime,
-			Thinking: audio.ThinkingTick,
-			Volume:   0.65,
+			Light:         "auto",
+			Sound:         audio.EarconChime,
+			Thinking:      audio.ThinkingTick,
+			ThinkingDelay: Duration(feedback.DefaultThinkingDelay),
+			Volume:        0.65,
 		},
 		Timers: Timers{Enabled: true},
 		STT: STT{
@@ -751,6 +754,9 @@ func (c Config) Validate() error {
 	// Validated here for the same reason as the acknowledgement: a typo must
 	// be reported at startup, not discovered as silence while someone waits
 	// for an answer.
+	if c.Feedback.ThinkingDelay.D() <= 0 {
+		return fmt.Errorf("feedback.thinking_delay must be positive")
+	}
 	if v := c.Feedback.ThinkingVolume; v != nil && (*v < 0 || *v > 1) {
 		return fmt.Errorf("feedback.thinking_volume must be between 0 and 1, got %v", *v)
 	}

@@ -11,15 +11,17 @@ import (
 
 // timerControl handles the local timer vocabulary before the planner sees the
 // command. Timers must work with no model and no network, so they are answered
-// here or not at all.
-func (a *Assistant) timerControl(ctx context.Context, command string) (handled bool) {
+// here or not at all. stopThinking must finish before any timer reply speaks.
+func (a *Assistant) timerControl(ctx context.Context, command string, stopThinking func()) (handled bool) {
 	if a.Timers == nil {
 		return false
 	}
 	c := timer.Parse(command)
-	switch c.Kind {
-	case timer.None:
+	if c.Kind == timer.None {
 		return false
+	}
+	stopThinking()
+	switch c.Kind {
 	case timer.Set:
 		if c.Duration <= 0 {
 			a.say(ctx, "How long should the timer be?")

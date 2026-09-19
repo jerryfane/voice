@@ -5,6 +5,7 @@ import (
 	"errors"
 	stdlog "log"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -581,3 +582,176 @@ func (t *countingTranscriber) Transcribe(context.Context, []int16, audio.Format)
 }
 func (*countingTranscriber) Name() string              { return "counting transcriber" }
 func (*countingTranscriber) Available() (bool, string) { return true, "available" }
+
+type heldTranscriber struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (t *heldTranscriber) Transcribe(ctx context.Context, _ []int16, _ audio.Format) (string, error) {
+	close(t.entered)
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-t.release:
+		return "what time is it", nil
+	}
+}
+func (*heldTranscriber) Name() string              { return "held transcriber" }
+func (*heldTranscriber) Available() (bool, string) { return true, "available" }
+
+type replyPlanner struct{}
+
+func (replyPlanner) Plan(context.Context, string, []device.Info) (brain.Plan, error) {
+	return brain.Plan{Speak: "It is noon."}, nil
+}
+func (replyPlanner) Name() string              { return "reply planner" }
+func (replyPlanner) Available() (bool, string) { return true, "available" }
+
+// lifecyclePlayer holds processing playback until its context is cancelled,
+// exactly as the real command player does. It makes overlap with response
+// speech observable instead of relying on scheduler timing.
+type lifecyclePlayer struct {
+	started chan struct{}
+	stopped chan struct{}
+
+	startOnce sync.Once
+	stopOnce  sync.Once
+	mu        sync.Mutex
+	thinking  bool
+	overlap   bool
+}
+
+func newLifecyclePlayer() *lifecyclePlayer {
+	return &lifecyclePlayer{started: make(chan struct{}), stopped: make(chan struct{})}
+}
+
+func (p *lifecyclePlayer) PlayPCM(ctx context.Context, _ []int16, _ audio.Format) error {
+	p.mu.Lock()
+	p.thinking = true
+	p.mu.Unlock()
+	p.startOnce.Do(func() { close(p.started) })
+	<-ctx.Done()
+	p.mu.Lock()
+	p.thinking = false
+	p.mu.Unlock()
+	p.stopOnce.Do(func() { close(p.stopped) })
+	return ctx.Err()
+}
+
+func (p *lifecyclePlayer) PlayWAV(context.Context, []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.overlap = p.overlap || p.thinking
+	return nil
+}
+func (*lifecyclePlayer) Stop() error      { return nil }
+func (*lifecyclePlayer) Describe() string { return "lifecycle player" }
+
+func (p *lifecyclePlayer) overlapped() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.overlap
+}
+
+func TestStreamingWakeThinksDuringTranscriptionAndStopsBeforeSpeech(t *testing.T) {
+	var logs strings.Builder
+	player := newLifecyclePlayer()
+	transcriber := &heldTranscriber{entered: make(chan struct{}), release: make(chan struct{})}
+	a := &Assistant{
+		Recorder: testRecorder{},
+		Player:   player,
+		VAD:      wakeMatchedSegmenter{acknowledged: true},
+		STT:      transcriber,
+		TTS:      testSynthesizer{},
+		Brain:    replyPlanner{},
+		Devices:  device.NewRegistry(),
+		Feedback: &feedback.Notifier{
+			Player:        player,
+			Working:       []int16{1, 2, 3},
+			ThinkingDelay: time.Millisecond,
+			Format:        audio.Default(),
+			Logger:        stdlog.New(&logs, "", 0),
+		},
+		WakePhrases: []string{"hey voice"},
+		Logger:      stdlog.New(&logs, "", 0),
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- a.Run(context.Background()) }()
+	select {
+	case <-transcriber.entered:
+	case <-time.After(time.Second):
+		t.Fatal("transcription did not start")
+	}
+	select {
+	case <-player.started:
+		// The transcriber is still blocked: feedback therefore covers STT.
+	case <-time.After(time.Second):
+		t.Fatal("thinking feedback did not start while transcription was in progress")
+	}
+	close(transcriber.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-player.stopped:
+	default:
+		t.Fatal("processing playback was not finished when Run returned")
+	}
+	if player.overlapped() {
+		t.Fatal("processing playback overlapped the spoken response")
+	}
+	for _, want := range []string{
+		"stage=thinking state=started delay_ms=",
+		"stage=thinking state=stopped ms=",
+		"stage=speak state=ok",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("journal is missing %q:\n%s", want, logs.String())
+		}
+	}
+}
+
+func TestTranscriptionFailureStopsProcessingPlayback(t *testing.T) {
+	player := newLifecyclePlayer()
+	a := &Assistant{
+		Recorder: testRecorder{},
+		Player:   player,
+		VAD:      wakeMatchedSegmenter{acknowledged: true},
+		STT: transcriberFunc(func(ctx context.Context, _ []int16, _ audio.Format) (string, error) {
+			select {
+			case <-player.started:
+				return "", errors.New("transcription failed")
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}),
+		TTS:     testSynthesizer{},
+		Brain:   &countingPlanner{},
+		Devices: device.NewRegistry(),
+		Feedback: &feedback.Notifier{
+			Player:        player,
+			Working:       []int16{1},
+			ThinkingDelay: time.Millisecond,
+			Format:        audio.Default(),
+		},
+		WakePhrases: []string{"hey voice"},
+	}
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-player.stopped:
+	default:
+		t.Fatal("transcription failure left processing playback running")
+	}
+}
+
+type transcriberFunc func(context.Context, []int16, audio.Format) (string, error)
+
+func (f transcriberFunc) Transcribe(ctx context.Context, pcm []int16, format audio.Format) (string, error) {
+	return f(ctx, pcm, format)
+}
+func (transcriberFunc) Name() string              { return "function transcriber" }
+func (transcriberFunc) Available() (bool, string) { return true, "available" }

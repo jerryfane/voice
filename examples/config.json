@@ -58,6 +58,8 @@
   "feedback": {
     "light": "auto",
     "sound": "chime",
+    "thinking": "tick",
+    "thinking_delay": "250ms",
     "volume": 0.65
   },
   "timers": {

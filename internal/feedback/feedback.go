@@ -8,17 +8,16 @@ import (
 	"context"
 	"log"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jerryfane/voice/internal/audio"
 )
 
-// thinkingDelay is how long an answer may take before the thinking sound
-// starts. Local answers return in microseconds and must stay silent; a model
-// call takes seconds and must be covered. Anything in this range works, and
-// being generous costs nothing because the sound's purpose is to fill a wait
-// long enough to be mistaken for a failure.
-const thinkingDelay = 400 * time.Millisecond
+// DefaultThinkingDelay lets fast local completion remain silent by
+// construction while feedback that begins before cloud transcription still
+// becomes audible promptly.
+const DefaultThinkingDelay = 250 * time.Millisecond
 
 // State is what the physical indicator should show.
 type State int
@@ -62,8 +61,11 @@ type Notifier struct {
 	// Working is one loopable cycle of the thinking sound, including its
 	// trailing silence. Nil disables it.
 	Working []int16
-	Format  audio.Format
-	Logger  *log.Logger
+	// ThinkingDelay is the grace period before Working starts. Zero uses
+	// DefaultThinkingDelay for callers that construct a Notifier directly.
+	ThinkingDelay time.Duration
+	Format        audio.Format
+	Logger        *log.Logger
 }
 
 func (n *Notifier) logf(f string, v ...any) {
@@ -90,36 +92,37 @@ func (n *Notifier) Accepted(ctx context.Context) {
 }
 
 // Thinking plays the working sound on a loop until the returned stop function
-// is called, and returns immediately. It exists because a request that leaves
-// the device takes seconds - 7.102 s measured on the owner's hardware - and
-// silence during that wait is indistinguishable from Voice having missed the
-// question.
+// is called, and returns immediately. Callers start it when a wake-gated
+// utterance closes, before transcription, so every remote stage is covered.
 //
-// stop is always safe to call, including when nothing is playing, so callers
-// need no branch and can defer it. A playback failure stops the loop rather
-// than retrying: a sound that cannot play must not become a spin.
+// stop is idempotent and does not return until playback has finished. A
+// playback failure stops the loop rather than retrying: a sound that cannot
+// play must not become a spin.
 func (n *Notifier) Thinking(ctx context.Context) (stop func()) {
 	if n == nil || len(n.Working) == 0 || n.Player == nil {
 		return func() {}
 	}
+	delay := n.ThinkingDelay
+	if delay <= 0 {
+		delay = DefaultThinkingDelay
+	}
+	requested := time.Now()
 	loop, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
+	var audibleAt time.Time
 	go func() {
 		defer close(done)
-		// Nothing plays until the answer is actually slow. Starting
-		// immediately and cancelling on a fast reply was a RACE, not a
-		// guarantee: the review drove 500 fast-path answers and the sound
-		// fired on one of them, which on real hardware means spawning and
-		// killing a playback subprocess for a query answered in
-		// microseconds - the exact artifact this feature exists to avoid.
-		//
-		// A local answer returns in well under this delay, so the fast path
-		// is silent by construction rather than by winning a race.
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		// Nothing plays until the request is actually slow. Cancelling before
+		// this timer wins is deterministic silence, not a scheduler race.
 		select {
 		case <-loop.Done():
 			return
-		case <-time.After(thinkingDelay):
+		case <-timer.C:
 		}
+		audibleAt = time.Now()
+		n.logf("stage=thinking state=started delay_ms=%.3f", feedbackMS(requested))
 		for loop.Err() == nil {
 			if err := n.Player.PlayPCM(loop, n.Working, n.Format); err != nil {
 				if loop.Err() == nil {
@@ -129,12 +132,24 @@ func (n *Notifier) Thinking(ctx context.Context) (stop func()) {
 			}
 		}
 	}()
+	var once sync.Once
 	return func() {
-		cancel()
-		// Waiting matters: the next thing to happen is the spoken answer, and
-		// overlapping it with the thinking loop would talk over the reply.
-		<-done
+		once.Do(func() {
+			cancel()
+			// Waiting matters: the next thing to happen may be the spoken
+			// answer, and an in-flight buffer would talk over it.
+			<-done
+			if audibleAt.IsZero() {
+				n.logf("stage=thinking state=skipped ms=%.3f", feedbackMS(requested))
+				return
+			}
+			n.logf("stage=thinking state=stopped ms=%.3f", feedbackMS(audibleAt))
+		})
 	}
+}
+
+func feedbackMS(started time.Time) float64 {
+	return float64(time.Since(started).Microseconds()) / 1000
 }
 
 // Restore returns the indicator to idle. It takes no context so it still runs

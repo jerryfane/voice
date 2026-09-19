@@ -256,10 +256,10 @@ func TestThinkingStaysSilentForAFastAnswer(t *testing.T) {
 	stop := n.Thinking(context.Background())
 	// A quarter of the delay: long enough for several playback cycles if the
 	// loop had started, far short of when it is allowed to.
-	time.Sleep(thinkingDelay / 4)
+	time.Sleep(DefaultThinkingDelay / 4)
 	stop()
 	if got := p.plays(); got != 0 {
-		t.Errorf("the thinking sound played %d times within %v; a fast answer must be silent by construction", got, thinkingDelay/4)
+		t.Errorf("the thinking sound played %d times within %v; a fast answer must be silent by construction", got, DefaultThinkingDelay/4)
 	}
 
 	// And the immediate case, which is what the local fast path actually does.
