@@ -7,6 +7,7 @@ const responseDir = process.env.VOICE_AGENT_RESPONSES;
 const markerPath = process.env.VOICE_AGENT_MARKER;
 const requestPattern = /<voice-request id="([A-Za-z0-9._-]{1,128})">/;
 let currentSessionPath: string | undefined;
+let speakNextAnswer = false;
 
 type CommandContext = {
   ui: {
@@ -22,6 +23,7 @@ type ExtensionAPI = {
       handler(args: string, context: CommandContext): Promise<void> | void;
     },
   ): void;
+  sendUserMessage(content: string): void;
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -88,7 +90,7 @@ function publish(id: string, payload: Record<string, unknown>): void {
 function runVoiceCommand(args: string, context: CommandContext): void {
   const match = /^\s*say\s+([\s\S]*\S)\s*$/.exec(args);
   if (!match) {
-    context.ui.notify("Usage: /voice say TEXT", "warning");
+    context.ui.notify("Usage: /voice say TEXT or /voice ask QUESTION", "warning");
     return;
   }
   const result = spawnSync(
@@ -114,8 +116,21 @@ function runVoiceCommand(args: string, context: CommandContext): void {
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("voice", {
-    description: "Speak text through Voice (usage: /voice say TEXT)",
-    handler: async (args, context) => runVoiceCommand(args, context),
+    description: "Speak text or ask for a spoken answer (/voice say|ask ...)",
+    handler: async (args, context) => {
+      const ask = /^\s*ask\s+([\s\S]*\S)\s*$/.exec(args);
+      if (!ask) {
+        runVoiceCommand(args, context);
+        return;
+      }
+      if (speakNextAnswer) {
+        context.ui.notify("A spoken Voice answer is already pending.", "warning");
+        return;
+      }
+      speakNextAnswer = true;
+      context.ui.notify("Asking Voice…", "info");
+      pi.sendUserMessage(ask[1]);
+    },
   });
 
 
@@ -136,14 +151,14 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_approval_requested", () => report("blocked", "tool approval required"));
   pi.on("tool_approval_resolved", () => report("working"));
 
-  pi.on("agent_end", (event: unknown) => {
+  pi.on("agent_end", (event: unknown, context: unknown) => {
     const messages =
       record(event) && Array.isArray(event.messages) ? event.messages : [];
     const user = lastMessage(messages, "user");
+    const assistant = lastMessage(messages, "assistant");
+    const output = text(assistant?.content).trim();
     const match = requestPattern.exec(text(user?.content));
     if (match) {
-      const assistant = lastMessage(messages, "assistant");
-      const output = text(assistant?.content).trim();
       if (assistant?.stopReason === "error") {
         publish(match[1], {
           ok: false,
@@ -156,6 +171,35 @@ export default function (pi: ExtensionAPI) {
         publish(match[1], { ok: false, error: "OMP returned no final response" });
       } else {
         publish(match[1], { ok: true, output });
+      }
+    }
+    if (speakNextAnswer) {
+      speakNextAnswer = false;
+      const commandContext = context as CommandContext;
+      if (assistant?.stopReason === "error") {
+        commandContext.ui.notify(
+          typeof assistant.errorMessage === "string"
+            ? assistant.errorMessage
+            : "Voice agent failed",
+          "error",
+        );
+      } else if (!output) {
+        commandContext.ui.notify("Voice agent returned no answer.", "error");
+      } else {
+        let spoken = output;
+        try {
+          const response: unknown = JSON.parse(output);
+          if (record(response) && typeof response.speak === "string") {
+            spoken = response.speak;
+          }
+        } catch {
+          // A plain-text agent answer is already suitable for speech.
+        }
+        if (spoken.trim()) {
+          runVoiceCommand(`say ${spoken}`, commandContext);
+        } else {
+          commandContext.ui.notify("Voice agent returned no spoken answer.", "warning");
+        }
       }
     }
     report("idle");
