@@ -308,7 +308,12 @@ required for playback through this client.
 "feedback": { "sound": "/etc/voice/sounds/bubble.wav", "volume": 0.65 }
 ```
 
-The file is loaded and checked when the config loads, so a missing or
+`feedback.thinking` takes a file the same way, for the sound played while an
+answer is slow. That one LOOPS until the answer arrives, so the silence after
+the sound belongs inside the file - and a long file delays the spoken reply,
+which waits for the current cycle to finish.
+
+Both are loaded and checked when the config loads, so a missing or
 undecodable file is reported at startup rather than discovered as silence the
 first time someone speaks.
 

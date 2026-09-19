@@ -754,7 +754,14 @@ func (c Config) Validate() error {
 	if v := c.Feedback.ThinkingVolume; v != nil && (*v < 0 || *v > 1) {
 		return fmt.Errorf("feedback.thinking_volume must be between 0 and 1, got %v", *v)
 	}
-	if _, err := audio.Thinking(c.Feedback.Thinking, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.ResolvedThinkingVolume()); err != nil {
+	// A thinking sound FILE is loaded here too, so a missing file is
+	// reported at startup rather than as silence during the one moment the
+	// user is waiting and listening for reassurance.
+	if audio.IsSoundFile(c.Feedback.Thinking) {
+		if _, err := audio.SoundFromFile(c.Feedback.Thinking, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.ResolvedThinkingVolume()); err != nil {
+			return err
+		}
+	} else if _, err := audio.Thinking(c.Feedback.Thinking, audio.Format{SampleRate: c.Input.SampleRate, Channels: 1}, c.Feedback.ResolvedThinkingVolume()); err != nil {
 		return fmt.Errorf("feedback.thinking: %w", err)
 	}
 	switch c.Brain.Mode {
