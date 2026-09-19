@@ -8,8 +8,20 @@ const markerPath = process.env.VOICE_AGENT_MARKER;
 const requestPattern = /<voice-request id="([A-Za-z0-9._-]{1,128})">/;
 let currentSessionPath: string | undefined;
 
+type CommandContext = {
+  ui: {
+    notify(message: string, level: "info" | "warning" | "error"): void;
+  };
+};
 type ExtensionAPI = {
   on(event: string, handler: (...args: unknown[]) => void): void;
+  registerCommand(
+    name: string,
+    options: {
+      description: string;
+      handler(args: string, context: CommandContext): Promise<void> | void;
+    },
+  ): void;
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -73,8 +85,50 @@ function publish(id: string, payload: Record<string, unknown>): void {
   fs.writeFileSync(temporary, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
   fs.renameSync(temporary, destination);
 }
+function runVoiceCommand(args: string, context: CommandContext): void {
+  const match = /^\s*say\s+([\s\S]*\S)\s*$/.exec(args);
+  if (!match) {
+    context.ui.notify("Usage: /voice say TEXT", "warning");
+    return;
+  }
+  const result = spawnSync(
+    "/usr/local/bin/voice",
+    ["--config", "/etc/voice/config.json", "say", match[1]],
+    {
+      encoding: "utf8",
+      timeout: 60_000,
+      env: { ...process.env, HOME: "/home/voice-agent" },
+    },
+  );
+  if (result.error || result.status !== 0) {
+    let detail = result.error?.message ?? "";
+    if (!detail && typeof result.stderr === "string") {
+      detail = result.stderr.trim();
+    }
+    context.ui.notify(detail || "Voice playback failed", "error");
+    return;
+  }
+  context.ui.notify("Spoken.", "info");
+}
+
 
 export default function (pi: ExtensionAPI) {
+  pi.registerCommand("voice", {
+    description: "Speak text through Voice (usage: /voice say TEXT)",
+    handler: async (args, context) => runVoiceCommand(args, context),
+  });
+
+  // Herdr's agent prompt API submits through OMP's RPC input path, where slash
+  // commands are intentionally not expanded. Intercept the same syntax there
+  // so typing in the pane and prompting it remotely have identical behavior.
+  pi.on("input", (event: unknown, context: unknown) => {
+    if (!record(event) || typeof event.text !== "string") return;
+    const match = /^\s*\/voice(?:\s+([\s\S]*))?\s*$/.exec(event.text);
+    if (!match) return;
+    runVoiceCommand(match[1] ?? "", context as CommandContext);
+    return { action: "handled" };
+  });
+
   pi.on("session_start", (_event: unknown, context: unknown) => {
     if (markerPath) {
       fs.mkdirSync(path.dirname(markerPath), { recursive: true, mode: 0o700 });

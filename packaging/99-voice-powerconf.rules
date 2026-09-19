@@ -2,3 +2,11 @@
 # reports to Anker PowerConf speakerphones. Audio capture otherwise streams
 # digital silence even when ALSA reports the microphone as unmuted.
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="291a", ATTRS{idProduct}=="3301", GROUP="voice-agent", MODE="0660"
+
+# The persistent OMP pane runs outside voice.service, so it does not inherit
+# that unit's supplementary audio group. Give only that account access to the
+# PowerConf playback nodes for the deterministic `/voice say` command.
+SUBSYSTEM=="sound", KERNEL=="card*", ATTRS{idVendor}=="291a", ATTRS{idProduct}=="3301", \
+  RUN+="/usr/bin/setfacl -m u:voice-agent:rw /dev/snd/controlC%n"
+SUBSYSTEM=="sound", KERNEL=="pcmC*D*p", ATTRS{idVendor}=="291a", ATTRS{idProduct}=="3301", \
+  RUN+="/usr/bin/setfacl -m u:voice-agent:rw /dev/snd/%k"
