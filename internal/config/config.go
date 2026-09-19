@@ -617,8 +617,12 @@ func (c Config) Validate() error {
 	if len(c.Output.Command) == 0 {
 		return fmt.Errorf("output.command is empty: nothing can play audio")
 	}
-	if c.Input.SampleRate <= 0 {
-		return fmt.Errorf("input.sample_rate must be positive (16000 for whisper)")
+	// Bounded, not merely positive. The session rate scales every audio
+	// buffer derived from it, and review panicked the startup path with a
+	// MaxInt rate: the multiplication overflowed before any limit applied.
+	if c.Input.SampleRate < audio.MinSampleRate || c.Input.SampleRate > audio.MaxSampleRate {
+		return fmt.Errorf("input.sample_rate must be between %d and %d (16000 for whisper), got %d",
+			audio.MinSampleRate, audio.MaxSampleRate, c.Input.SampleRate)
 	}
 	if len(c.Wake.Phrases) == 0 {
 		return fmt.Errorf("wake.phrases is empty: Voice would never wake")

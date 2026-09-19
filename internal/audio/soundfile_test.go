@@ -2,6 +2,7 @@ package audio
 
 import (
 	"encoding/binary"
+	"math"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -281,5 +282,50 @@ func TestTrimKeepsADeliberatelyQuietSound(t *testing.T) {
 	padded := append(append([]int16{}, quiet...), make([]int16, 500)...)
 	if got := TrimTrailingSilence(padded); len(got) != len(quiet) {
 		t.Errorf("padding after a quiet sound trimmed to %d samples, want %d", len(got), len(quiet))
+	}
+}
+
+// The session rate comes from config, and review panicked the real startup
+// path with input.sample_rate set to MaxInt: rate * seconds overflowed before
+// it could bound anything. Conform must survive any target rate handed to it.
+func TestConformSurvivesAnAbsurdTargetRate(t *testing.T) {
+	from := Format{SampleRate: 16000, Channels: 1}
+	for _, rate := range []int{math.MaxInt, math.MaxInt32, 1 << 40, -1, 0} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("target rate %d panicked: %v", rate, r)
+				}
+			}()
+			got := Conform([]int16{1, 2, 3, 4}, from, Format{SampleRate: rate, Channels: 1})
+			if len(got) > maxSoundSamples {
+				t.Errorf("target rate %d produced %d samples, above the absolute ceiling %d", rate, len(got), maxSoundSamples)
+			}
+		}()
+	}
+}
+
+// A sound too long to be an acknowledgement must be REPORTED, not silently
+// cut to the cap: a file quietly truncated to ten seconds is still the wrong
+// file, and the owner should hear why rather than hear half of it.
+func TestSoundFromFileRejectsAnOverlongSoundInsteadOfTruncating(t *testing.T) {
+	dir := t.TempDir()
+	// 30 seconds at 8 kHz, which also exercises the same-rate path where no
+	// resampling happens and the byte cap alone would allow it.
+	long := make([]int16, 8000*30)
+	for i := range long {
+		long[i] = 5000
+	}
+	path := filepath.Join(dir, "long.wav")
+	if err := os.WriteFile(path, EncodeWAV(long, Format{SampleRate: 8000, Channels: 1}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := SoundFromFile(path, Format{SampleRate: 8000, Channels: 1}, 0.65)
+	if err == nil {
+		t.Fatal("a 30 second sound was accepted; it must be refused, not clamped")
+	}
+	if !contains(err.Error(), "blip") && !contains(err.Error(), "longer than") {
+		t.Errorf("error %q should say the sound is too long", err)
 	}
 }

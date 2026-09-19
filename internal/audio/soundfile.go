@@ -29,13 +29,19 @@ const silenceFloor = 32
 // review reproduced as a startup panic - makeslice: len out of range - on the
 // owner's device.
 const (
-	minSampleRate = 4000
-	maxSampleRate = 192000
+	MinSampleRate = 4000
+	MaxSampleRate = 192000
 )
 
 // maxSoundSeconds bounds the CONFORMED result. The size cap alone cannot: a
 // small file can legitimately decode to an enormous one after resampling.
 const maxSoundSeconds = 10
+
+// maxSoundSamples is an absolute ceiling, independent of any rate. Deriving
+// the limit from the target rate alone was not enough: the session rate comes
+// from config and review panicked the startup path with input.sample_rate set
+// to MaxInt, where rate * seconds overflows before it can bound anything.
+const maxSoundSamples = MaxSampleRate * maxSoundSeconds
 
 // IsSoundFile reports whether a feedback.sound value names a FILE rather than
 // one of the built-in generated sounds.
@@ -114,8 +120,8 @@ func DecodeWAV(wav []byte) ([]int16, Format, error) {
 		return nil, Format{}, fmt.Errorf("WAVE is %d-bit; only 16-bit PCM is supported, convert with: ffmpeg -i in -c:a pcm_s16le out.wav", bits)
 	case format.Channels < 1:
 		return nil, Format{}, errors.New("WAVE reports no channels")
-	case format.SampleRate < minSampleRate || format.SampleRate > maxSampleRate:
-		return nil, Format{}, fmt.Errorf("WAVE sample rate %d is outside %d-%d Hz", format.SampleRate, minSampleRate, maxSampleRate)
+	case format.SampleRate < MinSampleRate || format.SampleRate > MaxSampleRate:
+		return nil, Format{}, fmt.Errorf("WAVE sample rate %d is outside %d-%d Hz", format.SampleRate, MinSampleRate, MaxSampleRate)
 	case len(data)%2 != 0:
 		// F3: a dangling byte means the file is damaged or mis-declared.
 		// Dropping it silently would play a truncated sound and hide that.
@@ -157,12 +163,15 @@ func Conform(pcm []int16, from, to Format) []int16 {
 	if to.SampleRate <= 0 || from.SampleRate <= 0 || from.SampleRate == to.SampleRate {
 		return pcm
 	}
+	// Computed in float64 and clamped against an absolute ceiling before any
+	// conversion to int, so neither the ratio nor the limit can overflow.
 	ratio := float64(to.SampleRate) / float64(from.SampleRate)
 	want := float64(len(pcm)) * ratio
-	if limit := float64(to.SampleRate * maxSoundSeconds); want > limit {
-		// Refusing to allocate beats allocating and dying: this runs while
-		// the service is starting on a Raspberry Pi.
-		want = limit
+	if want > float64(maxSoundSamples) {
+		want = float64(maxSoundSamples)
+	}
+	if want < 0 {
+		return nil
 	}
 	out := make([]int16, int(want))
 	for i := range out {
@@ -256,6 +265,18 @@ func SoundFromFile(path string, f Format, volume float64) ([]int16, error) {
 	pcm, from, err := DecodeWAV(raw)
 	if err != nil {
 		return nil, fmt.Errorf("wake sound %s: %w", path, err)
+	}
+	// Checked BEFORE conforming, and reported rather than silently clamped:
+	// a sound quietly cut to ten seconds is still wrong, and the caller
+	// deserves to know the file is not what an acknowledgement sound should
+	// be. This also covers the same-rate path, where no resampling happens
+	// and the byte cap alone would allow minutes of audio.
+	frames := int64(len(pcm)) / int64(max(from.Channels, 1))
+	if f.SampleRate > 0 && from.SampleRate > 0 {
+		out := frames * int64(f.SampleRate) / int64(from.SampleRate)
+		if out > int64(maxSoundSamples) || out > int64(f.SampleRate)*int64(maxSoundSeconds) {
+			return nil, fmt.Errorf("wake sound %s is longer than %d seconds once converted; an acknowledgement sound is a blip", path, maxSoundSeconds)
+		}
 	}
 	pcm = TrimTrailingSilence(Conform(pcm, from, f))
 	if len(pcm) == 0 {
