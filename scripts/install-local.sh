@@ -13,21 +13,47 @@ start_service=${VOICE_INSTALL_START:-1}
 # genuinely upgraded herdr sitting further along PATH would be invisible and
 # the copy in libexec would stay at whatever version it was - silently stale,
 # which is worse than the copy-onto-itself failure it replaced.
+# Find the REAL herdr, not the bridge wrapper this script installs under the
+# same name. Once the wrapper exists, `command -v herdr` finds it first, so a
+# genuinely upgraded herdr further along PATH would be invisible and the copy
+# in libexec would stay at whatever version it was - silently stale.
 herdr_bin=$(command -v herdr 2>/dev/null || true)
 if [ "$herdr_bin" = /usr/local/bin/herdr ]; then
+  # Compare CANONICAL paths, not spellings. A PATH entry that is a symlink to
+  # /usr/local/bin, or simply written with a trailing slash, is the same file
+  # under a different name - and accepting it would copy the wrapper over the
+  # binary the wrapper delegates to, leaving a script that execs itself
+  # forever. Review reproduced exactly that, byte for byte.
+  canonical() { readlink -f "$1" 2>/dev/null || printf '%s\n' "$1"; }
+  wrapper_real=$(canonical /usr/local/bin/herdr)
+  backend_real=$(canonical /usr/local/libexec/voice-herdr-real)
+
   herdr_bin=""
   saved_ifs=$IFS
   IFS=:
   for dir in $PATH; do
-    candidate="${dir:-.}/herdr"
-    [ -x "$candidate" ] || continue
-    case "$candidate" in
-      /usr/local/bin/herdr | /usr/local/libexec/voice-herdr-real) continue ;;
+    # Empty and relative entries are skipped rather than resolved. An empty
+    # element means the current directory, and an installer that can pick up
+    # a herdr from wherever it happens to be run is a way in, not a feature.
+    case "$dir" in
+      "" | [!/]*) continue ;;
     esac
-    herdr_bin=$candidate
+    candidate="$dir/herdr"
+    [ -x "$candidate" ] || continue
+    candidate_real=$(canonical "$candidate")
+    [ "$candidate_real" = "$wrapper_real" ] && continue
+    [ "$candidate_real" = "$backend_real" ] && continue
+    # The real herdr is a compiled binary; every wrapper here is a shell
+    # script. Refusing scripts is a second, independent guard against
+    # installing a wrapper as the backend.
+    case $(head -c 2 "$candidate_real" 2>/dev/null) in
+      "#!") continue ;;
+    esac
+    herdr_bin=$candidate_real
     break
   done
   IFS=$saved_ifs
+
   # Nothing newer anywhere: keep what is already installed rather than
   # copying the wrapper over the binary it delegates to.
   if [ -z "$herdr_bin" ] && [ -x /usr/local/libexec/voice-herdr-real ]; then
