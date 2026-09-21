@@ -296,7 +296,7 @@ TV ops: on, off, volume-up, volume-down, mute
 Music ops: play [track|album|artist|playlist QUERY], resume, pause, next, previous, volume 0-10, volume-up, volume-down
 Proposals: list [--json], show ID, due [--json], record REQUEST [--title T] [--scope S] [--risks R],
            notified ID, approve ID, decline ID [REASON], issue ID NUMBER, implementing ID AGENT,
-           complete ID, fail ID DETAIL, expire
+           retry ID, complete ID, fail ID DETAIL, expire
 `)
 	return nil
 }

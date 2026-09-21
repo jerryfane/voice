@@ -315,7 +315,18 @@ if [ -s "$work/launch.rows" ]; then
       risks=$(row_field "$item" risks)
       issue=$(row_field "$item" issue)
       [ -n "$title" ] || title=$request
-      seat="voice-proposal-$id"
+      # Herdr accepts 1-32 characters of lowercase letters, digits, '-' and
+      # '_'. A proposal id is a timestamp plus a hash and blows that limit on
+      # its own, which is how the first real approval got as far as creating
+      # the issue and then failed at the rename with the pane already running.
+      # The issue number is the short, unique, human-recognisable name for the
+      # work; the truncated id is only a fallback for the window before one
+      # exists.
+      if [ -n "$issue" ] && [ "$issue" != 0 ]; then
+        seat="voice-issue-$issue"
+      else
+        seat="voice-p-$(printf '%s' "$id" | tr -cd 'a-z0-9' | cut -c1-24)"
+      fi
 
       # A seat already carrying this name is this proposal's seat: recover the
       # record rather than starting a second agent on the same issue.

@@ -548,3 +548,82 @@ func ids(ps []Proposal) []string {
 	}
 	return out
 }
+
+// The first real approval on the device filed issue #61 and then failed to
+// launch its seat, because the seat name was longer than Herdr accepts. The
+// proposal was left Failed with an issue already open and nobody working on
+// it. Retry is what stops an approval from being lost to a failure in a step
+// that comes after it.
+func TestRetryResumesAnApprovedProposalAtTheStageThatFailed(t *testing.T) {
+	s := store(t)
+	p := record(t, s, "launch a seat for me", base)
+	transition(t, s, p.ID, Notified, "asked", base.Add(time.Minute))
+	transition(t, s, p.ID, Approved, "approved by the owner", base.Add(2*time.Minute))
+	if _, err := s.SetIssue(p.ID, 61, base.Add(3*time.Minute)); err != nil {
+		t.Fatalf("set issue: %v", err)
+	}
+	transition(t, s, p.ID, Failed, "could not rename the seat", base.Add(4*time.Minute))
+
+	resumed, err := s.Retry(p.ID, base.Add(5*time.Minute))
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	// With the issue already filed, work must resume at the seat launch.
+	// Resuming at Approved instead would file a second issue for one request,
+	// which is the duplication the whole feature promises not to do.
+	if resumed.Status != IssueCreated {
+		t.Errorf("status = %s, want %s so the seat launch is retried and the issue is not filed twice", resumed.Status, IssueCreated)
+	}
+	if resumed.Issue != 61 {
+		t.Errorf("issue = %d, want 61 kept across the retry", resumed.Issue)
+	}
+	if !strings.Contains(resumed.Detail, "could not rename the seat") {
+		t.Errorf("detail = %q, want it to carry the failure being retried", resumed.Detail)
+	}
+}
+
+// An unapproved proposal must never be retried into work. Nothing reaches
+// Failed without passing through Approved first - the state machine has no
+// pending-to-failed edge - so the audit-trail check inside Retry is a second
+// lock on the same door, and what these cases prove is that none of the
+// states an unapproved proposal CAN be in is retryable.
+func TestRetryRefusesAProposalTheOwnerNeverApproved(t *testing.T) {
+	s := store(t)
+
+	declined := record(t, s, "something the owner said no to", base)
+	transition(t, s, declined.ID, Declined, "no", base.Add(time.Minute))
+	if _, err := s.Retry(declined.ID, base.Add(2*time.Minute)); err == nil {
+		t.Fatal("a declined proposal was retried, which would start work the owner refused")
+	}
+	if got, err := s.Get(declined.ID); err != nil || got.Status != Declined {
+		t.Errorf("status = %s (%v), want it left %s", got.Status, err, Declined)
+	}
+
+	pending := record(t, s, "something still waiting", base)
+	if _, err := s.Retry(pending.ID, base.Add(time.Minute)); err == nil {
+		t.Fatal("a pending proposal was retried; only a failed one can be")
+	}
+
+	expired := record(t, s, "something nobody answered", base)
+	transition(t, s, expired.ID, Expired, "no answer", base.Add(time.Minute))
+	if _, err := s.Retry(expired.ID, base.Add(2*time.Minute)); err == nil {
+		t.Fatal("an expired proposal was retried without the owner ever answering")
+	}
+}
+
+// Without an issue there is nothing to resume from, so the retry goes back to
+// issue creation rather than to a seat launch with no issue to work on.
+func TestRetryWithoutAnIssueResumesAtIssueCreation(t *testing.T) {
+	s := store(t)
+	p := record(t, s, "file an issue for me", base)
+	transition(t, s, p.ID, Approved, "approved by the owner", base.Add(time.Minute))
+	transition(t, s, p.ID, Failed, "gh is not installed", base.Add(2*time.Minute))
+
+	resumed, err := s.Retry(p.ID, base.Add(3*time.Minute))
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if resumed.Status != Approved {
+		t.Errorf("status = %s, want %s so the issue is filed on the next pass", resumed.Status, Approved)
+	}
+}

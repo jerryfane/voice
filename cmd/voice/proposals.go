@@ -228,6 +228,21 @@ func proposals(s *proposal.Store, c config.Config, args []string) error {
 		}
 		stdout.printf("%s is now %s in %s\n", p.ID, p.Status, p.Agent)
 		return nil
+	case "retry":
+		if len(args) != 2 {
+			return errors.New("usage: voice proposals retry ID")
+		}
+		// Only for a step that failed AFTER the owner approved: the store
+		// checks the audit trail for that approval, so this cannot revive a
+		// proposal the owner declined or never answered. It exists because
+		// the first real approval filed its issue and then failed to launch
+		// the seat, leaving work the owner had authorized with nobody on it.
+		p, err := s.Retry(args[1], now)
+		if err != nil {
+			return proposalError(args[1], err)
+		}
+		stdout.printf("%s is back to %s; the broker's next pass will carry on\n", p.ID, p.Status)
+		return nil
 	case "expire":
 		if len(args) != 1 {
 			return errors.New("usage: voice proposals expire")
@@ -246,7 +261,7 @@ func proposals(s *proposal.Store, c config.Config, args []string) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("unknown proposals command %q: try list, show, due, record, notified, approve, decline, issue, implementing, complete, fail or expire", args[0])
+		return fmt.Errorf("unknown proposals command %q: try list, show, due, record, notified, approve, decline, issue, implementing, retry, complete, fail or expire", args[0])
 	}
 }
 

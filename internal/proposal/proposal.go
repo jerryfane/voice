@@ -632,6 +632,70 @@ func (s *Store) SetAgent(id string, name string, now time.Time) (Proposal, error
 	return out, nil
 }
 
+// Retry reopens a proposal whose post-approval step failed, putting it back at
+// the stage it fell over on so the broker's next pass tries again.
+//
+// It exists because the first real approval did exactly this: the issue was
+// created, the implementation seat could not be renamed - the name was longer
+// than Herdr allows - and the proposal landed in Failed with an issue already
+// filed and nobody working on it. Burying work the owner approved because of a
+// transient failure in the step AFTER the approval is the wrong answer.
+//
+// It is not a way around the owner. Retry requires an approval already in the
+// audit trail, so a proposal that failed before the owner answered - or was
+// declined - cannot be walked forward by calling this.
+func (s *Store) Retry(id string, now time.Time) (Proposal, error) {
+	var out Proposal
+	err := s.tx(func(tx *sql.Tx) error {
+		p, err := loadTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if p.Status != Failed {
+			return fmt.Errorf("proposal %s is %s, and only a failed one can be retried", id, p.Status)
+		}
+		approved, err := approvedTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if !approved {
+			return fmt.Errorf("proposal %s failed before the owner approved it; ask again rather than retrying", id)
+		}
+		// Back to the last stage that succeeded: with an issue already filed
+		// the work resumes at the seat launch, without one it resumes at
+		// issue creation. Retrying from the wrong stage is how a proposal
+		// ends up with two issues.
+		resume := Approved
+		detail := "retrying issue creation after: " + p.Detail
+		if p.Issue != 0 {
+			resume = IssueCreated
+			detail = "retrying the implementation seat after: " + p.Detail
+		}
+		p.Status = resume
+		p.Detail = detail
+		p.Updated = now.UTC()
+		if err := saveTx(tx, p); err != nil {
+			return err
+		}
+		out = p
+		return eventTx(tx, id, resume, detail, now)
+	})
+	if err != nil {
+		return Proposal{}, err
+	}
+	return out, nil
+}
+
+// approvedTx reports whether the owner's approval is in the audit trail. The
+// trail is the evidence, not the current status: a failed proposal has lost
+// its Approved status but must not lose the fact that it was approved.
+func approvedTx(tx *sql.Tx, id string) (bool, error) {
+	var n int
+	err := tx.QueryRow(`SELECT COUNT(*) FROM proposal_events
+		WHERE proposal = ? AND status = ?`, id, string(Approved)).Scan(&n)
+	return n > 0, err
+}
+
 // DueForNotice returns the proposals the owner should be asked about now,
 // oldest first: everything Pending, plus anything Notified that has gone
 // unanswered for longer than n.RetryAfter.
