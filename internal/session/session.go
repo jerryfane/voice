@@ -14,6 +14,7 @@ import (
 	"github.com/jerryfane/voice/internal/brain"
 	"github.com/jerryfane/voice/internal/device"
 	"github.com/jerryfane/voice/internal/feedback"
+	"github.com/jerryfane/voice/internal/proposal"
 	"github.com/jerryfane/voice/internal/speech"
 	"github.com/jerryfane/voice/internal/timer"
 	"github.com/jerryfane/voice/internal/vad"
@@ -39,6 +40,10 @@ type Assistant struct {
 	// Timers runs local timers. A nil Scheduler means the timer vocabulary
 	// falls through to the planner, as it did before timers existed.
 	Timers *timer.Scheduler
+	// Proposals records requests this account cannot carry out, so the owner
+	// can approve them later. A nil Store disables recording without changing
+	// command handling.
+	Proposals *proposal.Store
 	// Missed are timers that came due while Voice was not running; Run
 	// reports them once at startup.
 	Missed      []timer.Timer
@@ -63,6 +68,9 @@ func (a *Assistant) HandleText(ctx context.Context, text string) (brain.Plan, er
 	if err != nil {
 		return p, err
 	}
+	// Recorded before the actions run: a device failure must not be able to
+	// swallow a request the owner has not heard about yet.
+	p.Speak = a.recordProposal(p)
 	if err := a.ApplyActions(ctx, p.Actions); err != nil {
 		return p, err
 	}
@@ -70,6 +78,66 @@ func (a *Assistant) HandleText(ctx context.Context, text string) (brain.Plan, er
 		a.logf("stage=route state=local source=rules ms=%.3f", sinceMS(started))
 	}
 	return p, nil
+}
+
+// recordProposal stores a capability the agent could not deliver and returns
+// the reply to speak. The owner asked to be told out loud that the request
+// went to them for approval, because the alternative - an honest refusal and
+// nothing else - is how the thinking-sound-volume request was lost for days.
+// A storage failure costs the record, never the answer.
+func (a *Assistant) recordProposal(p brain.Plan) string {
+	if p.Proposal == nil || a.Proposals == nil {
+		return p.Speak
+	}
+	request := strings.TrimSpace(p.Proposal.Request)
+	if request == "" {
+		return p.Speak
+	}
+	stored, created, err := a.Proposals.Record(proposal.Proposal{
+		Request: request,
+		Title:   strings.TrimSpace(p.Proposal.Title),
+		Scope:   strings.TrimSpace(p.Proposal.Scope),
+		Risks:   strings.TrimSpace(p.Proposal.Risks),
+	}, a.now())
+	if err != nil {
+		a.logf("stage=proposal state=failed request=%q err=%v", request, err)
+		return p.Speak
+	}
+	a.logf("stage=proposal state=ok id=%s created=%v status=%s occurrences=%d", stored.ID, created, stored.Status, stored.Occurrences)
+	return withNote(p.Speak, proposalNote(stored, created))
+}
+
+// proposalNote is played aloud, so each answer is one short sentence. A
+// repeat says the request is already with the owner: saying it was sent again
+// would suggest a second request exists, and the listener would stop asking
+// why nothing has happened.
+func proposalNote(stored proposal.Proposal, created bool) string {
+	if created {
+		return "I've sent that to the owner for approval."
+	}
+	switch stored.Status {
+	case proposal.Declined:
+		return "I already sent that to the owner, and they declined it."
+	case proposal.Approved, proposal.IssueCreated, proposal.Implementing:
+		return "I already sent that to the owner, and it's approved and being worked on."
+	case proposal.Completed:
+		return "I already sent that to the owner, and it's been done."
+	default:
+		return "I already sent that to the owner. It's still waiting for approval."
+	}
+}
+
+// withNote appends a sentence to a spoken reply, ending the reply first so
+// the two do not run together when the model leaves off the full stop.
+func withNote(speak, note string) string {
+	speak = strings.TrimSpace(speak)
+	if speak == "" {
+		return note
+	}
+	if !strings.ContainsAny(speak[len(speak)-1:], ".!?") {
+		speak += "."
+	}
+	return speak + " " + note
 }
 
 // ApplyActions validates and executes an already-produced structured plan.

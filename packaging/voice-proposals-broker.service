@@ -1,0 +1,33 @@
+[Unit]
+Description=Voice feature proposal broker (owner side)
+Documentation=https://github.com/jerryfane/voice
+After=network-online.target voice.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as the OWNER, never as voice-agent. This is the only component that
+# holds GitHub credentials and reaches the owner's Herdr socket, and keeping
+# it on the owner's account is what lets the restricted agent stay unable to
+# file issues or start agents on its own.
+#
+# scripts/install-local.sh rewrites this User= line to whoever ran the
+# install. systemd has no templating for a plain (non-@) unit, and turning
+# this into voice-proposals-broker@.service would instance the timer too for
+# a device that has exactly one owner - so the installer substitutes the name
+# instead of this file hardcoding one machine's account.
+User=pi
+ExecStart=/usr/local/bin/voice-proposals-broker
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# The broker crosses sudo into the agent account's proposals CLI, so new
+# privileges cannot be disabled here; /etc/sudoers.d/voice-proposals limits
+# that hop to `voice --config /etc/voice/config.json proposals`.
+NoNewPrivileges=false
+# No ProtectHome: the Herdr socket lives in the owner's home, and an approved
+# proposal is implemented in the owner's own checkout.
+PrivateTmp=true
+# A pass waits for OMP to appear in a freshly started implementation pane.
+TimeoutStartSec=600
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6

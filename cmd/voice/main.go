@@ -255,6 +255,8 @@ func run(args []string) error {
 		return commandDevice(ctx, a, "tv", args[1:])
 	case "music":
 		return commandDevice(ctx, a, "music", args[1:])
+	case "proposals":
+		return proposalsCommand(a, cfg, loaded, args[1:])
 	case "config":
 		b, err := json.MarshalIndent(cfg, "", "  ")
 		if err != nil {
@@ -285,12 +287,16 @@ Usage: voice [--config PATH] COMMAND
   light ID OP [VALUE]       control a Magic Home light
   tv ID OP                  control an HDMI-CEC TV
   music ID OP [TYPE QUERY]  control a configured music player
+  proposals CMD [ARGS]      track what Voice was asked for and could not do
   config                    print effective config
   version                   print version
 
 Light ops: on, off, toggle, color NAME, white 0-100, brightness 0-100
 TV ops: on, off, volume-up, volume-down, mute
 Music ops: play [track|album|artist|playlist QUERY], resume, pause, next, previous, volume 0-10, volume-up, volume-down
+Proposals: list [--json], show ID, due [--json], record REQUEST [--title T] [--scope S] [--risks R],
+           notified ID, approve ID, decline ID [REASON], issue ID NUMBER, implementing ID AGENT,
+           complete ID, fail ID DETAIL, expire
 `)
 	return nil
 }
@@ -417,8 +423,9 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant, loaded s
 	candidates := requestsPaths()
 	found := map[string][]requests.Request{}
 	total := 0
+	ignored := 0
 	for _, candidate := range candidates {
-		reqs, err := requests.Load(candidate.path)
+		journal, err := requests.Load(candidate.path)
 		if err != nil {
 			if candidate.required {
 				check("requests", false, err.Error())
@@ -431,10 +438,11 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant, loaded s
 			}
 			continue
 		}
-		if len(reqs) > 0 {
-			found[candidate.path] = reqs
-			total += len(reqs)
+		if len(journal.Requests) > 0 {
+			found[candidate.path] = journal.Requests
+			total += len(journal.Requests)
 		}
+		ignored += journal.Ignored
 	}
 	if total > 0 {
 		stdout.printf("%-12s %-4s %d spoken request(s) need someone with code access:\n", "requests", "INFO", total)
@@ -463,6 +471,16 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant, loaded s
 			}
 		}
 	}
+	if ignored > 0 {
+		// Said out loud rather than quietly subtracted. The installed
+		// journal held two lines whose text was the agent's own launch
+		// command and doctor read them back as spoken feature requests; the
+		// fix must not swap that wrong answer for an unexplained gap
+		// between what the file holds and what this reports.
+		stdout.printf("%-12s %-4s %d line(s) ignored: launcher or plumbing text, not anything a person asked for\n",
+			"requests", "INFO", ignored)
+	}
+	proposalsDoctor(a, c, check)
 	if c.Timers.Enabled {
 		if a.Timers == nil {
 			check("timers", false, "enabled but no scheduler was built")

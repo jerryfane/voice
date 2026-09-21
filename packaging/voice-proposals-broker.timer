@@ -1,0 +1,17 @@
+[Unit]
+Description=Poll Voice feature proposals for owner decisions
+Documentation=https://github.com/jerryfane/voice
+
+[Timer]
+# A proposal is only useful if the owner hears about it while the request is
+# still fresh, so the poll is close to a minute. OnUnitInactiveSec measures
+# from the END of the previous pass, which is also what keeps two brokers
+# from running at once: a pass that waits on a slow Herdr simply delays the
+# next tick instead of racing it and filing an issue twice.
+OnBootSec=2min
+OnUnitInactiveSec=1min
+AccuracySec=15s
+Unit=voice-proposals-broker.service
+
+[Install]
+WantedBy=timers.target

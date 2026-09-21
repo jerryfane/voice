@@ -4,6 +4,10 @@ set -eu
 cd "$(dirname "$0")/.."
 owner=$(id -un)
 owner_home=$HOME
+# Where this clone lives. An approved proposal is implemented by an agent in
+# the owner's own checkout, and running this script from that clone is the
+# only moment anyone reliably knows the path.
+checkout=$(pwd -P)
 agent_user=voice-agent
 agent_home=/home/voice-agent
 workspace=$agent_home/voice-workspace
@@ -102,6 +106,24 @@ sudo chmod 0440 /etc/sudoers.d/voice-agent
 sudo visudo -cf /etc/sudoers.d/voice-agent >/dev/null
 printf '%s\n' "$owner" | sudo tee /etc/voice/herdr-owner >/dev/null
 sudo chmod 0644 /etc/voice/herdr-owner
+# The owner half of the feature-proposal flow gets its OWN sudoers file, so it
+# can be reviewed - and removed - without touching the rules that bound the
+# agent account. It only lets the owner run the agent's proposals CLI as the
+# agent; voice-agent gains nothing. The packaged file names the reference
+# device's owner, so retarget it, and prove it parses BEFORE it reaches
+# /etc/sudoers.d, where an unparseable file breaks sudo for everyone.
+proposals_sudoers=$(mktemp)
+sed "s|^pi ALL=|$owner ALL=|" packaging/voice-proposals-sudoers > "$proposals_sudoers"
+if ! sudo visudo -cf "$proposals_sudoers" >/dev/null; then
+  echo "refusing to install /etc/sudoers.d/voice-proposals: it does not parse" >&2
+  exit 1
+fi
+sudo install -m 0440 "$proposals_sudoers" /etc/sudoers.d/voice-proposals
+rm -f "$proposals_sudoers"
+sudo visudo -cf /etc/sudoers.d/voice-proposals >/dev/null
+# The implementation seat an approval launches works in this clone.
+printf '%s\n' "$checkout" | sudo tee /etc/voice/proposals-checkout >/dev/null
+sudo chmod 0644 /etc/voice/proposals-checkout
 # Only when it is a DIFFERENT file. Once the wrapper is installed, `command
 # -v herdr` resolves to it and the lines above rewrite herdr_bin to the real
 # binary the wrapper already delegates to - so a second install asked to copy
@@ -128,6 +150,7 @@ fi
 sudo install -m 0755 packaging/voice-herdr /usr/local/libexec/voice-herdr
 sudo install -m 0755 packaging/herdr /usr/local/bin/herdr
 sudo install -m 0755 packaging/voice-herdr-ensure /usr/local/bin/voice-herdr-ensure
+sudo install -m 0755 packaging/voice-proposals-broker /usr/local/bin/voice-proposals-broker
 sudo install -m 0755 packaging/voice-agent-session /usr/local/bin/voice-agent-session
 sudo install -m 0755 packaging/voice-agent-run /usr/local/bin/voice-agent-run
 sudo install -o "$agent_user" -g "$agent_user" -m 0644 packaging/voice-response.ts "$agent_home/.omp/agent/extensions/voice-response.ts"
@@ -154,6 +177,15 @@ rm -f /tmp/voice-herdr-skill.md
 sudo install -m 0644 packaging/voice.service /etc/systemd/system/voice.service
 sudo install -m 0644 packaging/voice-whisper.service /etc/systemd/system/voice-whisper.service
 sudo install -m 0644 packaging/voice-auth-broker@.service /etc/systemd/system/voice-auth-broker@.service
+# User= is generated rather than shipped. The broker must run as the owner,
+# systemd has no templating for a plain unit, and turning this one into an
+# instanced unit purely to carry an account name would instance its timer
+# along with it on a device that has exactly one owner.
+broker_unit=$(mktemp)
+sed "s|^User=pi$|User=$owner|" packaging/voice-proposals-broker.service > "$broker_unit"
+sudo install -m 0644 "$broker_unit" /etc/systemd/system/voice-proposals-broker.service
+rm -f "$broker_unit"
+sudo install -m 0644 packaging/voice-proposals-broker.timer /etc/systemd/system/voice-proposals-broker.timer
 sudo install -m 0644 packaging/99-voice-powerconf.rules /etc/udev/rules.d/99-voice-powerconf.rules
 sudo install -m 0644 packaging/AGENTS.md "$workspace/AGENTS.md"
 if [ ! -e /etc/voice/voice.env ]; then
@@ -204,6 +236,16 @@ else
   printf 'keeping existing wake phrases: %s\n' "$(sudo jq -c '.wake.phrases' /etc/voice/config.json)"
 fi
 
+# The approval question must land in the owner's OWN omp seat: only the owner
+# can approve a proposal, so an agent picked by guesswork is not a substitute.
+# Take the name only when the answer is unambiguous - exactly one named omp
+# agent that is not the restricted `voice` seat - and otherwise leave the
+# setting empty and tell the operator at the end of the install.
+approver_seat=""
+if agents_json=$("$herdr_bin" agent list 2>/dev/null); then
+  approver_seat=$(printf '%s\n' "$agents_json" | jq -r '[.result.agents[]? | select(.agent == "omp" and (.name // "") != "" and .name != "voice") | .name] | if length == 1 then .[0] else "" end')
+fi
+
 # ONE jq, not a pipeline. A pipeline made this step unable to fail: the
 # shebang is `env sh`, which is dash here, dash has no pipefail, and `set -e`
 # in a pipeline only inspects the LAST command's status. With an unparseable
@@ -230,8 +272,11 @@ config_filter="$wake_filter |
   .brain.timeout = \"10m0s\" |
   .brain.persona = \"You are Voice, a concise personal agent. Complete the user request with your tools, remember useful context across turns, and answer in one or two natural spoken sentences.\" |
   .brain.jev //= {\"endpoint\":\"https://openrouter.ai/api/alpha/decisions\",\"model\":\"typesafe/jev-1.13\",\"api_key_env\":\"OPENROUTER_API_KEY\",\"confidence\":0.85,\"timeout\":\"2s\"} |
-  if .brain.jev.endpoint == \"https://openrouter.ai/api/v1/api/alpha/decisions\" then .brain.jev.endpoint = \"https://openrouter.ai/api/alpha/decisions\" else . end"
-sudo jq "$config_filter" /etc/voice/config.json > /tmp/voice-config.json
+  if .brain.jev.endpoint == \"https://openrouter.ai/api/v1/api/alpha/decisions\" then .brain.jev.endpoint = \"https://openrouter.ai/api/alpha/decisions\" else . end |
+  .proposals.enabled //= true |
+  .proposals.approver = (if (.proposals.approver // \"\") == \"\" then \$approver else .proposals.approver end) |
+  .proposals.repo //= \"jerryfane/voice\""
+sudo jq --arg approver "$approver_seat" "$config_filter" /etc/voice/config.json > /tmp/voice-config.json
 
 # Belt and braces, because the thing being overwritten is the only copy of
 # the owner's configuration: refuse to install a config the binary itself
@@ -271,14 +316,19 @@ sudo systemctl restart "voice-auth-broker@$owner.service"
 sudo systemctl enable voice-whisper.service
 sudo systemctl restart voice-whisper.service
 sudo systemctl enable voice.service
+sudo systemctl enable voice-proposals-broker.timer
 if [ "$start_service" = 1 ]; then
   # restart, not enable --now: --now starts a STOPPED unit and leaves a running
   # one alone, so an install must explicitly load the new binary.
   sudo systemctl restart voice.service
+  sudo systemctl restart voice-proposals-broker.timer
 else
   # Silent maintenance mode: install everything but leave the microphone and
-  # speaker process stopped until the owner explicitly starts it.
+  # speaker process stopped until the owner explicitly starts it. The proposal
+  # broker stops with it, so no implementation seat appears on a device the
+  # owner is deliberately keeping quiet.
   sudo systemctl stop voice.service
+  sudo systemctl stop voice-proposals-broker.timer
 fi
 rm -f /tmp/voice-install /tmp/voice-herdr-report-install
 
@@ -310,3 +360,6 @@ else
 fi
 echo "Workspace: $workspace"
 echo "Service: systemctl status voice"
+if [ -z "$(sudo jq -r '.proposals.approver // ""' /etc/voice/config.json)" ]; then
+  echo "Set proposals.approver in /etc/voice/config.json to the omp agent that should ask you to approve feature proposals (herdr agent list)."
+fi

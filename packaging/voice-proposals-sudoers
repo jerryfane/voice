@@ -1,0 +1,18 @@
+# Installed as /etc/sudoers.d/voice-proposals by scripts/install-local.sh.
+#
+# One direction only: the OWNER may run the proposals CLI as the restricted
+# agent account. The owner-side broker and the owner's approving agent seat
+# therefore read and write the proposal store through the agent's own binary
+# and its own database, and no part of this feature hands the agent account a
+# GitHub token, a new command, or any additional privilege - the rules that
+# bound voice-agent live in /etc/sudoers.d/voice-agent and are untouched here.
+#
+# The command is pinned to the proposals subcommand with the system config:
+# it can list, show and transition proposals, and it can do nothing else as
+# voice-agent.
+#
+# The installer rewrites the user field below to whoever ran it; `pi` is the
+# owner account on the reference device and keeps this file a complete,
+# checkable sudoers file (`visudo -cf packaging/voice-proposals-sudoers`)
+# rather than an unvalidatable template.
+pi ALL=(voice-agent) NOPASSWD: /usr/local/bin/voice --config /etc/voice/config.json proposals *

@@ -44,6 +44,9 @@ type Config struct {
 	Feedback Feedback `json:"feedback"`
 	// Timers configures local spoken timers, which also never involve it.
 	Timers Timers `json:"timers"`
+	// Proposals records the things Voice was asked for and could not do, so
+	// the owner can approve turning them into work.
+	Proposals Proposals `json:"proposals"`
 	// STT configures local and optional remote speech-to-text engines.
 	STT STT `json:"stt"`
 	// TTS configures local speech plus an optional remote primary.
@@ -114,6 +117,54 @@ type Timers struct {
 	// ~/.local/state/voice/timers.db.
 	// The directory must be writable by the account Voice runs as.
 	File string `json:"file,omitempty"`
+}
+
+// Proposals configures what happens when Voice is asked for something it
+// cannot do.
+//
+// Before this existed, the answer was a sentence and nothing else: the owner
+// asked the device to turn the thinking sound down, heard "I can't adjust the
+// thinking sound volume from the controls available to me", and the request
+// existed nowhere afterwards. It was only built because a human happened to
+// remember it twice. A spoken request that the agent cannot serve is the most
+// honest feature report this project gets, and it was the one kind of input
+// the system threw away.
+type Proposals struct {
+	// Enabled records unsupported requests and asks the owner to approve
+	// them. Disabling it restores the old behaviour: Voice says it cannot
+	// help and the request is forgotten.
+	Enabled bool `json:"enabled"`
+	// File is the SQLite database holding proposals across restarts.
+	// Empty uses $XDG_STATE_HOME/voice/proposals.db, or
+	// ~/.local/state/voice/proposals.db.
+	// The directory must be writable by the account Voice runs as.
+	File string `json:"file,omitempty"`
+	// Approver is the Herdr seat that carries the approval question to the
+	// owner as an OMP `ask`. The owner answers in their own agent seat, and
+	// only that answer creates an issue or starts implementation work.
+	//
+	// The approval deliberately leaves this machine: the restricted account
+	// Voice runs as holds no GitHub credentials and must never be able to
+	// authorize its own work, or "I couldn't do that" becomes a way for the
+	// agent to file and build whatever it likes.
+	//
+	// Empty is valid and normal - the installer fills it in once it has
+	// discovered the owner's seat - but nobody is asked until it is set, so
+	// `voice doctor` reports it.
+	Approver string `json:"approver"`
+	// Repo is the owner/name repository where an approved proposal becomes
+	// an issue.
+	Repo string `json:"repo"`
+	// MaxPerHour and RetryAfter bound how often the owner is interrupted.
+	// Someone who asks four times in a minute for the same missing feature
+	// has told us once; asking them to approve it four times teaches them to
+	// ignore the question.
+	MaxPerHour int `json:"max_per_hour"`
+	// RetryAfter is how long to wait before asking about a proposal again.
+	RetryAfter Duration `json:"retry_after"`
+	// Expire closes a proposal nobody ever answered, so an unread question
+	// from three days ago stops competing with today's.
+	Expire Duration `json:"expire"`
 }
 
 // Input describes audio capture.
@@ -394,6 +445,13 @@ func Default() Config {
 			Volume:        0.65,
 		},
 		Timers: Timers{Enabled: true},
+		Proposals: Proposals{
+			Enabled:    true,
+			Repo:       "jerryfane/voice",
+			MaxPerHour: 4,
+			RetryAfter: Duration(6 * time.Hour),
+			Expire:     Duration(72 * time.Hour),
+		},
 		STT: STT{
 			Engine: Engine{
 				Name:    "whisper.cpp",
@@ -797,6 +855,39 @@ func (c Config) Validate() error {
 		}
 		if c.Brain.Jev.Timeout.D() <= 0 {
 			return fmt.Errorf("brain.jev.timeout must be positive")
+		}
+	}
+	// Only meaningful when the feature is on: a deployment that never
+	// records proposals should not be refused startup over the interval
+	// between questions it will never ask.
+	//
+	// proposals.approver is deliberately NOT required here. It is empty on
+	// every fresh install until the owner's seat is known, and refusing to
+	// start over it would mean a device that cannot talk because nobody has
+	// wired up the approval path yet. `voice doctor` reports it instead.
+	if c.Proposals.Enabled {
+		if c.Proposals.MaxPerHour <= 0 {
+			return fmt.Errorf("proposals.max_per_hour must be positive, got %d: set it to at least 1 or disable proposals", c.Proposals.MaxPerHour)
+		}
+		if c.Proposals.RetryAfter.D() <= 0 {
+			return fmt.Errorf("proposals.retry_after must be positive")
+		}
+		if c.Proposals.Expire.D() <= 0 {
+			return fmt.Errorf("proposals.expire must be positive")
+		}
+		// An expiry shorter than the retry interval throws proposals away
+		// before the owner is ever asked a second time, which looks exactly
+		// like the silent-drop behaviour this feature exists to end.
+		if c.Proposals.Expire.D() <= c.Proposals.RetryAfter.D() {
+			return fmt.Errorf("proposals.expire (%s) must exceed proposals.retry_after (%s), else a proposal expires before the owner is asked again",
+				c.Proposals.Expire.D(), c.Proposals.RetryAfter.D())
+		}
+		// Checked here so a typo is refused at startup rather than
+		// discovered as a failing `gh` call at the one moment an approval
+		// finally arrives.
+		owner, name, ok := strings.Cut(c.Proposals.Repo, "/")
+		if !ok || strings.TrimSpace(owner) == "" || strings.TrimSpace(name) == "" || strings.Contains(name, "/") {
+			return fmt.Errorf("proposals.repo must be owner/name (for example \"jerryfane/voice\"), got %q", c.Proposals.Repo)
 		}
 	}
 	seen := map[string]string{}

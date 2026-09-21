@@ -11,6 +11,7 @@ import (
 	"github.com/jerryfane/voice/internal/faults"
 	"github.com/jerryfane/voice/internal/feedback"
 	"github.com/jerryfane/voice/internal/hid"
+	"github.com/jerryfane/voice/internal/proposal"
 	"github.com/jerryfane/voice/internal/speech"
 	"github.com/jerryfane/voice/internal/timer"
 	"github.com/jerryfane/voice/internal/vad"
@@ -166,5 +167,26 @@ func Build(c config.Config) *Assistant {
 			}
 		}
 	}
-	return &Assistant{Recorder: rec, Player: player, VAD: seg, WakeSTT: wakeSTT, STT: stt, TTS: tts, Brain: planner, Devices: device.Build(c), Feedback: fb, Timers: timers, Missed: missed, WakePhrases: c.Wake.Phrases, WakeFuzz: c.Wake.Fuzz, Logger: logger}
+	var proposals *proposal.Store
+	if c.Proposals.Enabled {
+		path := c.Proposals.File
+		if path == "" {
+			p, err := config.StatePath("proposals.db")
+			if err != nil {
+				logger.Printf("proposals: %v", err)
+			}
+			path = p
+		}
+		store, err := proposal.Open(path)
+		if err != nil {
+			// Without a store the agent would answer a request it cannot do
+			// and nothing would remember it was ever asked for, which is the
+			// exact loss this feature exists to prevent: say so in the
+			// journal rather than fail silently.
+			logger.Printf("proposals disabled: %v", err)
+		} else {
+			proposals = store
+		}
+	}
+	return &Assistant{Recorder: rec, Player: player, VAD: seg, WakeSTT: wakeSTT, STT: stt, TTS: tts, Brain: planner, Devices: device.Build(c), Feedback: fb, Timers: timers, Missed: missed, Proposals: proposals, WakePhrases: c.Wake.Phrases, WakeFuzz: c.Wake.Fuzz, Logger: logger}
 }

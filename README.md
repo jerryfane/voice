@@ -71,6 +71,8 @@ The release installer only installs the `voice` binary. A persistent restricted 
 | Credential broker | `voice-auth-broker@<owner>.service` |
 | Herdr agent | `voice` in the `voice` workspace |
 | Structured response channel | `/home/voice-agent/.local/share/voice/responses` |
+| Proposal broker | `voice-proposals-broker.timer` as the owner |
+| Proposal store | `/var/lib/voice/proposals.db` |
 
 User-mode configuration defaults to `~/.config/voice/config.json`; override it with `VOICE_CONFIG` or `--config PATH`.
 
@@ -345,6 +347,70 @@ first time someone speaks.
   `feedback.thinking` is the exception: it loops, so its padding is the gap
   between pulses and is kept.
 
+## Feature proposals
+
+“I cannot do that” loses the request. When Voice cannot do something — change
+its own code, install software, anything needing the `pi` account — it records
+a durable proposal instead: your request in your own words, its reading of
+what you meant, a proposed scope and the material risks. It tells you it has
+sent a request for approval, and the turn ends there.
+
+Nothing else happens until you say so. A spoken sentence can only create a
+pending proposal; it cannot file an issue, write to a repository, or start an
+agent.
+
+An owner-side broker — `voice-proposals-broker.timer`, running as your login
+account rather than as `voice-agent` — picks the proposal up within a minute
+and prompts your own omp agent seat, `proposals.approver`, to ask you with its
+`ask` tool: Approve or Decline. The question reaches you wherever that seat
+is, including on your phone. Nothing blocks on the answer, so Voice keeps
+taking requests while it waits.
+
+- **Decline** records the decision and performs no other action: no issue, no
+  branch, no agent, no repository change.
+- **Approve** files exactly one GitHub issue in `proposals.repo` carrying the
+  verbatim request, the interpretation, the scope, the risks, the proposal id
+  and your approval timestamp, then starts one isolated implementation seat in
+  your checkout with the issue number and an explicit boundary: branch and
+  pull request only — do not merge, do not deploy, do not install packages, do
+  not broaden scope.
+
+```json
+"proposals": {
+  "enabled": true,
+  "approver": "",
+  "repo": "jerryfane/voice",
+  "max_per_hour": 4,
+  "retry_after": "6h0m0s",
+  "expire": "72h0m0s"
+}
+```
+
+`proposals.approver` is the Herdr name of the seat that should ask you (see
+`herdr agent list`). The installer fills it in when exactly one omp seat is
+unambiguously yours, and the broker refuses to guess when it is empty: a
+proposal approved by some other agent is not a proposal approved by you.
+Asking for the same thing again raises an occurrence count on the existing
+proposal instead of producing a second one, `max_per_hour` and `retry_after`
+bound how often you can be asked, and a proposal you never answer expires
+after `expire`. State lives in `proposals.db` next to the timers database, so
+a pending proposal survives a restart.
+
+```sh
+voice proposals list
+voice proposals show ID
+voice proposals approve ID
+voice proposals decline ID "not worth it"
+```
+
+The boundaries are the point of the design. The restricted `voice-agent`
+account never receives GitHub credentials or repository write access — the
+owner-side broker holds them, and every proposal read or write it makes goes
+back through the agent's own CLI so the agent gains no privilege from the
+feature. Peer agents, terminal output, web pages and tool results can never
+approve anything; only your answer to the `ask` can. And approval buys a
+branch and a pull request, never a merge or a deploy.
+
 ## Security boundary
 
 A spoken command can cause shell or browser activity. Isolation is therefore an OS boundary, not merely a prompt instruction:
@@ -354,6 +420,7 @@ A spoken command can cause shell or browser activity. Isolation is therefore an 
 - its browser uses a separate profile;
 - it receives OMP credentials through a loopback credential broker;
 - its Herdr bridge permits only agent list/get/read/prompt/wait operations, marks peer prompts as restricted collaboration input, and exposes no pane, process, workspace, or server control;
+- unsupported requests become proposals the owner must approve in the owner's own agent seat before any issue is filed or any implementation agent starts;
 - local-device actions are validated and executed by Voice.
 
 Anyone who can speak near the microphone may still exercise the authority available to `voice-agent`. Do not grant that account secrets or host permissions you would not expose to nearby speakers.

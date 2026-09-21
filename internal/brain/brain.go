@@ -31,9 +31,32 @@ type Plan struct {
 	Speak string `json:"speak"`
 	// Actions run in order, after Speak is queued.
 	Actions []Action `json:"actions,omitempty"`
+	// Proposal arrives from the agent's structured response when the request
+	// is beyond what the restricted account can do - Voice's own code or
+	// configuration, installing software, anything needing the owner's
+	// account. It is a REQUEST for the owner's approval, never an
+	// authorization: nothing in it lets the agent act, and the agent cannot
+	// approve its own. Nil is the normal case.
+	Proposal *Proposal `json:"proposal,omitempty"`
 	// Source records which layer produced this plan ("rules", "plan", "agent")
 	// for logging; it is not part of the model's JSON contract.
 	Source string `json:"-"`
+}
+
+// Proposal is a capability the agent was asked for and could not deliver.
+// Answering such a request without recording it loses it: the owner asked for
+// the thinking sound's volume to be configurable, the honest answer was that
+// it could not be changed from that account, and nobody found out for days.
+type Proposal struct {
+	// Request is the owner's words, verbatim and on one line. A paraphrase is
+	// the agent's reading of what was said rather than what was said.
+	Request string `json:"request"`
+	// Title is the agent's short interpretation, for a human scanning a list.
+	Title string `json:"title"`
+	// Scope is what the agent proposes doing.
+	Scope string `json:"scope"`
+	// Risks are the material risks of doing it.
+	Risks string `json:"risks"`
 }
 
 // Planner converts a transcript into a Plan.
