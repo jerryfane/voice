@@ -33,10 +33,29 @@ voice tv <id> off
 voice tv <id> volume-up
 voice tv <id> volume-down
 voice tv <id> mute
+voice phone <id> read
+voice phone <id> open-app <configured-alias>
+voice phone <id> volume-up
+voice phone <id> volume-down
+voice phone <id> pause
+voice phone <id> resume
+voice phone <id> dial <number>
 voice say "text to speak"
 ```
 
 Always use IDs returned by `voice devices`. Never guess an address or CEC adapter.
+
+Android is opt-in and requires an already-authorized connected ADB target,
+explicit serial, and owner-allowlisted operations/app aliases. Never invoke ADB
+or arbitrary phone tools to bypass Voice's allowlist. The persistent Voice
+planner must return structured actions rather than invoking these CLI commands.
+Only perform the user's requested phone task; ask for missing/ambiguous aliases
+or numbers, never infer numbers or read contacts. `dial` accepts a string of
+1–15 digits with optional leading `+` and only opens the dialer: the user must
+confirm the call on the phone. `read` checks connection, not private content.
+Receipts acknowledge requests, not verified app/media state or completed calls.
+No messages, private-data reads, arbitrary shell/taps/text, or lock bypass.
+The allowlist is an API boundary, not an OS sandbox around the ADB server.
 
 ## Persistent agent
 

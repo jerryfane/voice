@@ -116,7 +116,7 @@ func dialHALocal(ctx context.Context, network, address string) (net.Conn, error)
 	return nil, errors.New("cannot connect to Home Assistant local endpoint")
 }
 
-func (a *haAPI) request(ctx context.Context, method, path string, body any, out any) error {
+func (a *haAPI) request(ctx context.Context, method, path string, body any, out any) (resultErr error) {
 	token := os.Getenv(a.tokenEnv)
 	if strings.TrimSpace(token) == "" {
 		return errors.New("Home Assistant token environment variable is unset")
@@ -142,7 +142,12 @@ func (a *haAPI) request(ctx context.Context, method, path string, body any, out 
 		}
 		return errors.New("Home Assistant request failed (local connection, TLS, timeout or redirect)")
 	}
-	defer resp.Body.Close() // discard: the response is read-only and request errors are reported below.
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Cleanup errors can contain transport details; retain redaction.
+			resultErr = errors.Join(resultErr, errors.New("closing Home Assistant response failed"))
+		}
+	}()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// Never echo response text: integrations may include secrets in errors.
 		return fmt.Errorf("Home Assistant HTTP %d", resp.StatusCode)

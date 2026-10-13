@@ -610,6 +610,88 @@ voice tv <id> volume-down
 voice tv <id> mute
 ```
 
+### Android phone
+
+Android control is **disabled by default**. It requires an already-installed
+`adb` client on Voice's PATH, an explicitly selected connected phone, and the
+owner's on-phone [ADB authorization](https://developer.android.com/tools/adb#Enabling).
+Voice never pairs, connects, chooses the first available device, installs phone
+software, or bypasses the lock screen. Setup and enabling this integration are
+owner actions; no installer or service configuration is changed by this feature.
+
+Add an `android` object to the owner's config only after deciding which tasks to
+permit. Replace the serial and package with the actual owner's values:
+
+```json
+"android": {
+  "id": "phone",
+  "serial": "OWNER_PHONE_SERIAL",
+  "operations": ["read", "open_app"],
+  "apps": {"maps": "com.google.android.apps.maps"}
+}
+```
+
+`operations` is an explicit allowlist; absent or empty grants nothing, including
+connection reads. App aliases are case-sensitive ASCII letters/digits,
+underscores or hyphens, starting with a letter/digit (maximum 64 characters).
+Each alias maps to a dotted Android package name with a launcher activity, not a
+component, URL or command. Configured IDs must be unique across device kinds.
+No target identifier or package list is passed to the planner, only allowed app
+aliases, operations and usage limits.
+
+| Operation | Arguments | Boundary |
+|---|---|---|
+| `read` | None | Checks the selected ADB target is connected and authorized; no phone content |
+| `open_app` | `{"app":"maps"}` | Launches only an owner-allowlisted app's normal launcher |
+| `dial` | `{"number":"+15550102020"}` | Opens the dialer; review the number and tap Call on the phone |
+| `volume_up`, `volume_down` | None | Sends one volume key event; Android chooses the affected stream |
+| `pause`, `resume` | None | Sends distinct media pause/play keys to Android's current media handler |
+
+Allow each additional operation explicitly before requesting it. Phone numbers
+must be strings containing 1–15 digits with an optional leading `+`; extensions,
+USSD codes, separators and contact lookup are unsupported. Voice uses
+[`ACTION_DIAL`, never `ACTION_CALL`](https://developer.android.com/guide/components/intents-common#Phone),
+so it does not place calls. There is no message sending, screenshot/screen
+reading, notification/contact/file access, arbitrary shell, tapping, text entry,
+unlocking, or general app automation. App launch may expose that app on the
+physical screen; allow only apps appropriate for that environment.
+
+```sh
+voice phone phone read
+voice phone phone open-app maps
+# Only after the owner separately allows these operations:
+voice phone phone pause
+voice phone phone dial +15550102020
+```
+
+Spoken equivalents include “Hey Voice, open maps on phone” and “Hey Voice,
+turn phone volume up.” The planner asks for missing or ambiguous app aliases or
+numbers rather than guessing. Like other voice actions, these low-impact tasks
+use the wake gate, not speaker identity authentication. Anyone able to issue a
+wake-authorized request can request the configured operations.
+
+Every command targets the configured serial. Mutations first check connection
+and authorization; invalid arguments or disallowed operations never reach ADB.
+An entire request has a ten-second deadline, with no automatic retry.
+Activity-manager failures are rejected even when ADB exits zero.
+Receipts describe **requests sent**, not verified foreground apps, playback,
+volume changes or completed calls; they replace model success claims in spoken
+responses. Locked phones, OEM restrictions, absent launcher/dialer apps, or no
+active media handler may prevent the intended effect. Check the phone rather
+than treating a receipt as physical verification.
+
+**ADB trust is broader than this driver.** The allowlist is enforced by Voice's
+API, not by Android's debugging authorization or an OS sandbox. A tool-capable
+agent or another local process able to reach the same ADB server can bypass the
+driver. The packaged listener and agent share an account; prompt instructions
+are not isolation. Do not enable ADB where that trust is unacceptable.
+Removing `android` or an operation revokes Voice's corresponding API access;
+revoking debugging authorization/disconnecting on the phone is needed to revoke
+ADB access itself. Driver output suppresses serials, numbers and raw ADB output,
+but spoken transcripts can still appear in existing Voice logs/model requests,
+and command-line arguments can be visible locally. This is not a private-data
+redaction layer for the whole runtime.
+
 ### Home Assistant household devices
 
 Configure an existing local Home Assistant installation explicitly; Voice does
@@ -854,6 +936,11 @@ A spoken command can cause shell or browser activity. Isolation is therefore an 
 - local-device actions are validated and executed by Voice.
 
 Anyone who can speak near the microphone may still exercise the authority available to `voice-agent`. Do not grant that account secrets or host permissions you would not expose to nearby speakers.
+
+Runtime cleanup failures are reported rather than silently discarded, including
+capture-pipe cancellation, device response/socket closure, health snapshot
+closure, and timer-schema rollback. Home Assistant cleanup errors remain
+redacted; cleanup errors do not replace the original request or migration failure.
 
 ## License
 

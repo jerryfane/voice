@@ -44,14 +44,13 @@ func processIdentity(pid int) (string, string, error) {
 // Read rejects stale, foreign-process and insecure files instead of reporting
 // their old observations as the live listener. expectedPID=0 permits any live
 // process identity; service status supplies systemd's actual MainPID.
-func Read(path string, now time.Time, expectedPID int) (Snapshot, error) {
-	var s Snapshot
+func Read(path string, now time.Time, expectedPID int) (s Snapshot, err error) {
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return s, err
 	}
 	f := os.NewFile(uintptr(fd), path)
-	defer f.Close() // discard: read-only descriptor; no buffered output to lose.
+	defer func() { err = errors.Join(err, f.Close()) }()
 	info, err := f.Stat()
 	if err != nil {
 		return s, err

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"sync"
@@ -130,12 +131,15 @@ func (r *CommandRecorder) Stream(ctx context.Context) (<-chan []int16, <-chan er
 			return
 		}
 		cmd.Cancel = func() error {
-			_ = stdout.Close() // discard: cancellation closes a read-only pipe; an already-closed pipe needs no recovery.
-			err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			if errors.Is(err, syscall.ESRCH) {
-				return nil
+			closeErr := stdout.Close()
+			if errors.Is(closeErr, os.ErrClosed) {
+				closeErr = nil
 			}
-			return err
+			killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			if errors.Is(killErr, syscall.ESRCH) {
+				killErr = nil
+			}
+			return errors.Join(closeErr, killErr)
 		}
 		var stderr captureStderr
 		cmd.Stderr = &stderr
@@ -181,7 +185,9 @@ type captureStderr struct{ bytes.Buffer }
 func (b *captureStderr) Write(p []byte) (int, error) {
 	n := len(p)
 	if left := 4096 - b.Len(); left > 0 {
-		_, _ = b.Buffer.Write(p[:min(left, n)]) // discard: bytes.Buffer.Write always consumes the slice without error.
+		if written, err := b.Buffer.Write(p[:min(left, n)]); err != nil {
+			return written, err
+		}
 	}
 	return n, nil
 }

@@ -19,5 +19,8 @@ func Build(cfg config.Config) *Registry {
 			r.Add(NewHomeAssistant(*cfg.HomeAssistant, entity))
 		}
 	}
+	if cfg.Android != nil {
+		r.Add(NewAndroid(*cfg.Android))
+	}
 	return r
 }

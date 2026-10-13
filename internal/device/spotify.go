@@ -3,6 +3,7 @@ package device
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -43,13 +44,13 @@ func (s *Spotify) Capabilities() []Op {
 // That client would run under Voice's account, without the daemon's credentials
 // or pinned audio configuration, and can hang while trying to authenticate.
 // The daemon answers the empty-datagram handshake before any CLI command runs.
-func (s *Spotify) checkDaemon(ctx context.Context) error {
+func (s *Spotify) checkDaemon(ctx context.Context) (resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	conn, err := net.Dial("udp", s.daemonAddress)
 	if err == nil {
-		defer conn.Close() // discard: UDP close has no buffered payload to flush.
+		defer func() { resultErr = errors.Join(resultErr, conn.Close()) }()
 		err = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
 	}
 	if err == nil {

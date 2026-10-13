@@ -269,7 +269,7 @@ func run(args []string) error {
 		return commandDevice(ctx, a, "tv", args[1:])
 	case "music":
 		return commandDevice(ctx, a, "music", args[1:])
-	case "switch", "climate", "lock":
+	case "switch", "climate", "lock", "phone":
 		return commandDevice(ctx, a, args[0], args[1:])
 	case "proposals":
 		return proposalsCommand(a, cfg, loaded, args[1:])
@@ -308,6 +308,7 @@ Usage: voice [--config PATH] COMMAND
   switch ID OP             control an explicitly allowlisted safe switch
   climate ID OP [VALUE]    read/control an explicitly allowlisted smart thermostat
   lock ID read             read an exposed HA lock; never lock/unlock
+  phone ID OP [VALUE]       request an explicitly allowlisted connected Android phone task
   proposals CMD [ARGS]      track what Voice was asked for and could not do
   config                    print effective config
   version                   print version
@@ -317,6 +318,12 @@ TV ops: on, off, volume-up, volume-down, mute
 Music ops: play [track|album|artist|playlist QUERY], resume, pause, next, previous, volume 0-10, volume-up, volume-down
 HA ops: read; light/switch allowlisted on/off/toggle; light brightness/color when supported
 Climate ops: read, temperature VALUE (HA's configured units), hvac-mode MODE
+Phone ops: read, open-app ALIAS, dial NUMBER, volume-up, volume-down, pause, resume
+Phone control is disabled by default; requires owner-configured operations/apps, adb,
+an explicit serial, and existing on-phone ADB authorization. Read checks connection only.
+Open-app accepts one configured alias; dial accepts one number string and opens the dialer
+only: physically confirm the call on the phone. Other phone ops take no extra arguments.
+No automatic pairing, private data access, message sending, or lock bypass.
 Discovery needs home_assistant.url and token_env (default VOICE_HA_TOKEN).
 Candidates require an owner config edit: choose id/entity_id and explicit operations.
 No mDNS/subnet scan, automatic import, vendor-cloud appliance or direct Aqara support.
@@ -563,6 +570,26 @@ func commandDevice(ctx context.Context, a *session.Assistant, kind string, args 
 	}
 	op := strings.ReplaceAll(args[1], "-", "_")
 	cmd := device.Command{Op: device.Op(op)}
+	if kind == "phone" {
+		switch cmd.Op {
+		case device.OpOpenApp:
+			if len(args) != 3 {
+				return errors.New("open-app requires exactly one configured app alias")
+			}
+			cmd.Args = map[string]any{"app": args[2]}
+		case device.OpDial:
+			if len(args) != 3 {
+				return errors.New("dial requires exactly one phone number string; confirm the call on the phone")
+			}
+			cmd.Args = map[string]any{"number": args[2]}
+		case device.OpRead, device.OpVolumeUp, device.OpVolumeDown, device.OpPause, device.OpResume:
+			if len(args) != 2 {
+				return fmt.Errorf("phone %s takes no extra arguments", args[1])
+			}
+		default:
+			return fmt.Errorf("unsupported phone operation %q", args[1])
+		}
+	}
 	if cmd.Op == device.OpTemperature {
 		if len(args) != 3 {
 			return errors.New("temperature requires a value in the thermostat's configured units")

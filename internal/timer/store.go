@@ -73,7 +73,7 @@ func Open(path string) (*Store, error) {
 // the file on every start - including for `voice doctor` while the service was
 // running - and would quietly add a timers table to whatever database a
 // mistyped path pointed at.
-func prepare(db *sql.DB, path string) error {
+func prepare(db *sql.DB, path string) (resultErr error) {
 	var timers, others int
 	row := db.QueryRow(`SELECT
 		COUNT(*) FILTER (WHERE name = 'timers'),
@@ -96,7 +96,11 @@ func prepare(db *sql.DB, path string) error {
 		if err != nil {
 			return err
 		}
-		defer tx.Rollback()
+		defer func() {
+			if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+				resultErr = errors.Join(resultErr, fmt.Errorf("rolling back timer schema: %w", err))
+			}
+		}()
 		if reminders == 0 {
 			if _, err := tx.Exec(`ALTER TABLE timers ADD COLUMN reminder TEXT NOT NULL DEFAULT ''`); err != nil {
 				return fmt.Errorf("adding reminder content to %s: %w", path, err)
