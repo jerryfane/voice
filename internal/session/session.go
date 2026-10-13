@@ -179,8 +179,8 @@ func withNote(speak, note string) string {
 }
 
 // ApplyActions validates and executes an already-produced structured plan.
-// It returns descriptions of authenticated read results, which replace any
-// planner-guessed state before microphone or CLI replies are spoken.
+// It returns authenticated read results and bounded phone action receipts,
+// replacing planner guesses before microphone or CLI replies are spoken.
 func (a *Assistant) ApplyActions(ctx context.Context, actions []brain.Action) (string, error) {
 	var reads strings.Builder
 	for _, act := range actions {
@@ -199,11 +199,20 @@ func (a *Assistant) ApplyActions(ctx context.Context, actions []brain.Action) (s
 			return "", fmt.Errorf("%s %s: %w", act.Device, act.Op, err)
 		}
 		a.logf("action device=%s op=%s state=%v", act.Device, act.Op, state)
+		var reply string
 		if act.Op == device.OpRead {
-			reply, err := deviceStateReply(dev.ID(), state)
+			reply, err = deviceStateReply(dev.ID(), state)
 			if err != nil {
 				return "", err
 			}
+		} else if dev.Kind() == "phone" {
+			receipt, ok := state["receipt"].(string)
+			if !ok || strings.TrimSpace(receipt) == "" {
+				return "", fmt.Errorf("%s did not return a phone action receipt", dev.ID())
+			}
+			reply = fmt.Sprintf("%s: %s", dev.ID(), receipt)
+		}
+		if reply != "" {
 			if reads.Len() > 0 {
 				reads.WriteByte(' ')
 			}

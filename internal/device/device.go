@@ -23,6 +23,8 @@ const (
 	OpRead        Op = "read"        // authenticated, read-only state query
 	OpTemperature Op = "temperature" // args: temperature in the thermostat's configured units
 	OpHVACMode    Op = "hvac_mode"   // args: mode advertised by the thermostat
+	OpOpenApp     Op = "open_app"    // args: app (owner-allowlisted phone app alias)
+	OpDial        Op = "dial"        // args: number (opens dialer; user confirms on phone)
 	OpOn          Op = "on"
 	OpOff         Op = "off"
 	OpToggle      Op = "toggle"
@@ -49,7 +51,8 @@ type Command struct {
 
 // State is a driver-reported snapshot. Keys are driver-defined but SHOULD use
 // "power" ("on"/"off"/"standby"), "r"/"g"/"b", "white", and "brightness" where
-// they apply, so the planner can describe state uniformly.
+// they apply, so the planner can describe state uniformly. A phone mutation
+// returns a "receipt" describing only the request sent, not verified completion.
 type State map[string]any
 
 // Device is one addressable endpoint.

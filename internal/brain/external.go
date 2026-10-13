@@ -79,6 +79,13 @@ func (e *External) Plan(ctx context.Context, transcript string, inventory []devi
 	}
 	return p, nil
 }
+
+const phonePlanningRules = `Android phones (kind "phone") are opt-in: use only the named configured phone, only its advertised operations, and only the task the user explicitly requested. If the phone, or an app alias or number required for that task, is missing or ambiguous, ask the user and emit no phone action; never infer a phone number or resolve one from contacts.
+For "open_app", use exactly {"app":"configured alias"} from the aliases in the device description, never a package, component, or URL. For "dial", use exactly {"number":"the explicitly supplied phone number"} as a string: this opens ACTION_DIAL only, and the user must physically confirm the call on the phone. Never place or claim to place a call.
+"read", "volume_up", "volume_down", "pause", and "resume" take empty args. "read" checks connection only, not screen, foreground app, playback, calls, messages, or private data.
+No other phone operations are supported: never send messages, inspect private data, unlock/bypass a lock, or use arbitrary shell, taps, text, or intents. Request phone control only through structured actions, never adb, the voice executable, or any other direct tool, even in agent mode.
+Never claim unadvertised phone capabilities or completed phone actions before a driver receipt. A receipt confirms only that the request was sent, not foreground app, media playback, or call completion; do not predict those outcomes in speak.`
+
 func (e *External) prompt(transcript, inventory string) string {
 	if e.Mode == "agent" {
 		return fmt.Sprintf(`%s
@@ -94,8 +101,9 @@ After completing the work, return ONLY one JSON object with this exact shape:
 {"speak":"short natural response spoken aloud","actions":[{"device":"configured id","op":"advertised capability","args":{}}],"proposal":{"request":"the user's words, verbatim, one line","title":"short interpretation","scope":"what building it would involve","risks":"material risks"}}
 Use only listed devices and advertised capabilities. Never invent a device ID. For color use args {"name":"red"} or integer r/g/b. For brightness use {"level":0..100}. For a music play action, omit args to start shuffled liked songs, or use {"query":"name","type":"track|album|artist|playlist"}; use resume for the paused item. Music volume uses integer args {"level":0..10}; volume_up and volume_down change one step. If no local device action is needed, actions is []. No markdown outside the JSON.
 For an advertised read capability, request op "read" with empty args; do not guess or announce the device's state before that read. For temperature use {"temperature":number} in the configured device's units; for hvac_mode use {"mode":"requested mode"}. The driver validates supported modes and temperature bounds. Locks are read-only; never request an unlock or claim to have unlocked a door.
+%s
 
-Include "proposal" ONLY when the request is beyond what this restricted account can do - changing Voice's own code or configuration, installing software, anything needing the owner's account - and omit the field entirely otherwise. The request field must be the user's OWN WORDS on one line: a paraphrase is your reading of what was said rather than what was said. Do not claim you have written it down or filed anything, and do not approve it yourself: Voice records it and asks the owner, who alone decides. This field is carried in the turn prompt because a refusal on its own loses the request - that already happened with the thinking-sound volume, and nobody found out for days.`, e.Persona, transcript, inventory)
+Include "proposal" ONLY when the request is beyond what this restricted account can do - changing Voice's own code or configuration, installing software, anything needing the owner's account - and omit the field entirely otherwise. The request field must be the user's OWN WORDS on one line: a paraphrase is your reading of what was said rather than what was said. Do not claim you have written it down or filed anything, and do not approve it yourself: Voice records it and asks the owner, who alone decides. This field is carried in the turn prompt because a refusal on its own loses the request - that already happened with the thinking-sound volume, and nobody found out for days.`, e.Persona, transcript, inventory, phonePlanningRules)
 	}
 	return fmt.Sprintf(`%s
 
@@ -104,7 +112,8 @@ Available local devices: %s
 Return ONLY one JSON object with this exact shape:
 {"speak":"short response spoken aloud","actions":[{"device":"configured id","op":"advertised capability","args":{}}],"proposal":{"request":"the user's words, verbatim, one line","title":"short interpretation","scope":"what building it would involve","risks":"material risks"}}
 For an advertised read capability, request op "read" with empty args; do not guess or announce the device's state before that read. For temperature use {"temperature":number} in the configured device's units; for hvac_mode use {"mode":"requested mode"}. The driver validates supported modes and temperature bounds. Locks are read-only; never request an unlock or claim to have unlocked a door.
-Rules: Use only listed devices and advertised capabilities. Never invent an ID. For color use args {"name":"red"} or integer r/g/b. For brightness use {"level":0..100}. For a music play action, omit args to start shuffled liked songs, or use {"query":"name","type":"track|album|artist|playlist"}; use resume for the paused item. Music volume uses integer args {"level":0..10}; volume_up and volume_down change one step. If no local action is needed, actions is []. No markdown. Include "proposal" only for a request this deployment cannot carry out, with the user's words verbatim; omit the field otherwise, and never claim to have filed it yourself.`, e.Persona, transcript, inventory)
+%s
+Rules: Use only listed devices and advertised capabilities. Never invent an ID. For color use args {"name":"red"} or integer r/g/b. For brightness use {"level":0..100}. For a music play action, omit args to start shuffled liked songs, or use {"query":"name","type":"track|album|artist|playlist"}; use resume for the paused item. Music volume uses integer args {"level":0..10}; volume_up and volume_down change one step. If no local action is needed, actions is []. No markdown. Include "proposal" only for a request this deployment cannot carry out, with the user's words verbatim; omit the field otherwise, and never claim to have filed it yourself.`, e.Persona, transcript, inventory, phonePlanningRules)
 }
 func has(a []string, s string) bool {
 	for _, v := range a {

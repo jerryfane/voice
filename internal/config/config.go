@@ -62,6 +62,8 @@ type Config struct {
 	Spotify *Spotify `json:"spotify,omitempty"`
 	// HomeAssistant exposes only explicitly configured household entities.
 	HomeAssistant *HomeAssistant `json:"home_assistant,omitempty"`
+	// Android controls one explicitly authorized, connected phone over ADB.
+	Android *Android `json:"android,omitempty"`
 }
 
 // Feedback configures the immediate acknowledgement of an accepted wake
@@ -1101,6 +1103,16 @@ func (c Config) Validate() error {
 		if err := c.HomeAssistant.validate(seen); err != nil {
 			return err
 		}
+	}
+	if c.Android != nil {
+		if err := c.Android.Validate(); err != nil {
+			return err
+		}
+		k := strings.ToLower(c.Android.ID)
+		if prev, dup := seen[k]; dup {
+			return fmt.Errorf("duplicate device id %q (already used by a %s)", c.Android.ID, prev)
+		}
+		seen[k] = "phone"
 	}
 	return nil
 }
