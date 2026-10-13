@@ -14,6 +14,7 @@ import (
 	"github.com/jerryfane/voice/internal/brain"
 	"github.com/jerryfane/voice/internal/device"
 	"github.com/jerryfane/voice/internal/feedback"
+	"github.com/jerryfane/voice/internal/health"
 	"github.com/jerryfane/voice/internal/proposal"
 	"github.com/jerryfane/voice/internal/speech"
 	"github.com/jerryfane/voice/internal/timer"
@@ -64,6 +65,9 @@ type Assistant struct {
 	// Now is the clock used for timer arithmetic. Nil means time.Now.
 	Now    func() time.Time
 	Logger *log.Logger
+	// Health is optional content-free live diagnostics, set before Run.
+	Health        *health.Monitor
+	HealthBudgets HealthBudgets
 }
 
 func (a *Assistant) logf(f string, v ...any) {
@@ -74,9 +78,11 @@ func (a *Assistant) logf(f string, v ...any) {
 
 // HandleText is the non-voice entry point used by the CLI, agents and tests.
 // It runs the exact same planner and device execution path as a spoken command.
-func (a *Assistant) HandleText(ctx context.Context, text string) (brain.Plan, error) {
+func (a *Assistant) HandleText(ctx context.Context, text string) (p brain.Plan, err error) {
+	ctx, done := a.Health.Begin(ctx, "plan", a.HealthBudgets.plan())
+	defer func() { done(err) }()
 	started := time.Now()
-	p, err := a.Brain.Plan(ctx, strings.TrimSpace(text), a.Devices.Infos())
+	p, err = a.Brain.Plan(ctx, strings.TrimSpace(text), a.Devices.Infos())
 	if err != nil {
 		return p, err
 	}
@@ -244,7 +250,12 @@ func (a *Assistant) Speak(ctx context.Context, text string) error {
 		defer gate.ResumeAfter(playbackTail)
 	}
 	started := time.Now()
-	wav, err := a.TTS.Synthesize(ctx, text)
+	synthCtx, synthDone := a.Health.Begin(ctx, "synthesize", a.HealthBudgets.synthesize())
+	wav, err := a.TTS.Synthesize(synthCtx, text)
+	if err == nil {
+		err = synthCtx.Err()
+	}
+	synthDone(err)
 	if err != nil {
 		a.logf("stage=synthesize state=failed ms=%.3f err=%v", sinceMS(started), err)
 		return err
@@ -255,7 +266,12 @@ func (a *Assistant) Speak(ctx context.Context, text string) error {
 		return fmt.Errorf("pad speech lead-in: %w", err)
 	}
 	started = time.Now()
-	err = a.Player.PlayWAV(ctx, wav)
+	playCtx, playDone := a.Health.Begin(ctx, "playback", 5*time.Minute)
+	err = a.Player.PlayWAV(playCtx, wav)
+	if err == nil {
+		err = playCtx.Err()
+	}
+	playDone(err)
 	if err != nil {
 		a.logf("stage=playback state=failed ms=%.3f err=%v", sinceMS(started), err)
 	} else {
@@ -269,13 +285,36 @@ func (a *Assistant) Speak(ctx context.Context, text string) error {
 func (a *Assistant) Run(ctx context.Context) error {
 	ctx, cancelCapture := context.WithCancel(ctx)
 	defer cancelCapture()
+	if observer, ok := a.VAD.(interface {
+		SetHealthObserver(interface {
+			WakeProgress()
+			WakeDetected()
+		})
+	}); ok && a.Health != nil {
+		observer.SetHealthObserver(a.Health)
+	}
+	if gate, ok := a.VAD.(interface{ HealthState() string }); ok {
+		a.Health.SetWakeGate(gate.HealthState)
+	}
+	a.Health.WakeState("starting")
+	a.Health.LoopProgress()
 	managed, hasManaged := a.VAD.(vad.ManagedSegmenter)
 	if hasManaged {
-		if err := managed.Start(); err != nil {
+		_, startupDone := a.Health.Begin(ctx, "wake_start", time.Minute)
+		startupErr := managed.Start()
+		startupDone(startupErr)
+		if err := startupErr; err != nil {
+			a.Health.WakeState("failed")
+			a.Health.Failed("wake", "startup")
 			a.logf("stage=wake state=failed source=streaming err=%v", err)
 			return fmt.Errorf("start wake detector: %w", err)
 		}
 		a.logf("stage=wake state=ready source=streaming detector=%q", managed.Name())
+		a.Health.WakeState("ready")
+		a.Health.WakeProgress()
+	}
+	if !hasManaged {
+		a.Health.WakeState("unverified")
 	}
 	// Establish a known indicator state at startup and leave it idle however
 	// Run exits: cancellation, shutdown or a spoken "turn off".
@@ -295,7 +334,11 @@ func (a *Assistant) Run(ctx context.Context) error {
 		cancelCapture()
 		a.awaitCaptureStop(pcm)
 	}()
-	utterances := a.VAD.Run(ctx, pcm, a.Recorder.Format())
+	segmentPCM := pcm
+	if a.Health != nil {
+		segmentPCM = audio.ObserveStream(ctx, pcm, a.Health.Capture, a.Health.Delivered)
+	}
+	utterances := a.VAD.Run(ctx, segmentPCM, a.Recorder.Format())
 	if hasManaged {
 		defer func(out <-chan vad.Utterance) {
 			cancelCapture()
@@ -513,7 +556,7 @@ func (a *Assistant) Run(ctx context.Context) error {
 				default:
 					reply := "I'm still working on your previous request."
 					if a.Front != nil && time.Now().Before(active.until) && active.ctx.Err() == nil {
-						if candidate, err := a.Front.Reply(active.ctx, command, "The previous request is still running."); err == nil {
+						if candidate, err := a.frontReply(active.ctx, command); err == nil {
 							reply = candidate
 						} else {
 							a.logf("stage=front state=fallback err=%v", err)
@@ -598,18 +641,24 @@ func (a *Assistant) Run(ctx context.Context) error {
 		return a.beginProcessing(ctx, acknowledge), false
 	}
 
+	healthTick := time.NewTicker(time.Second)
+	defer healthTick.Stop()
 	for {
+		a.Health.LoopProgress()
 		if utterances == nil && active == nil {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-healthTick.C:
+			a.Health.LoopProgress()
 		case <-captureFaults:
 			a.logf("stage=conversation state=closed reason=capture_discontinuity")
 			closeConversation()
 		case err, ok := <-recErr:
 			if ok && err != nil {
+				a.Health.Failed("capture", "failed")
 				a.logf("stage=capture state=failed err=%v", err)
 				return err
 			}
@@ -664,6 +713,10 @@ func (a *Assistant) Run(ctx context.Context) error {
 			}
 		case u, ok := <-utterances:
 			if !ok {
+				if ctx.Err() == nil {
+					a.Health.WakeState("failed")
+					a.Health.Failed("segment", "closed")
+				}
 				a.logf("stage=segment state=closed")
 				utterances = nil
 				closeConversation()
@@ -698,17 +751,21 @@ func (a *Assistant) Run(ctx context.Context) error {
 			} else if active == nil {
 				closeConversation() // Only a fresh local wake may start a new budget.
 			}
+			a.Health.Segment()
 			ms := len(u.PCM) * 1000 / max(u.Format.SampleRate, 1)
 			a.logf("stage=segment state=ok samples=%d ms=%d peak=%.4f truncated=%v",
 				len(u.PCM), ms, u.Peak, u.Truncated)
 			if u.WakeMatched {
+				if !wakeFree {
+					a.Health.WakeDetected()
+				}
 				// The streaming detector has already proved this utterance is
 				// wake-authorized, so processing feedback can cover STT too.
 				// Inline commands acknowledge here; standalone follow-ups
 				// were acknowledged before their command capture began.
 				stopThinking, acknowledge := beginAuthorized(!u.WakeAcknowledged)
 				started := time.Now()
-				text, err := a.STT.Transcribe(ctx, u.PCM, u.Format)
+				text, err := a.transcribe(ctx, a.STT, "transcribe", u)
 				if err != nil {
 					stopThinking()
 					closeConversation()
@@ -744,11 +801,13 @@ func (a *Assistant) Run(ctx context.Context) error {
 			}
 			if a.WakeSTT != nil {
 				started := time.Now()
-				gateText, err := a.WakeSTT.Transcribe(ctx, u.PCM, u.Format)
+				gateText, err := a.transcribe(ctx, a.WakeSTT, "wake_transcribe", u)
 				if err != nil {
+					a.Health.WakeState("failed")
 					a.logf("stage=wake state=failed source=local-stt ms=%.3f err=%v", sinceMS(started), err)
 					continue
 				}
+				a.Health.WakeState("ready")
 				gateText = strings.TrimSpace(gateText)
 				a.logf("stage=transcribe state=ok source=local-stt ms=%.3f heard=%q peak=%.4f", sinceMS(started), gateText, u.Peak)
 				matched, command, _ := wake.Match(gateText, a.WakePhrases, a.WakeFuzz)
@@ -756,6 +815,7 @@ func (a *Assistant) Run(ctx context.Context) error {
 					a.logf("stage=wake state=nomatch source=local-stt ms=%.3f", sinceMS(started))
 					continue
 				}
+				a.Health.WakeDetected()
 				a.logf("stage=wake state=matched source=local-stt ms=%.3f", sinceMS(started))
 				// This local transcript is the privacy gate: feedback begins
 				// only after it proves the utterance contains a wake phrase.
@@ -769,7 +829,7 @@ func (a *Assistant) Run(ctx context.Context) error {
 				}
 
 				started = time.Now()
-				text, err := a.STT.Transcribe(ctx, u.PCM, u.Format)
+				text, err := a.transcribe(ctx, a.STT, "transcribe", u)
 				if err != nil {
 					stopThinking()
 					if active == nil {
@@ -800,11 +860,13 @@ func (a *Assistant) Run(ctx context.Context) error {
 			}
 
 			started := time.Now()
-			text, err := a.STT.Transcribe(ctx, u.PCM, u.Format)
+			text, err := a.transcribe(ctx, a.STT, "wake_transcribe", u)
 			if err != nil {
+				a.Health.WakeState("failed")
 				a.logf("stage=transcribe state=failed ms=%.3f err=%v", sinceMS(started), err)
 				continue
 			}
+			a.Health.WakeState("ready")
 			text = strings.TrimSpace(text)
 			if text == "" {
 				a.logf("stage=transcribe state=empty ms=%.3f peak=%.4f", sinceMS(started), u.Peak)
@@ -816,6 +878,7 @@ func (a *Assistant) Run(ctx context.Context) error {
 				a.logf("stage=wake state=nomatch")
 				continue
 			}
+			a.Health.WakeDetected()
 			command = a.correctCommand(command)
 			a.logf("stage=wake state=matched command=%q", command)
 			stopThinking, acknowledge := beginAuthorized(true)

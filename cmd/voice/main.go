@@ -187,7 +187,13 @@ func run(args []string) error {
 		force := len(args) > 1 && args[1] == "--force"
 		return initConfig(*path, force)
 	}
-	if args[0] == "on" || args[0] == "off" || args[0] == "status" {
+	if args[0] == "health" {
+		return healthCommand(args[1:])
+	}
+	if args[0] == "status" {
+		return statusHealthCommand(args[1:])
+	}
+	if args[0] == "on" || args[0] == "off" {
 		return controlService(args[0])
 	}
 	cfg, loaded, err := config.Load(*path)
@@ -215,8 +221,13 @@ func run(args []string) error {
 		}
 		return checkWake(cfg, strings.Join(args[1:], " "))
 	case "listen":
+		stopHealth, err := startListenerHealth(ctx, a, cfg)
+		if err != nil {
+			return err
+		}
 		stderr.printf("Listening for %q. Ctrl-C to stop.\n", cfg.Wake.Phrases[0])
-		return a.Run(ctx)
+		runErr := a.Run(ctx)
+		return errors.Join(runErr, stopHealth())
 	case "say":
 		if len(args) < 2 {
 			return errors.New("usage: voice say TEXT")
@@ -284,7 +295,8 @@ Usage: voice [--config PATH] COMMAND
   init [--force]           write a complete starter config
   on                        start listening
   off                       stop listening
-  status                    report whether Voice is listening
+  status                    report service identity and verified live listener health
+  health [--json] [--file PATH] inspect private live capture/wake/request diagnostics
   doctor                    check audio, engines and devices
   listen                    run the wake-word voice loop
   ask TEXT                  process one text command through the same brain

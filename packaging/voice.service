@@ -20,6 +20,10 @@ EnvironmentFile=-/etc/voice/voice.env
 # user and Voice resolves $XDG_STATE_HOME/voice for its state files.
 StateDirectory=voice
 Environment=XDG_STATE_HOME=/var/lib
+# Health snapshots are live diagnostics, not durable state. Keep their periodic
+# updates in tmpfs rather than writing them repeatedly to the Pi's storage.
+RuntimeDirectory=voice
+RuntimeDirectoryMode=0750
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=6

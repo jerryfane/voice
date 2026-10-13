@@ -25,7 +25,7 @@ func (r *recordingSynthesizer) Synthesize(_ context.Context, text string) ([]byt
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.said = append(r.said, text)
-	return nil, nil
+	return audio.EncodeWAV([]int16{1}, audio.Default()), nil
 }
 func (*recordingSynthesizer) Name() string              { return "recording synthesizer" }
 func (*recordingSynthesizer) Available() (bool, string) { return true, "available" }
@@ -189,31 +189,32 @@ func TestTimerVocabularyWithoutWakePhraseIsIgnored(t *testing.T) {
 	}
 }
 
-// A cancel that cannot be persisted must be said out loud: the timer is gone
-// from memory but still in the file, so a restart would bring it back.
+// A cancellation that cannot be persisted leaves the live timer untouched.
 func TestCancelReportsAPersistenceFailure(t *testing.T) {
 	a, tts, _ := timerAssistant(t, "hey voice cancel the ten minute timer")
-	sched, _, err := timer.New(failingStore{}, faults.Discard)
+	sched, _, err := timer.New(failingStore{initial: []timer.Timer{{ID: 1, Duration: 10 * time.Minute, Label: "ten minute", Deadline: time.Now().Add(10 * time.Minute)}}}, faults.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a.Timers = sched
-	if _, err := sched.Add(10*time.Minute, "ten minute"); err == nil {
-		t.Fatal("expected the failing store to report the add")
-	}
 	if err := a.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !saidContaining(tts.spoken(), "could not save") {
 		t.Errorf("cancel said %q, expected the persistence failure to be reported", tts.spoken())
 	}
+	if len(sched.List()) != 1 {
+		t.Fatal("failed cancellation changed live timers")
+	}
 }
 
 // failingStore accepts loads and rejects every save.
-type failingStore struct{}
+type failingStore struct{ initial []timer.Timer }
 
-func (failingStore) Load() ([]timer.Timer, error) { return nil, nil }
-func (failingStore) Save([]timer.Timer) error     { return errStore }
+func (f failingStore) Load() ([]timer.Timer, error) {
+	return append([]timer.Timer(nil), f.initial...), nil
+}
+func (failingStore) Save([]timer.Timer) error { return errStore }
 
 var errStore = errors.New("state directory is read-only")
 
@@ -324,7 +325,7 @@ func TestUnsupportedReminderAndDisabledSchedulerStayHonest(t *testing.T) {
 		if err := a.Run(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		want := "Say remind me in"
+		want := "I did not set the reminder"
 		if disabled {
 			want = "scheduler is disabled"
 		}
@@ -349,5 +350,128 @@ func TestReminderControlReportsFailedSpeechWithoutLosingSchedule(t *testing.T) {
 	}
 	if a.announceFired(context.Background(), timer.Timer{Reminder: "call Sam", Deadline: time.Now()}) {
 		t.Fatal("failed reminder announcement reported success")
+	}
+}
+
+func TestCalendarControlUsesPersistedZoneAndNeverPlanner(t *testing.T) {
+	a, tts, planner := timerAssistant(t)
+	loc, err := time.LoadLocation("Asia/Dubai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, loc)
+	a.Now = func() time.Time { return now }
+	st, err := timer.Open(filepath.Join(t.TempDir(), "calendar.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	a.Timers, _, err = timer.New(st, faults.Discard, timer.WithClock(a.Now, time.After))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		"remind me tomorrow at nine to Call Sam",
+		"remind me every Monday at 9 a.m. to water the plants",
+		"list reminders",
+	} {
+		stopped := false
+		handled, spoken := a.timerControl(context.Background(), command, func() { stopped = true })
+		if !handled || !spoken || !stopped {
+			t.Fatalf("local calendar command not handled: %s", command)
+		}
+	}
+	for _, want := range []string{"2026-10-14 at 09:00", "Asia/Dubai", "+04:00", "repeating every Monday", "Call Sam"} {
+		if !saidContaining(tts.spoken(), want) {
+			t.Errorf("missing %q: %q", want, tts.spoken())
+		}
+	}
+	if planner.calls != 0 || len(a.Timers.List()) != 2 {
+		t.Fatalf("planner=%d live=%+v", planner.calls, a.Timers.List())
+	}
+	for _, command := range []string{
+		"remind me today at 9 to call Sam",
+		"remind me on 2026-02-30 at 9 to call Sam",
+		"remind me every month at 9 to call Sam",
+		"remind me tomorrow at 25 to call Sam",
+		"remind me not tomorrow at 9 to call Sam",
+		"snooze the timer for ten minutes",
+	} {
+		handled, _ := a.timerControl(context.Background(), command, func() {})
+		if !handled || len(a.Timers.List()) != 2 {
+			t.Fatalf("unsafe calendar command %q: handled=%v live=%+v", command, handled, a.Timers.List())
+		}
+	}
+	if handled, _ := a.timerControl(context.Background(), "do not remind me tomorrow at nine to call Sam", func() {}); handled || len(a.Timers.List()) != 2 {
+		t.Fatal("negated command created a reminder")
+	}
+}
+
+func TestSpokenSnoozeAfterRestartAndCancelRevokesIt(t *testing.T) {
+	a, tts, planner := timerAssistant(t)
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	a.Now = func() time.Time { return now }
+	st, err := timer.Open(filepath.Join(t.TempDir(), "snooze.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	delivered := timer.Timer{ID: 7, Reminder: "Call Sam", Duration: time.Minute, Deadline: now.Add(-time.Minute), LastDelivered: now.Add(-time.Minute), Archived: true}
+	if err := st.Save([]timer.Timer{delivered}); err != nil {
+		t.Fatal(err)
+	}
+	a.Timers, _, err = timer.New(st, faults.Discard, timer.WithClock(a.Now, time.After))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handled, spoken := a.timerControl(context.Background(), "snooze that reminder for ten minutes", func() {}); !handled || !spoken {
+		t.Fatal("snooze not handled")
+	}
+	if live := a.Timers.List(); len(live) != 1 || live[0].ID != 7 || !live[0].Deadline.Equal(now.Add(10*time.Minute)) {
+		t.Fatalf("snooze = %+v", live)
+	}
+	a.Timers, _, err = timer.New(st, faults.Discard, timer.WithClock(a.Now, time.After))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.timerControl(context.Background(), "cancel the reminder to call Sam", func() {})
+	a.timerControl(context.Background(), "snooze the last reminder for ten minutes", func() {})
+	if len(a.Timers.List()) != 0 || planner.calls != 0 {
+		t.Fatal("cancelled reminder resurrected or leaked to planner")
+	}
+	for _, want := range []string{"Snoozed your reminder to Call Sam for 10 minutes", "Cancelled your reminder to Call Sam", "no matching delivered reminder"} {
+		if !saidContaining(tts.spoken(), want) {
+			t.Errorf("missing %q: %q", want, tts.spoken())
+		}
+	}
+}
+
+func TestSaveFailureDoesNotPromiseReminderOrTimer(t *testing.T) {
+	a, tts, _ := timerAssistant(t)
+	var err error
+	a.Timers, _, err = timer.New(failingStore{}, faults.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"remind me in ten minutes to call Sam", "set a timer for ten minutes"} {
+		if handled, _ := a.timerControl(context.Background(), command, func() {}); !handled {
+			t.Fatalf("not handled: %s", command)
+		}
+	}
+	if len(a.Timers.List()) != 0 {
+		t.Fatal("unsaved requests scheduled")
+	}
+	for _, text := range tts.spoken() {
+		if strings.Contains(text, "I'll remind") || strings.Contains(text, "timer started") {
+			t.Fatalf("false promise: %q", text)
+		}
 	}
 }

@@ -122,12 +122,14 @@ func Build(c config.Config) *Assistant {
 		})
 		keyword := vad.NewKeyword(params, detector, logger)
 		keyword.SetFollowUp(frames(c.Wake.FollowUpTimeout), func(ctx context.Context) { fb.Accepted(ctx) }, fb.Restore)
-		// Do not hold capture suspended over the sound file's silent padding.
-		// A quiet gap lets wake/status speech begin, and CanThink allows it to
-		// finish before the next pulse.
+		// Keep at least 1.2 seconds of actual listening AFTER the playback
+		// tail, not a short gap mostly consumed by the guard. Longer padding
+		// in a configured sound still sets the cadence. Once speech begins,
+		// CanThink holds the next pulse through candidate and queued speech;
+		// this does not extend the session's absolute authorization deadline.
 		audible := audio.TrimTrailingSilence(fb.Working)
 		if len(audible) > 0 {
-			fb.ThinkingGap = max(2*playbackTail, time.Duration(len(fb.Working)-len(audible))*time.Second/time.Duration(f.SampleRate*f.Channels))
+			fb.ThinkingGap = max(playbackTail+1200*time.Millisecond, time.Duration(len(fb.Working)-len(audible))*time.Second/time.Duration(f.SampleRate*f.Channels))
 			fb.Working = audio.PrependPCMSilence(audible, f, playbackLeadIn)
 		}
 		fb.BeforeThinking = keyword.Suspend

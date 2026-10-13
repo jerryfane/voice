@@ -110,6 +110,43 @@ herdr agent prompt voice "Summarize your current task." --wait
 `voice-herdr-ensure` reconciles the stable agent name and starts or resumes its
 restricted OMP session if the pane has disappeared.
 
+### Live health, not just process status
+
+`voice status` and `voice health` inspect the actual system-service listener,
+without opening the microphone or building the speech engines. For the restricted
+deployment, use:
+
+```sh
+sudo -n -u voice-agent /usr/local/bin/voice status
+sudo -n -u voice-agent /usr/local/bin/voice health --json
+```
+
+The snapshot reports PCM receipt/delivery freshness, latest sample peak, last
+nonzero frame, capture discontinuities, wake-detector progress and last local
+wake, gate state, event-loop progress, and active stages with age/deadline.
+`candidate_hold` means speech or above-threshold noise may be holding thinking
+feedback; `playback_guard` deliberately suppresses capture during output/tail.
+Neither is proof of a dead microphone. Quiet PCM cannot distinguish a quiet
+room, hardware mute, or incorrect routing. No recent wake alone is not a fault.
+
+Snapshots contain no audio, transcript, prompt, or raw provider error. The
+service publishes a private 0600 file once per second under `/run/voice` (tmpfs),
+not the persistent scheduler directory. Readers reject snapshots older than
+five seconds, mismatched service PID, wrong process-start/boot identity, and
+unsafe permissions. A live PID with stale diagnostics is **unverified**, not
+healthy. Publication uses a singleton lock and atomic replacement.
+
+For a foreground listener, the startup log gives the path; inspect it with
+`voice health --file PATH [--json]`. Publication uses `RUNTIME_DIRECTORY`, then
+`XDG_RUNTIME_DIR/voice`, then a private per-user temporary directory. Explicit
+`--file` inspects that listener rather than checking systemd's MainPID.
+
+Capture observation is immediately upstream of segmentation, not a separate
+kernel recorder probe. Backpressure makes upstream liveness unverified.
+Provider-stage deadlines preserve configured cascade budgets; a provider that
+ignores cancellation stays visibly overdue rather than spawning duplicate work.
+Health reporting does not automatically restart Voice or retune sensitivity.
+
 ## Audio and wake phrase
 
 The default wake phrase is exactly:
@@ -365,8 +402,11 @@ it stay silent by construction. Processing playback is cancelled and joined
 before response speech starts. The in-flight window adds no routine spoken
 acknowledgement: the thinking sound continues while work is pending.
 Pulses yield while speech is being captured or a command is queued. File-based
-thinking audio separates its audible portion from its trailing silent gap, so
-the microphone can listen between pulses without leaving the player open.
+thinking audio separates its audible portion from its trailing silent gap.
+With Sherpa, each pulse leaves at least **1.2 seconds of actual listening time**
+after the 200 ms playback-tail guard; longer file padding is preserved. Once
+speech starts, its capture/queued hold prevents the next pulse from cutting it
+off. This does not extend either absolute conversation deadline.
 Status replies and other explicitly requested speech briefly
 pause the loop; completion or cancellation stops it. Ambient noise, an embedded
 mention, or an approximate wake phrase produce no feedback. The light returns
@@ -378,6 +418,12 @@ can be clipped. Replay verification reproduced that limitation; controls begun
 in a quiet gap were recognized. In-flight controls must finish transcription
 before the configured deadline (at most 30 seconds), otherwise they are dropped.
 Full-duplex barge-in remains a separate audio-engine improvement.
+
+A very low fixed VAD threshold can classify sustained background noise as
+speech and retain `candidate_hold`, suppressing further thinking pulses.
+`max_utterance` bounds a captured command, but subsequent noise can reacquire
+the hold. Health exposes this distinction; overriding the hold on a timer
+would risk playing over genuine speech and is not an automatic repair.
 
 ```json
 "feedback": {
@@ -405,6 +451,31 @@ WAV path. `thinking` is `tick`, `hum`, `none`, or a WAV path.
 between 0 and 1; `thinking_volume` optionally controls processing playback
 independently.
 
+### Echo-cancellation investigation
+
+On the deployed Pi, primary USB capture/playback uses direct ALSA
+`arecord`/`aplay`, bypassing PipeWire. Bluetooth fallback uses PipeWire's
+Pulse-compatible interface. PipeWire 1.2.7's native echo-cancel module and WebRTC
+SPA backend are installed, but **AEC has not been enabled or acoustically
+validated**. The installed WebRTC processing library is not a claim of modern
+AEC3 support.
+
+The practical experiment is a pinned virtual cleaned microphone and reference
+speaker on the same PowerConf, routing **all** Voice capture/playback through
+them. Loading a module alone cannot clean today's direct-ALSA capture. Keep the
+current guards until echo-only rejection, simultaneous speech/playback,
+reconnect convergence, onset preservation, latency, and CPU have been measured.
+USB HID handling, service-account graph access, explicit source targeting, and
+rollback must survive that routing change; Bluetooth needs a separate trial.
+
+References: [PipeWire echo-cancel module](https://docs.pipewire.org/page_module_echo_cancel.html),
+[installed-version implementation](https://raw.githubusercontent.com/PipeWire/pipewire/1.2.7/src/modules/module-echo-cancel.c),
+and [SpeexDSP echo-cancellation constraints](https://www.speex.org/docs/manual/speex-manual/node7.html#SECTION00740000000000000000).
+
+SpeexDSP is another viable engine, but embedding it into separate recorder and
+player subprocesses still requires a synchronized playback reference, delay/
+clock handling and reset logic. It is not a microphone-only filter.
+
 ## Speech output
 
 Piper is the offline speech engine. When `tts.openrouter` is configured and
@@ -426,8 +497,9 @@ scheduled, and announced by the session layer, so a timer can be set and can
 still fire when the model, the network, or the speech engines are unavailable —
 the announcement is the only part that needs text-to-speech. Ask "how long is
 left on my timer", cancel by duration ("cancel the ten minute timer") or in
-bulk ("cancel all timers"). Anything the timer vocabulary does not recognise
-goes to the agent unchanged.
+bulk ("cancel all timers"). Unknown non-scheduling requests go to the agent.
+Recognizable but invalid/unsupported reminder schedules return a local error,
+not an unverified model promise.
 
 ```json
 "timers": {
@@ -447,6 +519,8 @@ falling back to `~/.local/state/voice`. The service unit sets
 set in one transaction, so a crash mid-write leaves the previous set rather
 than half of the new one. A database that cannot be opened disables timers with
 an explanation in the log instead of accepting requests it cannot keep.
+Failed add, cancel, or snooze persistence leaves both in-memory and durable
+state unchanged; Voice does not confirm a mutation it could not save.
 
 The driver is `modernc.org/sqlite`, which is pure Go: the release binaries are
 still `CGO_ENABLED=0` static builds for `amd64` and `arm64`. It is the only
@@ -460,22 +534,57 @@ destroying timers; `voice on` brings them back with the correct remaining time.
 
 ### Reminders
 
-The same local scheduler supports “remind me in thirty seconds to check the
-microphone,” “list reminders,” “cancel the reminder to check the microphone,”
-and “cancel all reminders.” Durations accept seconds, minutes, hours, days,
-and weeks up to 365 elapsed days. Calendar dates, recurring schedules, snooze,
-and delivery history are not implemented. These are listener controls, not
-`voice ask` commands.
+The same local scheduler supports:
 
-Content and the original deadline survive restart in the existing SQLite store,
-which automatically adds its reminder column. Timer and reminder cancellation
-are isolated: “cancel all timers” does not delete reminders. Ambiguous reminder
-cancellation asks for the exact text instead of choosing one. Due speech uses
-the saved content; overdue startup announcements include how late they are.
+- “Remind me in thirty seconds to check the microphone.”
+- “Remind me tomorrow at nine to call Sam.”
+- “Remind me today at 18:30 to call Sam.”
+- “Remind me on 2026-12-25 at 9 am to call Sam.”
+- “Remind me next Monday at 9 to call Sam.”
+- “Remind me every day at 9 to water the plants.”
+- “Remind me every Monday at 9 a.m. to water the plants.”
+- “Remind me every ten minutes to check the oven.”
+- “Snooze that reminder for ten minutes.”
+- “Snooze the reminder to call Sam for an hour.”
+- “List reminders,” “cancel the reminder to call Sam,” and “cancel all reminders.”
 
-Delivery is at-most-once: the scheduler persists removal before announcing.
-If that save fails, delivery waits. A crash or TTS failure after removal can
-lose the announcement; no delivery retry/history is promised.
+These are listener controls, not `voice ask` commands. Seconds, minutes, hours,
+days, and weeks are supported, with positive durations/calendar lookahead up
+to 365 days. Bare `9` means 09:00. “Next Monday” means the next matching weekday
+strictly after today. Past explicit today requests, impossible dates/times,
+and unsupported schedules reject locally. Monthly recurrence, acknowledgement/
+completion commands, quiet hours, delivery retry and a separate reminder CLI
+are not implemented.
+
+Calendar requests use the host's local timezone (Asia/Dubai on this Pi).
+Confirmations and listings include the persisted absolute deadline, IANA zone,
+and UTC offset. Existing schedules retain their zone if the host zone changes.
+Daily/weekly calendar recurrence follows civil time, not fixed 24/168 hours:
+nonexistent DST times are skipped for recurrence and rejected for one-shots;
+repeated wall times use the earlier instant once. Fixed intervals such as
+“every hour” retain their original elapsed-time phase.
+
+Each recurring series has one durable row. Snooze replaces its outstanding
+deadline, coalesces regular occurrences within the snooze, then resumes the
+first original occurrence strictly after delivery. Snoozing again replaces
+the previous snooze rather than creating another reminder. Bare snooze selects
+the most recent due reminder; exact named snooze rejects ambiguous matches.
+Up to 32 completed one-shot records are retained for restart-safe snooze.
+This is bounded scheduling history, not evidence of successful audio delivery.
+Cancellation removes snooze eligibility, including completed records, so a
+cancelled series cannot be resurrected by “snooze.”
+
+Content, zone, recurrence, snooze and original phase survive restart in the
+existing SQLite store. Schema upgrades add reminder/state columns in one
+transaction without losing old timers. Timer/reminder cancellation remains
+isolated. Due speech uses saved content without sending it to the model.
+Startup/late recovery emits at most one missed occurrence per series and
+advances directly past the missed interval instead of flooding the speaker.
+
+Delivery remains at-most-once: consumption and the next recurrence/history
+state are persisted before announcing. A failed save defers delivery; a crash
+or TTS failure after consumption can lose the announcement. No automatic retry
+or user acknowledgement is implied.
 
 ## Devices
 
@@ -641,7 +750,7 @@ first time someone speaks.
 - **Trailing silence is trimmed from playback.** For `feedback.sound`, padding
   is discarded so acknowledgement does not hold the speaker open unnecessarily.
   For `feedback.thinking`, padding becomes the gap between audible pulses;
-  its timing is preserved without keeping the speaker process open.
+  longer padding is preserved, and Sherpa enforces the minimum listening gap.
 
 ## Feature proposals
 

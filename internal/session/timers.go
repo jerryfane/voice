@@ -35,10 +35,8 @@ func (a *Assistant) timerControl(ctx context.Context, command string, stopThinki
 		}
 		t, err := a.Timers.Add(c.Duration, c.Label)
 		if err != nil {
-			// The timer is live; only its persistence failed, which matters
-			// on restart and so is worth saying out loud.
 			a.logf("timer persist: %v", err)
-			return true, a.say(ctx, fmt.Sprintf("%s timer started, but I could not save it, so a restart will lose it.", timer.Spoken(t.Duration)))
+			return true, a.say(ctx, "I could not save the timer, so it was not started.")
 		}
 		a.logf("timer set id=%d label=%q duration=%s", t.ID, t.Label, t.Duration)
 		return true, a.say(ctx, fmt.Sprintf("%s timer started.", timer.Spoken(t.Duration)))
@@ -67,14 +65,11 @@ func (a *Assistant) cancelTimers(c timer.Command) string {
 	}
 	removed, err := a.Timers.Cancel(match)
 	switch {
+	case err != nil:
+		a.logf("timer persist: %v", err)
+		return "I could not save that cancellation. Your timers are unchanged."
 	case len(removed) == 0:
 		return "I don't have a timer for that."
-	case err != nil:
-		// The timer is gone from the live set but the file still lists it, so
-		// a restart would bring it back. The user has to hear that, for the
-		// same reason a failed save is reported when setting one.
-		a.logf("timer persist: %v", err)
-		return fmt.Sprintf("Cancelled %d timer(s), but I could not save that, so a restart may bring them back.", len(removed))
 	case len(removed) == 1:
 		return fmt.Sprintf("%s timer cancelled.", timer.Spoken(removed[0].Duration))
 	default:
@@ -140,17 +135,32 @@ func (a *Assistant) scheduled(reminders bool) []timer.Timer {
 }
 
 func (a *Assistant) reminderControl(ctx context.Context, c timer.Command) bool {
+	if c.Error != "" {
+		return a.say(ctx, c.Error)
+	}
 	switch c.Kind {
 	case timer.Set:
-		if c.Duration <= 0 || c.Duration > timer.MaxReminderDuration || c.Text == "" {
-			return a.say(ctx, "Say remind me in ten minutes to call Sam. Use a positive duration in seconds, minutes, hours, days, or weeks, up to 365 days.")
+		if c.Text == "" || c.Schedule == "" && (c.Duration <= 0 || c.Duration > timer.MaxReminderDuration) {
+			return a.say(ctx, "Say remind me in ten minutes to call Sam, remind me tomorrow at 9 am to call Sam, or remind me every day at 9 to call Sam. Times use the host timezone. Durations can be up to 365 days.")
 		}
-		t, err := a.Timers.AddReminder(c.Duration, c.Text)
+		t, err := a.Timers.ScheduleReminder(c)
 		if err != nil {
-			a.logf("reminder persist: %v", err)
-			return a.say(ctx, fmt.Sprintf("I'll remind you in %s to %s, but I could not save it, so a restart will lose it.", timer.Spoken(t.Duration), t.Reminder))
+			a.logf("reminder schedule: %v", err)
+			return a.say(ctx, "I did not set the reminder: "+err.Error()+".")
+		}
+		if c.Schedule != "" {
+			return a.say(ctx, fmt.Sprintf("I'll remind you on %s to %s.", t.ScheduleDescription(), t.Reminder))
 		}
 		return a.say(ctx, fmt.Sprintf("I'll remind you in %s to %s.", timer.Spoken(t.Duration), t.Reminder))
+	case timer.Snooze:
+		if c.Duration <= 0 {
+			return a.say(ctx, "Say snooze the last reminder for ten minutes, or snooze the reminder to call Sam for ten minutes. Use a positive duration up to 365 days.")
+		}
+		t, err := a.Timers.Snooze(c.Text, c.Duration)
+		if err != nil {
+			return a.say(ctx, "I did not snooze the reminder: "+err.Error()+".")
+		}
+		return a.say(ctx, fmt.Sprintf("Snoozed your reminder to %s for %s.", t.Reminder, timer.Spoken(c.Duration)))
 	case timer.List:
 		live := a.scheduled(true)
 		if len(live) == 0 {
@@ -159,7 +169,9 @@ func (a *Assistant) reminderControl(ctx context.Context, c timer.Command) bool {
 		now := a.now()
 		parts := make([]string, 0, len(live))
 		for _, t := range live {
-			if !t.Deadline.After(now) {
+			if t.Zone != "" || t.Repeat.Kind != "" {
+				parts = append(parts, fmt.Sprintf("On %s: %s", t.ScheduleDescription(), t.Reminder))
+			} else if !t.Deadline.After(now) {
 				parts = append(parts, fmt.Sprintf("Overdue by %s: %s", timer.Spoken(now.Sub(t.Deadline)), t.Reminder))
 			} else {
 				parts = append(parts, fmt.Sprintf("In %s: %s", timer.Spoken(t.Remaining(now)), t.Reminder))
@@ -173,7 +185,7 @@ func (a *Assistant) reminderControl(ctx context.Context, c timer.Command) bool {
 }
 
 func (a *Assistant) cancelReminders(c timer.Command) string {
-	live := a.scheduled(true)
+	live := a.Timers.Reminders()
 	if len(live) == 0 {
 		return "You have no pending reminders."
 	}
@@ -194,7 +206,7 @@ func (a *Assistant) cancelReminders(c timer.Command) string {
 	})
 	if err != nil {
 		a.logf("reminder persist: %v", err)
-		return "Cancelled the reminder, but I could not save that, so a restart may bring it back."
+		return "I could not save that cancellation. Your reminders are unchanged."
 	}
 	if len(removed) == 0 {
 		return "That reminder is no longer pending."

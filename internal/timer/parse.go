@@ -18,6 +18,7 @@ const (
 	Set
 	Cancel
 	List
+	Snooze
 )
 
 // Command is a parsed spoken timer request.
@@ -35,6 +36,9 @@ type Command struct {
 	Reminder bool
 	// Text is the reminder content, or the exact content to cancel.
 	Text string
+	// Schedule is resolved against the scheduler's clock, not parser wall time.
+	Schedule string
+	Error    string
 }
 
 // Parse recognises the local timer vocabulary. Two failure modes matter and
@@ -100,45 +104,47 @@ func parseReminder(text string) Command {
 	if strings.HasPrefix(lower, "please ") {
 		text, lower = text[7:], lower[7:]
 	}
-	if lower == "remind me" || strings.HasPrefix(lower, "remind me ") {
-		c := Command{Kind: Set, Reminder: true}
-		if !strings.HasPrefix(lower, "remind me in ") {
+	if lower == "snooze" || strings.HasPrefix(lower, "snooze ") {
+		c := Command{Kind: Snooze, Reminder: true}
+		rest := strings.TrimSpace(text[len("snooze"):])
+		split := strings.LastIndex(strings.ToLower(rest), " for ")
+		if strings.HasPrefix(strings.ToLower(rest), "for ") {
+			split = 0
+			rest = " " + rest
+		}
+		if split < 0 {
 			return c
 		}
-		rest := text[len("remind me in "):]
+		target := strings.TrimSpace(rest[:split])
+		switch strings.ToLower(target) {
+		case "", "it", "that", "reminder", "that reminder", "the reminder", "my reminder", "the last reminder", "last reminder":
+		default:
+			const prefix = "the reminder to "
+			if strings.HasPrefix(strings.ToLower(target), prefix) {
+				c.Text = strings.TrimSpace(target[len(prefix):])
+			} else if strings.HasPrefix(strings.ToLower(target), "reminder to ") {
+				c.Text = strings.TrimSpace(target[len("reminder to "):])
+			} else {
+				c.Error = "Say snooze the last reminder for ten minutes, or snooze the reminder to, followed by its full text, for ten minutes."
+				return c
+			}
+		}
+		c.Duration = reminderDuration(rest[split+5:])
+		return c
+	}
+	if lower == "remind me" || strings.HasPrefix(lower, "remind me ") {
+		c := Command{Kind: Set, Reminder: true}
+		rest := strings.TrimSpace(text[len("remind me"):])
 		split := strings.Index(strings.ToLower(rest), " to ")
 		if split < 0 {
 			return c
 		}
 		c.Text = strings.TrimSpace(rest[split+4:])
-		rawDuration := rest[:split]
-		// Normalization must not turn "-5" or "1.5" into positive integers.
-		if strings.ContainsAny(rawDuration, ".−") {
-			return c
-		}
-		for i, r := range rawDuration {
-			if r == '-' && (i == 0 || rawDuration[i-1] == ' ' || i+1 < len(rawDuration) && rawDuration[i+1] >= '0' && rawDuration[i+1] <= '9') {
-				return c
-			}
-		}
-		words := strings.Fields(normalise(rawDuration))
-		var duration time.Duration
-		for i := 0; i < len(words); {
-			d, _, next, ok := phraseAt(words, i)
-			if !ok || d <= 0 || d > MaxReminderDuration-duration {
-				return c
-			}
-			duration += d
-			i = next
-			if i < len(words) && words[i] == "and" {
-				i++
-				if i == len(words) {
-					return c
-				}
-			}
-		}
-		if c.Text != "" {
-			c.Duration = duration
+		schedule := strings.TrimSpace(rest[:split])
+		if strings.HasPrefix(strings.ToLower(schedule), "in ") {
+			c.Duration = reminderDuration(schedule[3:])
+		} else {
+			c.Schedule = schedule
 		}
 		return c
 	}
@@ -171,6 +177,34 @@ func parseReminder(text string) Command {
 		return Command{Kind: Cancel, Reminder: true, Text: rest}
 	}
 	return Command{}
+}
+
+func reminderDuration(raw string) time.Duration {
+	if strings.ContainsAny(raw, ".−") {
+		return 0
+	}
+	for i, r := range raw {
+		if r == '-' && (i == 0 || raw[i-1] == ' ' || i+1 < len(raw) && raw[i+1] >= '0' && raw[i+1] <= '9') {
+			return 0
+		}
+	}
+	words := strings.Fields(normalise(raw))
+	var duration time.Duration
+	for i := 0; i < len(words); {
+		d, _, next, ok := phraseAt(words, i)
+		if !ok || d <= 0 || d > MaxReminderDuration-duration {
+			return 0
+		}
+		duration += d
+		i = next
+		if i < len(words) && words[i] == "and" {
+			i++
+			if i == len(words) {
+				return 0
+			}
+		}
+	}
+	return duration
 }
 
 // SameReminder compares spoken content without requiring case or punctuation.

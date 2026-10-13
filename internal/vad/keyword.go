@@ -38,6 +38,10 @@ type Keyword struct {
 	capturing       atomic.Bool
 	queued          atomic.Bool
 	discontinuities chan struct{}
+	healthObserver  interface {
+		WakeProgress()
+		WakeDetected()
+	}
 }
 
 func NewKeyword(p Params, detector wake.Detector, logger KeywordLogger) *Keyword {
@@ -47,6 +51,15 @@ func NewKeyword(p Params, detector wake.Detector, logger KeywordLogger) *Keyword
 // Discontinuities reports capture-source loss without carrying microphone audio.
 // The session closes authorization before opening any subsequent listening window.
 func (k *Keyword) Discontinuities() <-chan struct{} { return k.discontinuities }
+
+// SetHealthObserver records local processing liveness without microphone audio.
+// Configure it before Run. Guarded frames count as progress, not wake matches.
+func (k *Keyword) SetHealthObserver(observer interface {
+	WakeProgress()
+	WakeDetected()
+}) {
+	k.healthObserver = observer
+}
 
 // SetCaptureBoundary enables synchronous recovery decisions after each frame.
 // Configure it before Run; the capture producer must wait for every acknowledgement.
@@ -117,6 +130,25 @@ func (k *Keyword) Accepts(u Utterance) bool {
 // CanThink lets a feedback pulse wait for an utterance to finish rather than
 // repeatedly cutting off an owner speaking in the quiet gap between pulses.
 func (k *Keyword) CanThink() bool { return !k.capturing.Load() && !k.queued.Load() }
+
+// HealthState reports a bounded, audio-free gate snapshot. candidate_hold means
+// capture is holding feedback, not proof of human speech: above-threshold noise
+// and a standalone wake's follow-up wait also hold CanThink.
+func (k *Keyword) HealthState() string {
+	if time.Now().UnixNano() < k.suspendUntil.Load() {
+		return "playback_guard"
+	}
+	if k.queued.Load() {
+		return "queued"
+	}
+	if k.capturing.Load() {
+		return "candidate_hold"
+	}
+	if k.inFlight() {
+		return "authorized_listening"
+	}
+	return "wake_listening"
+}
 
 func (k *Keyword) Name() string { return k.Detector.Name() }
 func (k *Keyword) Available() (bool, string) {
@@ -301,10 +333,16 @@ func (k *Keyword) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-
 		}
 		pending := false
 		acknowledge := func() bool {
-			if !pending || k.captureBoundary == nil {
+			if !pending {
 				return true
 			}
 			pending = false
+			if k.healthObserver != nil {
+				k.healthObserver.WakeProgress()
+			}
+			if k.captureBoundary == nil {
+				return true
+			}
 			idle := quiet >= p.Silence && state == armed && !k.inFlight() &&
 				time.Now().UnixNano() >= k.suspendUntil.Load()
 			return k.captureBoundary.Acknowledge(ctx, idle)
@@ -329,7 +367,7 @@ func (k *Keyword) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-
 					}
 					return
 				}
-				pending = k.captureBoundary != nil
+				pending = true
 				if len(frame) == 0 {
 					if !discontinue() {
 						return
@@ -400,6 +438,9 @@ func (k *Keyword) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-
 					}
 					if match == "" {
 						continue
+					}
+					if k.healthObserver != nil {
+						k.healthObserver.WakeDetected()
 					}
 					captureEpoch = k.epoch.Load()
 					k.capturing.Store(true)

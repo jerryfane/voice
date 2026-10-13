@@ -2,6 +2,7 @@ package timer
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -31,7 +32,8 @@ CREATE TABLE IF NOT EXISTS timers (
 	label    TEXT    NOT NULL,
 	duration INTEGER NOT NULL, -- nanoseconds
 	deadline TEXT    NOT NULL, -- RFC 3339 in UTC
-	reminder TEXT    NOT NULL DEFAULT ''
+	reminder TEXT    NOT NULL DEFAULT '',
+	state    TEXT    NOT NULL DEFAULT '{}'
 );`
 
 // Open prepares the database, creating the file and schema if needed. WAL is
@@ -81,18 +83,31 @@ func prepare(db *sql.DB, path string) error {
 		return fmt.Errorf("reading %s: %w", path, err)
 	}
 	if timers > 0 {
-		// Upgrade the existing scheduler in place, preserving active timers.
-		// Once upgraded, opening the database remains read-only.
-		var reminders int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('timers') WHERE name = 'reminder'`).Scan(&reminders); err != nil {
+		// Both upgrades share a transaction: a failed migration must leave
+		// the previous schema and all timer rows untouched.
+		var reminders, state int
+		if err := db.QueryRow(`SELECT COUNT(*) FILTER (WHERE name = 'reminder'), COUNT(*) FILTER (WHERE name = 'state') FROM pragma_table_info('timers')`).Scan(&reminders, &state); err != nil {
 			return fmt.Errorf("reading timer schema: %w", err)
 		}
+		if reminders != 0 && state != 0 {
+			return nil
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
 		if reminders == 0 {
-			if _, err := db.Exec(`ALTER TABLE timers ADD COLUMN reminder TEXT NOT NULL DEFAULT ''`); err != nil {
+			if _, err := tx.Exec(`ALTER TABLE timers ADD COLUMN reminder TEXT NOT NULL DEFAULT ''`); err != nil {
 				return fmt.Errorf("adding reminder content to %s: %w", path, err)
 			}
 		}
-		return nil
+		if state == 0 {
+			if _, err := tx.Exec(`ALTER TABLE timers ADD COLUMN state TEXT NOT NULL DEFAULT '{}'`); err != nil {
+				return fmt.Errorf("adding reminder state to %s: %w", path, err)
+			}
+		}
+		return tx.Commit()
 	}
 	if others > 0 {
 		return fmt.Errorf("%s is a database with %d other table(s) and no timers table; refusing to modify it (check timers.file)", path, others)
@@ -130,12 +145,20 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+type reminderState struct {
+	Zone          string     `json:"zone,omitempty"`
+	Repeat        Recurrence `json:"repeat,omitempty"`
+	Resume        time.Time  `json:"resume,omitempty"`
+	LastDelivered time.Time  `json:"last_delivered,omitempty"`
+	Archived      bool       `json:"archived,omitempty"`
+}
+
 // Load reads the persisted timers.
 func (s *Store) Load() (timers []Timer, err error) {
 	if s == nil || s.db == nil {
 		return nil, nil
 	}
-	rows, err := s.db.Query(`SELECT id, label, duration, deadline, reminder FROM timers ORDER BY deadline`)
+	rows, err := s.db.Query(`SELECT id, label, duration, deadline, reminder, state FROM timers ORDER BY deadline`)
 	if err != nil {
 		return nil, err
 	}
@@ -148,8 +171,9 @@ func (s *Store) Load() (timers []Timer, err error) {
 			t        Timer
 			ns       int64
 			deadline string
+			state    string
 		)
-		if err := rows.Scan(&t.ID, &t.Label, &ns, &deadline, &t.Reminder); err != nil {
+		if err := rows.Scan(&t.ID, &t.Label, &ns, &deadline, &t.Reminder, &state); err != nil {
 			return nil, err
 		}
 		when, err := time.Parse(time.RFC3339Nano, deadline)
@@ -158,6 +182,17 @@ func (s *Store) Load() (timers []Timer, err error) {
 		}
 		t.Duration = time.Duration(ns)
 		t.Deadline = when
+		var metadata reminderState
+		if err := json.Unmarshal([]byte(state), &metadata); err != nil {
+			return nil, fmt.Errorf("timer %d has unreadable reminder state: %w", t.ID, err)
+		}
+		t.Zone, t.Repeat, t.Resume = metadata.Zone, metadata.Repeat, metadata.Resume
+		t.LastDelivered, t.Archived = metadata.LastDelivered, metadata.Archived
+		if t.Repeat.Kind != "" {
+			if _, err := t.Repeat.next(t.Deadline, t.Deadline); err != nil {
+				return nil, fmt.Errorf("timer %d has invalid recurrence: %w", t.ID, err)
+			}
+		}
 		ts = append(ts, t)
 	}
 	return ts, rows.Err()
@@ -184,13 +219,17 @@ func (s *Store) Save(ts []Timer) (err error) {
 	if _, err := tx.Exec(`DELETE FROM timers`); err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare(`INSERT INTO timers (id, label, duration, deadline, reminder) VALUES (?, ?, ?, ?, ?)`)
+	stmt, err := tx.Prepare(`INSERT INTO timers (id, label, duration, deadline, reminder, state) VALUES (?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, stmt.Close()) }()
 	for _, t := range ts {
-		if _, err := stmt.Exec(t.ID, t.Label, int64(t.Duration), t.Deadline.UTC().Format(time.RFC3339Nano), t.Reminder); err != nil {
+		state, err := json.Marshal(reminderState{Zone: t.Zone, Repeat: t.Repeat, Resume: t.Resume, LastDelivered: t.LastDelivered, Archived: t.Archived})
+		if err != nil {
+			return err
+		}
+		if _, err := stmt.Exec(t.ID, t.Label, int64(t.Duration), t.Deadline.UTC().Format(time.RFC3339Nano), t.Reminder, string(state)); err != nil {
 			return err
 		}
 	}

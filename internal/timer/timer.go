@@ -25,7 +25,15 @@ type Timer struct {
 	// not shift when a timer fires.
 	Deadline time.Time `json:"deadline"`
 	// Reminder is the spoken message; empty means an ordinary timer.
-	Reminder string `json:"reminder,omitempty"`
+	Reminder string     `json:"reminder,omitempty"`
+	Zone     string     `json:"zone,omitempty"`
+	Repeat   Recurrence `json:"repeat,omitempty"`
+	// Resume preserves the original recurrence while Deadline is snoozed.
+	Resume time.Time `json:"resume,omitempty"`
+	// LastDelivered is the deadline of the most recently consumed occurrence,
+	// so "last due" remains ordered even when several are delivered together.
+	LastDelivered time.Time `json:"last_delivered,omitempty"`
+	Archived      bool      `json:"archived,omitempty"`
 }
 
 // Remaining is how long is left at now, never negative.
@@ -90,39 +98,33 @@ func New(store Saver, report faults.Reporter, opts ...Option) (*Scheduler, []Tim
 		o(s)
 	}
 	persisted, err := store.Load()
-	now := s.now()
-	var missed []Timer
+	if err != nil {
+		return s, nil, err
+	}
 	for _, t := range persisted {
 		if t.ID >= s.nextID {
 			s.nextID = t.ID + 1
 		}
-		if t.Deadline.After(now) {
-			s.timers = append(s.timers, t)
-		} else {
-			missed = append(missed, t)
-		}
 	}
+	s.timers = persisted
 	sortTimers(s.timers)
-	if len(missed) > 0 {
-		// The missed ones are gone from the live set, so persist immediately;
-		// a restart loop must not announce them twice.
-		if saveErr := store.Save(s.timers); saveErr != nil {
-			// Never report an occurrence whose removal is not durable: doing
-			// so would repeat the same announcement on every restart.
-			s.timers = append(s.timers, missed...)
-			sortTimers(s.timers)
-			missed = nil
-			s.retryAfter = now.Add(time.Second)
-			if err == nil {
-				err = saveErr
-			}
-		}
+	missed, transitionErr := s.consumeDue(s.now())
+	if transitionErr != nil {
+		s.retryAfter = s.now().Add(time.Second)
 	}
-	return s, missed, err
+	return s, missed, transitionErr
 }
 
 func sortTimers(ts []Timer) {
-	sort.Slice(ts, func(i, j int) bool { return ts[i].Deadline.Before(ts[j].Deadline) })
+	sort.SliceStable(ts, func(i, j int) bool {
+		if ts[i].Archived != ts[j].Archived {
+			return !ts[i].Archived
+		}
+		if ts[i].Deadline.Equal(ts[j].Deadline) {
+			return ts[i].ID < ts[j].ID
+		}
+		return ts[i].Deadline.Before(ts[j].Deadline)
+	})
 }
 
 // Fired delivers expired timers to the session loop, which announces them in
@@ -145,23 +147,117 @@ func (s *Scheduler) AddReminder(d time.Duration, text string) (Timer, error) {
 	return s.add(d, "", text)
 }
 
+// ScheduleReminder resolves and persists a complete parsed reminder request.
+func (s *Scheduler) ScheduleReminder(c Command) (Timer, error) {
+	if c.Schedule == "" {
+		return s.AddReminder(c.Duration, c.Text)
+	}
+	now := s.now()
+	when, repeat, err := ResolveSchedule(c.Schedule, now)
+	if err != nil {
+		return Timer{}, err
+	}
+	if strings.TrimSpace(c.Text) == "" {
+		return Timer{}, fmt.Errorf("say what you want to be reminded about")
+	}
+	zone := now.Location().String()
+	if zone == "Local" {
+		zone = hostZone()
+	}
+	return s.insert(Timer{Duration: when.Sub(now), Deadline: when, Reminder: strings.TrimSpace(c.Text), Repeat: repeat, Zone: zone})
+}
+
 func (s *Scheduler) add(d time.Duration, label, reminder string) (Timer, error) {
+	return s.insert(Timer{Label: label, Duration: d, Deadline: s.now().Add(d), Reminder: reminder})
+}
+
+func (s *Scheduler) insert(t Timer) (Timer, error) {
 	s.mu.Lock()
-	t := Timer{ID: s.nextID, Label: label, Duration: d, Deadline: s.now().Add(d), Reminder: reminder}
+	defer s.mu.Unlock()
+	t.ID = s.nextID
+	next := make([]Timer, len(s.timers)+1)
+	copy(next, s.timers)
+	next[len(s.timers)] = t
+	sortTimers(next)
+	if err := s.store.Save(next); err != nil {
+		return Timer{}, fmt.Errorf("could not save: %w", err)
+	}
+	s.timers = next
 	s.nextID++
-	s.timers = append(s.timers, t)
-	sortTimers(s.timers)
-	err := s.store.Save(s.timers)
-	s.mu.Unlock()
 	s.notify()
-	return t, err
+	return t, nil
 }
 
 // List returns the live timers, earliest first.
 func (s *Scheduler) List() []Timer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]Timer(nil), s.timers...)
+	var live []Timer
+	for _, t := range s.timers {
+		if !t.Archived {
+			live = append(live, t)
+		}
+	}
+	return live
+}
+
+// Reminders includes bounded delivered records so cancelling a completed
+// reminder also revokes its snooze eligibility.
+func (s *Scheduler) Reminders() []Timer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var reminders []Timer
+	for _, t := range s.timers {
+		if t.Reminder != "" {
+			reminders = append(reminders, t)
+		}
+	}
+	return reminders
+}
+
+// Snooze replaces the outstanding snooze for one delivered reminder, never
+// creates another series, and keeps the original recurrence phase. Occurrences
+// falling inside a snooze are coalesced, not replayed afterward.
+func (s *Scheduler) Snooze(text string, d time.Duration) (Timer, error) {
+	if d <= 0 || d > MaxReminderDuration {
+		return Timer{}, fmt.Errorf("use a snooze duration between zero and 365 days")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index := -1
+	for i, t := range s.timers {
+		if t.Reminder == "" || t.LastDelivered.IsZero() {
+			continue
+		}
+		if text != "" {
+			if !SameReminder(text, t.Reminder) {
+				continue
+			}
+			if index >= 0 {
+				return Timer{}, fmt.Errorf("more than one delivered reminder has that text; cancel duplicates before snoozing")
+			}
+			index = i
+		} else if index < 0 || t.LastDelivered.After(s.timers[index].LastDelivered) || t.LastDelivered.Equal(s.timers[index].LastDelivered) && t.ID > s.timers[index].ID {
+			index = i
+		}
+	}
+	if index < 0 {
+		return Timer{}, fmt.Errorf("there is no matching delivered reminder to snooze")
+	}
+	next := append([]Timer(nil), s.timers...)
+	t := next[index]
+	if t.Repeat.Kind != "" && t.Resume.IsZero() {
+		t.Resume = t.Deadline
+	}
+	t.Deadline, t.Archived = s.now().Add(d), false
+	next[index] = t
+	sortTimers(next)
+	if err := s.store.Save(next); err != nil {
+		return Timer{}, fmt.Errorf("could not save snooze; the reminder is unchanged: %w", err)
+	}
+	s.timers = next
+	s.notify()
+	return t, nil
 }
 
 // Cancel removes timers matching a predicate and returns what it removed.
@@ -176,17 +272,18 @@ func (s *Scheduler) Cancel(match func(Timer) bool) ([]Timer, error) {
 		}
 		kept = append(kept, t)
 	}
-	s.timers = kept
-	var err error
-	if len(removed) > 0 {
-		err = s.store.Save(s.timers)
-	}
-	s.mu.Unlock()
 	if len(removed) == 0 {
+		s.mu.Unlock()
 		return nil, nil
 	}
+	if err := s.store.Save(kept); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	s.timers = kept
+	s.mu.Unlock()
 	s.notify()
-	return removed, err
+	return removed, nil
 }
 
 // fail reports an error the scheduler cannot return. Silence here would mean a
@@ -227,7 +324,7 @@ func (s *Scheduler) Run(done <-chan struct{}) {
 func (s *Scheduler) untilNext() (time.Duration, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.timers) == 0 {
+	if len(s.timers) == 0 || s.timers[0].Archived {
 		return 0, false
 	}
 	deadline := s.timers[0].Deadline
@@ -247,32 +344,78 @@ func (s *Scheduler) untilNext() (time.Duration, bool) {
 func (s *Scheduler) emitDue() {
 	now := s.now()
 	s.mu.Lock()
-	var due []Timer
-	kept := s.timers[:0:0]
-	for _, t := range s.timers {
-		if !t.Deadline.After(now) {
-			due = append(due, t)
-			continue
-		}
-		kept = append(kept, t)
-	}
-	if len(due) > 0 {
-		// A failed write leaves the pending set intact. Retrying later is
-		// safer than speaking an occurrence that will reappear on restart.
-		if err := s.store.Save(kept); err != nil {
-			s.retryAfter = now.Add(time.Second)
-			s.mu.Unlock()
-			s.fail(fmt.Errorf("saving before %d timer(s) fire; delivery deferred: %w", len(due), err))
-			return
-		}
-	}
-	s.timers = kept
-	s.retryAfter = time.Time{}
-	s.mu.Unlock()
-	if len(due) == 0 {
+	due, err := s.consumeDue(now)
+	if err != nil {
+		s.retryAfter = now.Add(time.Second)
+		s.mu.Unlock()
+		s.fail(fmt.Errorf("saving before timers fire; delivery deferred: %w", err))
 		return
 	}
+	s.retryAfter = time.Time{}
+	s.mu.Unlock()
 	for _, t := range due {
 		s.fired <- t
 	}
+}
+
+// consumeDue is one atomic state transition, also used at startup. Each
+// recurring series produces at most one announcement after any downtime.
+func (s *Scheduler) consumeDue(now time.Time) ([]Timer, error) {
+	if len(s.timers) == 0 || s.timers[0].Archived || s.timers[0].Deadline.After(now) {
+		return nil, nil
+	}
+	var due []Timer
+	next := make([]Timer, 0, len(s.timers))
+	for _, t := range s.timers {
+		if t.Archived || t.Deadline.After(now) {
+			next = append(next, t)
+			continue
+		}
+		due = append(due, t)
+		if t.Reminder == "" {
+			continue
+		}
+		t.LastDelivered = t.Deadline
+		if t.Repeat.Kind == "" {
+			t.Archived = true
+		} else {
+			anchor := t.Deadline
+			if !t.Resume.IsZero() {
+				anchor = t.Resume
+			}
+			when, err := t.Repeat.next(anchor, now)
+			if err != nil {
+				return nil, err
+			}
+			t.Deadline, t.Resume = when, time.Time{}
+		}
+		next = append(next, t)
+	}
+	if len(due) == 0 {
+		return nil, nil
+	}
+	// Only the latest 32 completed one-shot reminders remain snoozable.
+	// Active recurring series retain their own last delivery without history.
+	sort.SliceStable(next, func(i, j int) bool {
+		if next[i].LastDelivered.Equal(next[j].LastDelivered) {
+			return next[i].ID > next[j].ID
+		}
+		return next[i].LastDelivered.After(next[j].LastDelivered)
+	})
+	kept, archived := next[:0], 0
+	for _, t := range next {
+		if t.Archived {
+			archived++
+			if archived > 32 {
+				continue
+			}
+		}
+		kept = append(kept, t)
+	}
+	sortTimers(kept)
+	if err := s.store.Save(kept); err != nil {
+		return nil, err
+	}
+	s.timers = kept
+	return due, nil
 }
