@@ -269,3 +269,61 @@ func TestMusicVolumeWithBoundedNumberStaysLocal(t *testing.T) {
 		t.Fatalf("out-of-range command did not fall through safely: reached=%v plan=%+v", reached, p)
 	}
 }
+
+func TestHouseholdStatusQueriesAreReadOnly(t *testing.T) {
+	called := false
+	r := NewRules(&refusingPlanner{onCall: func() { called = true }})
+	for _, tc := range []struct {
+		text string
+		id   string
+		kind string
+	}{
+		{"is hallway on", "hallway", "light"},
+		{"is the front door unlocked", "front-door", "lock"},
+		{"is front door locked", "front-door", "lock"},
+		{"what is thermostat temperature", "thermostat", "climate"},
+		{"status of the bedroom", "bedroom", "light"},
+	} {
+		inv := []device.Info{{ID: tc.id, Kind: tc.kind, Capabilities: []string{string(device.OpRead), string(device.OpOn)}}}
+		p, err := r.Plan(context.Background(), tc.text, inv)
+		if err != nil || called || len(p.Actions) != 1 || p.Actions[0].Op != device.OpRead {
+			t.Fatalf("%q: %+v, %v (planner=%v)", tc.text, p, err, called)
+		}
+	}
+}
+
+func TestClimateRulesEmitOnlyExplicitSupportedActions(t *testing.T) {
+	called := false
+	r := NewRules(&refusingPlanner{onCall: func() { called = true }})
+	inv := []device.Info{{ID: "hall-thermostat", Kind: "climate", Capabilities: []string{string(device.OpTemperature), string(device.OpHVACMode)}}}
+	for _, tc := range []struct {
+		text  string
+		op    device.Op
+		key   string
+		value any
+	}{
+		{"set hall thermostat temperature to 21.5 degrees", device.OpTemperature, "temperature", 21.5},
+		{"set the hall thermostat temperature to 18", device.OpTemperature, "temperature", float64(18)},
+		{"set hall thermostat mode to heat", device.OpHVACMode, "mode", "heat"},
+		{"set hall thermostat mode to fan only", device.OpHVACMode, "mode", "fan_only"},
+	} {
+		p, err := r.Plan(context.Background(), tc.text, inv)
+		if err != nil || called || len(p.Actions) != 1 || p.Actions[0].Op != tc.op || p.Actions[0].Args[tc.key] != tc.value {
+			t.Fatalf("%q: %+v, %v (planner=%v)", tc.text, p, err, called)
+		}
+	}
+	inv[0].Capabilities = []string{string(device.OpRead)}
+	if p, err := r.Plan(context.Background(), "set hall thermostat temperature to 21", inv); err == nil || len(p.Actions) != 0 {
+		t.Fatalf("unadvertised write accepted: %+v, %v", p, err)
+	}
+}
+
+func TestDeviceNameSubstringsDoNotSelectAnotherDevice(t *testing.T) {
+	called := false
+	r := NewRules(&refusingPlanner{onCall: func() { called = true }})
+	inv := []device.Info{{ID: "hall", Kind: "light", Capabilities: []string{string(device.OpOn)}}}
+	p, err := r.Plan(context.Background(), "turn on hallway", inv)
+	if err != nil || !called || len(p.Actions) != 0 {
+		t.Fatalf("partial device name acted: %+v, %v", p, err)
+	}
+}

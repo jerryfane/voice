@@ -60,6 +60,8 @@ type Config struct {
 	TVs []TV `json:"tvs"`
 	// Spotify is an optional local spotify_player playback daemon.
 	Spotify *Spotify `json:"spotify,omitempty"`
+	// HomeAssistant exposes only explicitly configured household entities.
+	HomeAssistant *HomeAssistant `json:"home_assistant,omitempty"`
 }
 
 // Feedback configures the immediate acknowledgement of an accepted wake
@@ -197,11 +199,12 @@ type InputFallback struct {
 	Output       *Output `json:"output,omitempty"`
 }
 
-// InputRecovery zero/omitted durations use defaults. Readiness requires actual
-// nonzero samples; quiet nonzero audio is healthy, unlike persistent exact zeros.
+// InputRecovery zero/omitted durations use defaults except ZeroTimeout: zero
+// disables signal checking, since digital silence is valid microphone PCM.
 type InputRecovery struct {
-	ReadyTimeout      Duration `json:"ready_timeout,omitempty"`
-	StallTimeout      Duration `json:"stall_timeout,omitempty"`
+	ReadyTimeout Duration `json:"ready_timeout,omitempty"`
+	StallTimeout Duration `json:"stall_timeout,omitempty"`
+	// A positive ZeroTimeout also requires nonzero samples before readiness.
 	ZeroTimeout       Duration `json:"zero_timeout,omitempty"`
 	RetryInterval     Duration `json:"retry_interval,omitempty"`
 	PreferredInterval Duration `json:"preferred_interval,omitempty"`
@@ -256,6 +259,9 @@ func (i Input) validateRecovery() error {
 		{"retry_interval", o.RetryInterval, 100 * time.Millisecond, time.Minute},
 		{"preferred_interval", o.PreferredInterval, time.Second, time.Hour},
 	} {
+		if setting.name == "zero_timeout" && setting.value == 0 {
+			continue
+		}
 		if setting.value < setting.min || setting.value > setting.max {
 			return fmt.Errorf("input.recovery.%s must be between %s and %s", setting.name, setting.min, setting.max)
 		}
@@ -308,6 +314,10 @@ type Wake struct {
 	// agent task runs. Zero turns (the default) keeps this feature off.
 	InFlightWindow Duration `json:"in_flight_window,omitempty"`
 	InFlightTurns  int      `json:"in_flight_turns,omitempty"`
+	// ConversationWindow bounds wake-free followups after a spoken answer.
+	// Both settings must be positive to opt in; the window never slides.
+	ConversationWindow Duration `json:"conversation_window,omitempty"`
+	ConversationTurns  int      `json:"conversation_turns,omitempty"`
 	// VAD tunes speech segmentation.
 	VAD VAD `json:"vad"`
 }
@@ -851,6 +861,18 @@ func (c Config) Validate() error {
 			return fmt.Errorf("wake.in_flight_window must be positive and at most 30s when enabled")
 		}
 	}
+	if c.Wake.ConversationTurns < 0 || c.Wake.ConversationTurns > 8 {
+		return fmt.Errorf("wake.conversation_turns must be between 0 and 8")
+	}
+	if c.Wake.ConversationWindow.D() < 0 || c.Wake.ConversationWindow.D() > 2*time.Minute {
+		return fmt.Errorf("wake.conversation_window must be between 0 and 2m")
+	}
+	if (c.Wake.ConversationTurns == 0) != (c.Wake.ConversationWindow == 0) {
+		return fmt.Errorf("wake.conversation_window and conversation_turns must both be positive or both disabled")
+	}
+	if c.Wake.ConversationTurns > 0 && c.Wake.Detector != "sherpa" {
+		return fmt.Errorf("wake.conversation_turns requires the local sherpa wake detector")
+	}
 	if c.Wake.VAD.Silence.D() <= 0 {
 		return fmt.Errorf("wake.vad.silence must be positive, else an utterance never ends")
 	}
@@ -1072,6 +1094,12 @@ func (c Config) Validate() error {
 		k := strings.ToLower(c.Spotify.ID)
 		if prev, dup := seen[k]; dup {
 			return fmt.Errorf("duplicate device id %q (already used by a %s)", c.Spotify.ID, prev)
+		}
+		seen[k] = "spotify"
+	}
+	if c.HomeAssistant != nil {
+		if err := c.HomeAssistant.validate(seen); err != nil {
+			return err
 		}
 	}
 	return nil

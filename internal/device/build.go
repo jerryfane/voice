@@ -14,5 +14,10 @@ func Build(cfg config.Config) *Registry {
 	if cfg.Spotify != nil {
 		r.Add(NewSpotify(cfg.Spotify.ID, cfg.Spotify.Device, cfg.Spotify.Command))
 	}
+	if cfg.HomeAssistant != nil {
+		for _, entity := range cfg.HomeAssistant.Entities {
+			r.Add(NewHomeAssistant(*cfg.HomeAssistant, entity))
+		}
+	}
 	return r
 }

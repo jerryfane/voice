@@ -20,22 +20,25 @@ import (
 type Op string
 
 const (
-	OpOn         Op = "on"
-	OpOff        Op = "off"
-	OpToggle     Op = "toggle"
-	OpColor      Op = "color"      // args: r,g,b (0-255) or name
-	OpBrightness Op = "brightness" // args: level (0-100)
-	OpWhite      Op = "white"      // args: level (0-100)
-	OpVolumeUp   Op = "volume_up"
-	OpVolumeDown Op = "volume_down"
-	OpVolume     Op = "volume" // args: level (0-10)
-	OpMute       Op = "mute"
-	OpInput      Op = "input" // args: source
-	OpPlay       Op = "play"  // args: optional query and type (track, album, artist, playlist)
-	OpResume     Op = "resume"
-	OpPause      Op = "pause"
-	OpNext       Op = "next"
-	OpPrevious   Op = "previous"
+	OpRead        Op = "read"        // authenticated, read-only state query
+	OpTemperature Op = "temperature" // args: temperature in the thermostat's configured units
+	OpHVACMode    Op = "hvac_mode"   // args: mode advertised by the thermostat
+	OpOn          Op = "on"
+	OpOff         Op = "off"
+	OpToggle      Op = "toggle"
+	OpColor       Op = "color"      // args: r,g,b (0-255) or name
+	OpBrightness  Op = "brightness" // args: level (0-100)
+	OpWhite       Op = "white"      // args: level (0-100)
+	OpVolumeUp    Op = "volume_up"
+	OpVolumeDown  Op = "volume_down"
+	OpVolume      Op = "volume" // args: level (0-10)
+	OpMute        Op = "mute"
+	OpInput       Op = "input" // args: source
+	OpPlay        Op = "play"  // args: optional query and type (track, album, artist, playlist)
+	OpResume      Op = "resume"
+	OpPause       Op = "pause"
+	OpNext        Op = "next"
+	OpPrevious    Op = "previous"
 )
 
 // Command is a single instruction for one device.

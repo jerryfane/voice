@@ -221,8 +221,9 @@ func (g injectedConversationGate) SetInFlightWindow(until time.Time, turns int) 
 		}
 	}
 }
-func (injectedConversationGate) Suspend()                  {}
-func (injectedConversationGate) ResumeAfter(time.Duration) {}
+func (injectedConversationGate) Suspend()                   {}
+func (injectedConversationGate) ResumeAfter(time.Duration)  {}
+func (injectedConversationGate) Accepts(vad.Utterance) bool { return true }
 
 func injectBusy(out chan<- vad.Utterance) {
 	out <- vad.Utterance{Format: audio.Default(), WakeMatched: true, WakeAcknowledged: true, Keyword: "IN_FLIGHT"}
@@ -231,9 +232,10 @@ func injectBusy(out chan<- vad.Utterance) {
 func TestInFlightStatusAndCancelPrecedeSlowPlannerResult(t *testing.T) {
 	utterances := make(chan vad.Utterance)
 	gate := injectedConversationGate{in: utterances, opened: make(chan struct{}, 2)}
+	light := &countedDevice{}
 	planner := &waitingPlanner{
 		started: make(chan struct{}), release: make(chan struct{}), ended: make(chan struct{}),
-		plan: brain.Plan{Speak: "Late work completed."},
+		plan: brain.Plan{Speak: "Late work completed.", Actions: []brain.Action{{Device: light.ID(), Op: device.OpOn}}},
 	}
 	release := sync.OnceFunc(func() { close(planner.release) })
 	defer release()
@@ -244,6 +246,7 @@ func TestInFlightStatusAndCancelPrecedeSlowPlannerResult(t *testing.T) {
 		TTS: synth, Brain: planner, Devices: device.NewRegistry(),
 		WakePhrases: []string{"hey voice"}, InFlightWindow: time.Minute, InFlightTurns: 2,
 	}
+	a.Devices.Add(light)
 	done := make(chan error, 1)
 	go func() { done <- a.Run(context.Background()) }()
 	injectWake(utterances)
@@ -255,19 +258,19 @@ func TestInFlightStatusAndCancelPrecedeSlowPlannerResult(t *testing.T) {
 	}
 	awaitAsync(t, gate.opened)
 	injectBusy(utterances)
-	if got := awaitAsync(t, synth.spoken); !strings.Contains(got, "asked it to stop") {
+	if got := awaitAsync(t, synth.spoken); !strings.Contains(strings.ToLower(got), "cancel") || !strings.Contains(got, "may") {
 		t.Fatalf("cancel acknowledgement = %q", got)
 	}
 	if planner.calls.Load() != 1 {
 		t.Fatalf("in-flight turns spawned %d planner jobs, want one", planner.calls.Load())
 	}
 	release()
-	if got := awaitAsync(t, synth.spoken); !strings.Contains(got, "request has ended") {
-		t.Fatalf("confirmed cancellation = %q", got)
-	}
 	close(utterances)
 	if err := awaitAsync(t, done); err != nil {
 		t.Fatal(err)
+	}
+	if light.applied.Load() != 0 {
+		t.Fatal("spoken cancellation allowed a late backend action")
 	}
 	select {
 	case got := <-synth.spoken:

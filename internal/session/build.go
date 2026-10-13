@@ -1,8 +1,10 @@
 package session
 
 import (
+	"context"
 	"log"
 	"os"
+	"time"
 
 	"github.com/jerryfane/voice/internal/audio"
 	"github.com/jerryfane/voice/internal/brain"
@@ -119,7 +121,18 @@ func Build(c config.Config) *Assistant {
 			KeywordsThreshold: float32(s.KeywordsThreshold),
 		})
 		keyword := vad.NewKeyword(params, detector, logger)
-		keyword.SetFollowUp(frames(c.Wake.FollowUpTimeout), fb.Accepted, fb.Restore)
+		keyword.SetFollowUp(frames(c.Wake.FollowUpTimeout), func(ctx context.Context) { fb.Accepted(ctx) }, fb.Restore)
+		// Do not hold capture suspended over the sound file's silent padding.
+		// A quiet gap lets wake/status speech begin, and CanThink allows it to
+		// finish before the next pulse.
+		audible := audio.TrimTrailingSilence(fb.Working)
+		if len(audible) > 0 {
+			fb.ThinkingGap = max(2*playbackTail, time.Duration(len(fb.Working)-len(audible))*time.Second/time.Duration(f.SampleRate*f.Channels))
+			fb.Working = audio.PrependPCMSilence(audible, f, playbackLeadIn)
+		}
+		fb.BeforeThinking = keyword.Suspend
+		fb.AfterThinking = func() { keyword.ResumeAfter(playbackTail) }
+		fb.CanThink = keyword.CanThink
 		seg = keyword
 	}
 	if boundary != nil {
@@ -171,5 +184,5 @@ func Build(c config.Config) *Assistant {
 			proposals = store
 		}
 	}
-	return &Assistant{Recorder: rec, Player: player, VAD: seg, WakeSTT: wakeSTT, STT: stt, Vocabulary: vocabulary, TTS: tts, Brain: planner, Front: front, Devices: device.Build(c), Feedback: fb, Timers: timers, Missed: missed, Proposals: proposals, WakePhrases: c.Wake.Phrases, WakeFuzz: c.Wake.Fuzz, InFlightWindow: c.Wake.InFlightWindow.D(), InFlightTurns: c.Wake.InFlightTurns, Logger: logger}
+	return &Assistant{Recorder: rec, Player: player, VAD: seg, WakeSTT: wakeSTT, STT: stt, Vocabulary: vocabulary, TTS: tts, Brain: planner, Front: front, Devices: device.Build(c), Feedback: fb, Timers: timers, Missed: missed, Proposals: proposals, WakePhrases: c.Wake.Phrases, WakeFuzz: c.Wake.Fuzz, InFlightWindow: c.Wake.InFlightWindow.D(), InFlightTurns: c.Wake.InFlightTurns, ConversationWindow: c.Wake.ConversationWindow.D(), ConversationTurns: c.Wake.ConversationTurns, Logger: logger}
 }

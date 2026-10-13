@@ -148,3 +148,64 @@ func TestSpokenReadsLikeSpeech(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRelativeRemindersPreservesContent(t *testing.T) {
+	for _, tc := range []struct {
+		text     string
+		duration time.Duration
+		message  string
+	}{
+		{"remind me in ten minutes to Call Sam.", 10 * time.Minute, "Call Sam."},
+		{"Please remind me in one hour and thirty minutes to check the oven timer", 90 * time.Minute, "check the oven timer"},
+		{"remind me in half an hour to appeler Élodie", 30 * time.Minute, "appeler Élodie"},
+		{"remind me in twenty-five minutes to take a break", 25 * time.Minute, "take a break"},
+		{"remind me in 8760 hours to renew the permit", MaxReminderDuration, "renew the permit"},
+		{"remind me in two days to water the plants", 48 * time.Hour, "water the plants"},
+		{"remind me in one week to check the filter", 7 * 24 * time.Hour, "check the filter"},
+	} {
+		c := Parse(tc.text)
+		if c.Kind != Set || !c.Reminder || c.Duration != tc.duration || c.Text != tc.message {
+			t.Errorf("Parse(%q) = %+v", tc.text, c)
+		}
+	}
+}
+
+func TestReminderRejectsAmbiguousOrUnsafeTimesLocally(t *testing.T) {
+	for _, text := range []string{
+		"remind me in zero minutes to call Sam",
+		"remind me in -5 minutes to call Sam",
+		"remind me in - 5 minutes to call Sam",
+		"remind me in 1.5 hours to call Sam",
+		"remind me in 8761 hours to call Sam",
+		"remind me in 9223372036854775807 hours to call Sam",
+		"remind me in ten minutes or five minutes to call Sam",
+		"remind me in ten minutes and to call Sam",
+		"remind me in ten minutes to ",
+		"remind me to call Sam tomorrow at nine",
+		"remind me every Friday to put out the bins",
+	} {
+		c := Parse(text)
+		if c.Kind != Set || !c.Reminder || c.Duration != 0 {
+			t.Errorf("Parse(%q) = %+v, want a local clarification without scheduling", text, c)
+		}
+	}
+}
+
+func TestReminderListAndCancelVocabulary(t *testing.T) {
+	for _, text := range []string{"list my reminders", "what reminders do I have?"} {
+		if c := Parse(text); c.Kind != List || !c.Reminder {
+			t.Errorf("Parse(%q) = %+v", text, c)
+		}
+	}
+	for _, text := range []string{"cancel the reminder to call Sam", "delete the call Sam reminder"} {
+		if c := Parse(text); c.Kind != Cancel || !c.Reminder || c.Text != "call sam" {
+			t.Errorf("Parse(%q) = %+v", text, c)
+		}
+	}
+	if c := Parse("cancel all reminders"); c.Kind != Cancel || !c.Reminder || !c.All {
+		t.Errorf("cancel all = %+v", c)
+	}
+	if !SameReminder("Appeler Élodie!", "appeler élodie") || SameReminder("電話", "買物") {
+		t.Fatal("reminder matching lost meaningful Unicode content")
+	}
+}

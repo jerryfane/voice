@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Kind is what a spoken timer command asks for.
@@ -30,6 +31,10 @@ type Command struct {
 	Label string
 	// All is true for "cancel all timers".
 	All bool
+	// Reminder distinguishes reminder operations from ordinary timers.
+	Reminder bool
+	// Text is the reminder content, or the exact content to cancel.
+	Text string
 }
 
 // Parse recognises the local timer vocabulary. Two failure modes matter and
@@ -41,6 +46,9 @@ type Command struct {
 // that word, and a bare set request counts only if nothing else is in the
 // sentence.
 func Parse(text string) Command {
+	if c := parseReminder(text); c.Kind != None {
+		return c
+	}
 	words := strings.Fields(normalise(text))
 	anchor := -1
 	for i, w := range words {
@@ -77,6 +85,97 @@ func Parse(text string) Command {
 		return Command{Kind: Set}
 	}
 	return Command{}
+}
+
+// MaxReminderDuration bounds relative reminders and prevents duration overflow.
+const MaxReminderDuration = 365 * 24 * time.Hour
+
+// parseReminder keeps the message separate from duration normalization: names,
+// punctuation and non-English reminder content must survive storage and speech.
+// Unsupported scheduling forms are answered locally rather than promising a
+// reminder that only the model knows about.
+func parseReminder(text string) Command {
+	text = strings.TrimSpace(text)
+	lower := strings.ToLower(text)
+	if strings.HasPrefix(lower, "please ") {
+		text, lower = text[7:], lower[7:]
+	}
+	if lower == "remind me" || strings.HasPrefix(lower, "remind me ") {
+		c := Command{Kind: Set, Reminder: true}
+		if !strings.HasPrefix(lower, "remind me in ") {
+			return c
+		}
+		rest := text[len("remind me in "):]
+		split := strings.Index(strings.ToLower(rest), " to ")
+		if split < 0 {
+			return c
+		}
+		c.Text = strings.TrimSpace(rest[split+4:])
+		rawDuration := rest[:split]
+		// Normalization must not turn "-5" or "1.5" into positive integers.
+		if strings.ContainsAny(rawDuration, ".−") {
+			return c
+		}
+		for i, r := range rawDuration {
+			if r == '-' && (i == 0 || rawDuration[i-1] == ' ' || i+1 < len(rawDuration) && rawDuration[i+1] >= '0' && rawDuration[i+1] <= '9') {
+				return c
+			}
+		}
+		words := strings.Fields(normalise(rawDuration))
+		var duration time.Duration
+		for i := 0; i < len(words); {
+			d, _, next, ok := phraseAt(words, i)
+			if !ok || d <= 0 || d > MaxReminderDuration-duration {
+				return c
+			}
+			duration += d
+			i = next
+			if i < len(words) && words[i] == "and" {
+				i++
+				if i == len(words) {
+					return c
+				}
+			}
+		}
+		if c.Text != "" {
+			c.Duration = duration
+		}
+		return c
+	}
+	n := normalise(text)
+	switch n {
+	case "list reminders", "list my reminders", "list all reminders", "what reminders do i have",
+		"what are my reminders", "show my reminders", "check my reminders":
+		return Command{Kind: List, Reminder: true}
+	}
+	words := strings.Fields(n)
+	if verbAt(words, 0, cancelVerbs) == 0 {
+		return Command{}
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(n, words[0]))
+	switch rest {
+	case "all reminders", "all my reminders", "every reminder":
+		return Command{Kind: Cancel, Reminder: true, All: true}
+	case "reminder", "the reminder", "my reminder":
+		return Command{Kind: Cancel, Reminder: true}
+	}
+	for _, prefix := range []string{"the reminder to ", "my reminder to ", "reminder to "} {
+		if strings.HasPrefix(rest, prefix) {
+			return Command{Kind: Cancel, Reminder: true, Text: strings.TrimPrefix(rest, prefix)}
+		}
+	}
+	if strings.HasSuffix(rest, " reminder") {
+		rest = strings.TrimSuffix(rest, " reminder")
+		rest = strings.TrimPrefix(rest, "the ")
+		rest = strings.TrimPrefix(rest, "my ")
+		return Command{Kind: Cancel, Reminder: true, Text: rest}
+	}
+	return Command{}
+}
+
+// SameReminder compares spoken content without requiring case or punctuation.
+func SameReminder(a, b string) bool {
+	return normalise(a) == normalise(b)
 }
 
 var (
@@ -221,6 +320,10 @@ var units = map[string]struct {
 	"mins":    {time.Minute, "minute"},
 	"hour":    {time.Hour, "hour"},
 	"hours":   {time.Hour, "hour"},
+	"day":     {24 * time.Hour, "day"},
+	"days":    {24 * time.Hour, "day"},
+	"week":    {7 * 24 * time.Hour, "week"},
+	"weeks":   {7 * 24 * time.Hour, "week"},
 }
 
 var smallWords = map[string]int{
@@ -252,6 +355,9 @@ func phraseAt(words []string, i int) (d time.Duration, label string, next int, o
 		count, spoken, good := countBefore(words[i : i+span])
 		if !good {
 			continue
+		}
+		if spoken != "half" && uint64(count) > uint64((1<<63-1)/u.d) {
+			return 0, "", 0, false
 		}
 		if spoken == "half" {
 			return u.d / 2, "half " + article(u.name) + " " + u.name, i + span + 1, true
@@ -310,19 +416,11 @@ func countBefore(count []string) (int, string, bool) {
 // separate words so "twenty-five" parses like "twenty five".
 func normalise(text string) string {
 	lower := strings.ToLower(text)
-	// A byte slice rather than a strings.Builder: every rune this keeps is
-	// ASCII and every other rune becomes a space, so the result is ASCII by
-	// construction and appending needs no error-returning writer. That is the
-	// point - strings.Builder's writers return an error that is always nil,
-	// which is exactly the kind of call that gets discarded with a blank and
-	// then needs a CI exclusion to defend. Avoiding the writer means the
-	// package holds no discarded result at all, so errcheck -blank passes
-	// with nothing excluded.
-	out := make([]byte, 0, len(lower))
+	out := make([]rune, 0, len(lower))
 	for _, r := range lower {
 		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			out = append(out, byte(r))
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			out = append(out, r)
 		default:
 			out = append(out, ' ')
 		}

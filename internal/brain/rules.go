@@ -3,6 +3,7 @@ package brain
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -47,7 +48,7 @@ func (r *Rules) Plan(ctx context.Context, text string, inv []device.Info) (Plan,
 	var named []device.Info
 	for _, d := range inv {
 		id := normalise(d.ID)
-		if id == "" || !strings.Contains(n, id) {
+		if id == "" || !strings.Contains(" "+n+" ", " "+id+" ") {
 			continue
 		}
 		named = append(named, d)
@@ -63,28 +64,92 @@ func (r *Rules) Plan(ctx context.Context, text string, inv []device.Info) (Plan,
 		}, nil
 	}
 	for _, d := range named {
-		if strings.Contains(n, "turn on") || strings.HasPrefix(n, "on ") {
-			return actionPlan(d, device.OpOn, nil)
-		}
-		if strings.Contains(n, "turn off") || strings.HasPrefix(n, "off ") {
-			return actionPlan(d, device.OpOff, nil)
-		}
-		if strings.Contains(n, "mute") {
-			return actionPlan(d, device.OpMute, nil)
-		}
-		if strings.Contains(n, "volume up") || strings.Contains(n, "louder") {
-			return actionPlan(d, device.OpVolumeUp, nil)
-		}
-		if strings.Contains(n, "volume down") || strings.Contains(n, "quieter") {
-			return actionPlan(d, device.OpVolumeDown, nil)
-		}
-		for _, c := range []string{"red", "green", "blue", "purple", "orange", "yellow", "cyan", "pink", "white"} {
-			if strings.Contains(n, c) {
-				return actionPlan(d, device.OpColor, map[string]any{"name": c})
+		if d.Kind == "climate" {
+			if op, args, ok := climateCommand(text, normalise(d.ID)); ok {
+				return actionPlan(d, op, args)
 			}
+		}
+		if deviceStatusQuery(n, normalise(d.ID)) {
+			return actionPlan(d, device.OpRead, nil)
+		}
+		if op, args, ok := namedDeviceCommand(n, normalise(d.ID)); ok {
+			return actionPlan(d, op, args)
 		}
 	}
 	return r.Next.Plan(ctx, text, inv)
+}
+
+// Local writes require a complete command, not a mention of an action.
+// Negated, conditional and explanatory requests belong with the planner.
+func namedDeviceCommand(text, id string) (device.Op, map[string]any, bool) {
+	text = strings.TrimSuffix(strings.TrimPrefix(text, "please "), " please")
+	for _, name := range []string{id, "the " + id} {
+		switch text {
+		case "turn on " + name, "on " + name, "turn " + name + " on", "switch on " + name:
+			return device.OpOn, nil, true
+		case "turn off " + name, "off " + name, "turn " + name + " off", "switch off " + name:
+			return device.OpOff, nil, true
+		case "mute " + name:
+			return device.OpMute, nil, true
+		case "turn " + name + " volume up", "volume up " + name, "make " + name + " louder":
+			return device.OpVolumeUp, nil, true
+		case "turn " + name + " volume down", "volume down " + name, "make " + name + " quieter":
+			return device.OpVolumeDown, nil, true
+		}
+		for _, color := range []string{"red", "green", "blue", "purple", "orange", "yellow", "cyan", "pink", "white"} {
+			if text == "set "+name+" to "+color || text == "make "+name+" "+color || text == "turn "+name+" "+color {
+				return device.OpColor, map[string]any{"name": color}, true
+			}
+		}
+	}
+	return "", nil, false
+}
+
+// deviceStatusQuery is deliberately a complete-utterance match. Mentioning a
+// device in a question must never turn a read request into an on/off action.
+func deviceStatusQuery(text, id string) bool {
+	for _, name := range []string{id, "the " + id} {
+		switch text {
+		case "status of " + name, "check " + name, "what is " + name + " status",
+			"what is " + name + " temperature", "what is the status of " + name,
+			"what is the temperature of " + name:
+			return true
+		}
+		for _, state := range []string{"on", "off", "locked", "unlocked"} {
+			if text == "is "+name+" "+state {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func climateCommand(text, id string) (device.Op, map[string]any, bool) {
+	text = strings.TrimSpace(strings.ToLower(text))
+	text = strings.TrimSuffix(text, ".")
+	split := strings.LastIndex(text, " to ")
+	if split < 0 {
+		return "", nil, false
+	}
+	prefix := normalise(text[:split])
+	value := strings.TrimSpace(text[split+4:])
+	for _, name := range []string{id, "the " + id} {
+		switch prefix {
+		case "set " + name + " temperature":
+			value = strings.TrimSpace(strings.TrimSuffix(value, " degrees"))
+			temperature, err := strconv.ParseFloat(value, 64)
+			if err == nil && !math.IsNaN(temperature) && !math.IsInf(temperature, 0) {
+				return device.OpTemperature, map[string]any{"temperature": temperature}, true
+			}
+		case "set " + name + " mode":
+			mode := strings.ReplaceAll(normalise(value), " ", "_")
+			switch mode {
+			case "heat", "cool", "off", "auto", "heat_cool", "dry", "fan_only":
+				return device.OpHVACMode, map[string]any{"mode": mode}, true
+			}
+		}
+	}
+	return "", nil, false
 }
 
 // normalise lowercases and removes punctuation, because real transcripts carry

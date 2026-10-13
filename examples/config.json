@@ -20,7 +20,7 @@
     "recovery": {
       "ready_timeout": "5s",
       "stall_timeout": "3s",
-      "zero_timeout": "10s",
+      "zero_timeout": "0s",
       "retry_interval": "2s",
       "preferred_interval": "30s"
     },
@@ -55,6 +55,8 @@
       "keywords_threshold": 0.05
     },
     "follow_up_timeout": "6s",
+    "conversation_window": "0s",
+    "conversation_turns": 0,
     "vad": {
       "threshold": 0,
       "min_speech": "250ms",

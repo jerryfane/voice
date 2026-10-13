@@ -388,43 +388,47 @@ func TestPersistedStateMatchesLiveSetUnderConcurrency(t *testing.T) {
 	}
 }
 
-// A failure to persist after a timer fires has nowhere to return, so it must
-// be reported: silence there means a fired timer can reappear after a restart
-// with nobody warned.
-func TestSaveFailureAfterFiringIsReported(t *testing.T) {
+// Delivery is deferred until removal is durable, including when the process
+// restarts during a failed write. Otherwise a reminder can be spoken twice.
+func TestSaveFailureDefersFiringUntilDurable(t *testing.T) {
 	c := newClock()
-	var mu sync.Mutex
-	var errs []error
 	store := &flakyStore{}
-	report := faults.Func(func(e error) { mu.Lock(); errs = append(errs, e); mu.Unlock() })
-	s, _, err := New(store, report, WithClock(c.Now, c.After))
+	var reported error
+	s, _, err := New(store, faults.Func(func(err error) { reported = err }), WithClock(c.Now, c.After))
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
-	defer close(done)
-	go s.Run(done)
-	if _, err := s.Add(time.Minute, "one minute"); err != nil {
+	if _, err := s.AddReminder(time.Minute, "call Sam"); err != nil {
 		t.Fatal(err)
 	}
 	store.failFrom(errors.New("disk full"))
-
 	c.Advance(time.Minute)
-	if fired := waitFired(t, s, c); fired.Duration != time.Minute {
-		t.Fatalf("fired %+v", fired)
+	s.emitDue()
+	if reported == nil || len(s.List()) != 1 {
+		t.Fatalf("failed save must report and retain pending reminder: %v, %+v", reported, s.List())
 	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		mu.Lock()
-		n := len(errs)
-		mu.Unlock()
-		if n > 0 {
-			return
+	select {
+	case got := <-s.Fired():
+		t.Fatalf("unpersisted removal fired: %+v", got)
+	default:
+	}
+	restarted, missed, err := New(store, faults.Discard, WithClock(c.Now, c.After))
+	if err == nil || len(missed) != 0 || len(restarted.List()) != 1 {
+		t.Fatalf("failed restart transition = pending %+v missed %+v err %v", restarted.List(), missed, err)
+	}
+	store.failFrom(nil)
+	restarted.emitDue()
+	select {
+	case got := <-restarted.Fired():
+		if got.Reminder != "call Sam" {
+			t.Fatalf("wrong reminder: %+v", got)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("save failure after firing was not reported")
-		}
-		time.Sleep(5 * time.Millisecond)
+	default:
+		t.Fatal("durable reminder not delivered")
+	}
+	again, missed, err := New(store, faults.Discard, WithClock(c.Now, c.After))
+	if err != nil || len(missed) != 0 || len(again.List()) != 0 {
+		t.Fatalf("delivered reminder returned after restart: %+v %+v %v", again.List(), missed, err)
 	}
 }
 
@@ -537,5 +541,138 @@ func TestReopeningAnExistingDatabaseDoesNotWrite(t *testing.T) {
 	loaded, err := second.Load()
 	if err != nil || len(loaded) != 1 {
 		t.Fatalf("second opener loaded %+v, %v", loaded, err)
+	}
+}
+
+func TestReminderDurableRestoreCancelAndFire(t *testing.T) {
+	c := newClock()
+	path := filepath.Join(t.TempDir(), "reminders.db")
+	newScheduler := func() (*Scheduler, []Timer) {
+		t.Helper()
+		s, missed, err := New(store(t, path), faults.Discard, WithClock(c.Now, c.After))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s, missed
+	}
+	first, _ := newScheduler()
+	keep, err := first.AddReminder(10*time.Minute, "Call Élodie")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel, err := first.AddReminder(5*time.Minute, "check the oven")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(3 * time.Minute)
+	restarted, missed := newScheduler()
+	live := restarted.List()
+	if len(missed) != 0 || len(live) != 2 || live[1].ID != keep.ID || live[1].Reminder != keep.Reminder || live[1].Remaining(c.Now()) != 7*time.Minute {
+		t.Fatalf("restored = %+v missed = %+v", live, missed)
+	}
+	if removed, err := restarted.Cancel(func(t Timer) bool { return t.ID == cancel.ID }); err != nil || len(removed) != 1 {
+		t.Fatalf("cancel = %+v, %v", removed, err)
+	}
+	restarted, _ = newScheduler()
+	c.Advance(7 * time.Minute)
+	restarted.emitDue()
+	select {
+	case got := <-restarted.Fired():
+		if got.ID != keep.ID || got.Reminder != keep.Reminder {
+			t.Fatalf("fired = %+v", got)
+		}
+	default:
+		t.Fatal("due reminder never fired")
+	}
+	restarted.emitDue()
+	select {
+	case got := <-restarted.Fired():
+		t.Fatalf("duplicate or cancelled reminder fired: %+v", got)
+	default:
+	}
+	again, missed := newScheduler()
+	if len(again.List()) != 0 || len(missed) != 0 {
+		t.Fatalf("handled reminders resurrected: %+v %+v", again.List(), missed)
+	}
+}
+
+func TestOverdueReminderReportedOnceWithOriginalDeadline(t *testing.T) {
+	c := newClock()
+	st := store(t, filepath.Join(t.TempDir(), "reminders.db"))
+	s, _, err := New(st, faults.Discard, WithClock(c.Now, c.After))
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := s.AddReminder(time.Minute, "take out the bins")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(10 * time.Minute)
+	for restart := range 2 {
+		s, missed, err := New(st, faults.Discard, WithClock(c.Now, c.After))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if restart == 0 {
+			if len(missed) != 1 || missed[0] != original {
+				t.Fatalf("overdue reminder lost content/deadline: %+v", missed)
+			}
+		} else if len(missed) != 0 {
+			t.Fatalf("overdue reminder reported twice: %+v", missed)
+		}
+		if len(s.List()) != 0 {
+			t.Fatal("overdue reminder remains pending")
+		}
+	}
+}
+
+func TestExistingTimerDatabaseUpgradesWithoutLosingTimers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "timers.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := newClock().Now().Add(time.Hour)
+	_, err = db.Exec(`CREATE TABLE timers (id INTEGER PRIMARY KEY, label TEXT NOT NULL, duration INTEGER NOT NULL, deadline TEXT NOT NULL);
+		INSERT INTO timers VALUES (7, 'one hour', ?, ?)`, int64(time.Hour), deadline.Format(time.RFC3339Nano))
+	closeErr := db.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("legacy setup: %v %v", err, closeErr)
+	}
+	st := store(t, path)
+	loaded, err := st.Load()
+	if err != nil || len(loaded) != 1 || loaded[0].ID != 7 || loaded[0].Reminder != "" || !loaded[0].Deadline.Equal(deadline) {
+		t.Fatalf("migration lost timer: %+v %v", loaded, err)
+	}
+	loaded = append(loaded, Timer{ID: 8, Duration: time.Hour, Deadline: deadline, Reminder: "Call Sam"})
+	if err := st.Save(loaded); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := st.Load()
+	if err != nil || len(reloaded) != 2 {
+		t.Fatalf("upgraded store = %+v %v", reloaded, err)
+	}
+}
+
+func TestReminderValidationDoesNotScheduleInvalidRequests(t *testing.T) {
+	s, _, err := New(&flakyStore{}, faults.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		duration time.Duration
+		text     string
+	}{
+		{0, "call Sam"},
+		{-time.Minute, "call Sam"},
+		{MaxReminderDuration + time.Second, "call Sam"},
+		{time.Minute, "  "},
+	} {
+		if _, err := s.AddReminder(tc.duration, tc.text); err == nil {
+			t.Errorf("accepted invalid reminder: %+v", tc)
+		}
+	}
+	if len(s.List()) != 0 {
+		t.Fatal("invalid reminders changed pending state")
 	}
 }

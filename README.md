@@ -147,9 +147,11 @@ Say `Hey Voice, turn off` to stop the listener without an LLM call; run
 While an agent task runs, Voice keeps listening instead of blocking capture on
 the planner. It runs at most one agent request at a time: a busy turn can ask
 for status, request cancellation, or acknowledge a correction that must be
-resubmitted after the task completes. Cancellation cannot undo actions already
-performed. Spoken replies are serialized with the thinking sound, and
-microphone frames during playback and its hardware tail are discarded.
+resubmitted after the task completes. Cancellation stops Voice's request wrapper;
+work already handed to persistent OMP may still finish, and completed actions
+cannot be undone. Spoken replies are serialized with the thinking sound.
+Microphone frames during playback and its hardware tail are discarded. Voice
+does not repeatedly announce “you can say status or cancel.”
 
 The extra wake-free window and cheap front desk are **off by default**. For a
 short trial with a Sherpa wake detector, add these settings to the existing
@@ -182,6 +184,23 @@ unverified, late, or unavailable responses fall back to local speech. Its
 request has a 48-token response cap and usage/cost logging. Disabling
 `brain.front` keeps the bounded local controls without front-model spend.
 
+### Post-answer conversation
+
+With Sherpa, optionally add `"conversation_window": "20s"` and
+`"conversation_turns": 2` to `wake`. A successful wake-authorized answer opens
+a short follow-up window, signalled by the listening light and acknowledgement
+sound. Ask the next question without “Hey Voice.” Short words and inter-word
+pauses are retained instead of clipping the beginning of the request.
+
+The deadline is absolute: answers do not extend it. The window closes at its
+turn limit, timeout, cancellation, error, shutdown, or “stop,” “cancel,” or
+“that's all.” The next request then needs the wake phrase. Audio captured
+before a gate change or during playback cannot become a later authorized turn.
+Both settings default to zero (off); enable both together, up to 2 minutes and
+8 turns. The separate `in_flight_*` window allows bounded controls during work,
+not concurrent agent requests. Keep `brain.front` absent unless deliberately
+testing the additional model; it is not needed for either window.
+
 ALSA capture and playback are configurable argv templates. The current Pi deployment uses an Anker PowerConf. `packaging/99-voice-powerconf.rules` grants only `voice-agent` permission to send the USB telephony off-hook report required by that microphone.
 
 ### Microphone recovery
@@ -195,7 +214,7 @@ input. Every source uses the configured input sample rate and mono PCM format.
 "recovery": {
   "ready_timeout": "5s",
   "stall_timeout": "3s",
-  "zero_timeout": "10s",
+  "zero_timeout": "0s",
   "retry_interval": "2s",
   "preferred_interval": "30s"
 },
@@ -242,21 +261,24 @@ a one-time Bluetooth controller power-off/on cleared the stuck transport on
 this Pi; that interrupts all host Bluetooth devices and is not an automatic
 recovery action. Also check Pi undervoltage warnings independently.
 
-Readiness requires audio samples, not merely an open device. Missing frames,
-capture exits, and persistent exactly-zero PCM trigger recovery; ordinary
-quiet nonzero input is not treated as a dead microphone. The configured order
-is never overwritten when a fallback is selected. A preferred source is
+Readiness requires arriving PCM, not merely an open device. Missing frames and
+capture exits trigger recovery. Valid digital silence does not: the PowerConf
+can emit exact zeros in a quiet room. `zero_timeout` defaults to `0s` (disabled);
+set a positive value only for hardware where prolonged zeros prove a fault.
+`state=streaming` reports transport health; its `signal` field and later
+`state=signal` distinguish observed nonzero samples. Neither proves intelligible
+speech: verify a real wake/transcription/answer before declaring the mic usable.
+The configured order is never overwritten when a fallback is selected. A preferred source is
 probed while fallback capture continues and is restored only at a quiet,
 idle utterance boundary. Sources sharing a configured device or HID are not
 probed concurrently. A broken stream discards an incomplete utterance rather
 than joining speech from two microphones.
 
 Omitted recovery timings use the values above. Ready, stall, and retry times
-must be 100 ms–1 minute; zero timeout 1 second–10 minutes; preferred probe
+must be 100 ms–1 minute; zero timeout is 0 or 1 second–10 minutes; preferred probe
 interval 1 second–1 hour. There may be at most eight fallbacks. Leaving both
 recovery and fallbacks absent retains the original single-device behavior.
-`voice doctor` checks the capture executable, not live microphone health;
-inspect the listener's capture health events to confirm usable input.
+`voice doctor` checks the capture executable, not live microphone health.
 
 Speech engines and models are external. `scripts/setup-speech.sh` installs the Sherpa-ONNX keyword model, `whisper-cli`, the loopback `whisper-server`, Piper, and their default English models under `~/.local/share/voice`; the restricted installer copies them to `/var/lib/voice`. `voice-whisper.service` keeps the fallback Whisper model loaded once and binds only to `127.0.0.1:8178`.
 
@@ -304,6 +326,29 @@ transcription does not receive unverified hint parameters; deterministic
 corrections still apply after recognition. Hints guide recognition but do not
 guarantee a particular spelling.
 
+### Latency measurements
+
+Session logs separate transcription, planning, synthesis, and playback.
+Deterministic timer/reminder/device controls avoid a model round trip; vocabulary
+corrections add no model call. Keep cloud-first speech and the resident/CLI
+fallbacks unless measurements on the actual workload justify changing them.
+
+Pi measurements on 2026-10-13: 15 requests per engine, three synthetic English
+phrases over five warm rounds. Whisper `base.en`, 3 threads, matching greedy
+settings (`best_of=2`, `beam_size=-1`); fresh loopback HTTP connections.
+
+| Engine | Median | p95 |
+| --- | ---: | ---: |
+| Resident Whisper STT | 3216 ms | 3506 ms |
+| Whisper CLI STT | 3295 ms | 3409 ms |
+| Piper synthesis | 901 ms | 1528 ms |
+
+Both transcription paths had mean word-error rate 0.05556 on this tiny synthetic
+set. This is not a real-user accuracy score, cold-start comparison, or
+end-to-end latency result. It does not establish a useful universal speedup
+from switching providers. Add vocabulary terms only from confirmed spelling
+needs, not guesses.
+
 ## Activation feedback
 
 When a standalone wake phrase is accepted, Voice immediately switches the
@@ -319,10 +364,20 @@ planning. `thinking_delay` is a short grace period: requests that finish inside
 it stay silent by construction. Processing playback is cancelled and joined
 before response speech starts. The in-flight window adds no routine spoken
 acknowledgement: the thinking sound continues while work is pending.
+Pulses yield while speech is being captured or a command is queued. File-based
+thinking audio separates its audible portion from its trailing silent gap, so
+the microphone can listen between pulses without leaving the player open.
 Status replies and other explicitly requested speech briefly
 pause the loop; completion or cancellation stops it. Ambient noise, an embedded
 mention, or an approximate wake phrase produce no feedback. The light returns
 to idle on success, failure, timeout, cancellation, and shutdown.
+
+This is half-duplex, not acoustic echo cancellation: speak in the quiet gap,
+not over a thinking pulse or reply. A word beginning during guarded playback
+can be clipped. Replay verification reproduced that limitation; controls begun
+in a quiet gap were recognized. In-flight controls must finish transcription
+before the configured deadline (at most 30 seconds), otherwise they are dropped.
+Full-duplex barge-in remains a separate audio-engine improvement.
 
 ```json
 "feedback": {
@@ -403,6 +458,25 @@ replacement.
 Because `voice off` stops the listener, it silences announcements without
 destroying timers; `voice on` brings them back with the correct remaining time.
 
+### Reminders
+
+The same local scheduler supports “remind me in thirty seconds to check the
+microphone,” “list reminders,” “cancel the reminder to check the microphone,”
+and “cancel all reminders.” Durations accept seconds, minutes, hours, days,
+and weeks up to 365 elapsed days. Calendar dates, recurring schedules, snooze,
+and delivery history are not implemented. These are listener controls, not
+`voice ask` commands.
+
+Content and the original deadline survive restart in the existing SQLite store,
+which automatically adds its reminder column. Timer and reminder cancellation
+are isolated: “cancel all timers” does not delete reminders. Ambiguous reminder
+cancellation asks for the exact text instead of choosing one. Due speech uses
+the saved content; overdue startup announcements include how late they are.
+
+Delivery is at-most-once: the scheduler persists removal before announcing.
+If that save fails, delivery waits. A crash or TTS failure after removal can
+lose the announcement; no delivery retry/history is promised.
+
 ## Devices
 
 Magic Home/LEDENET lights use their local TCP protocol on port 5577. HDMI-CEC TVs use the Linux CEC device. The OMP agent does not directly access hardware: it returns structured device actions, which Voice validates against configured IDs and capabilities before execution.
@@ -418,6 +492,53 @@ voice tv <id> volume-up
 voice tv <id> volume-down
 voice tv <id> mute
 ```
+
+### Home Assistant household devices
+
+Configure an existing local Home Assistant installation explicitly; Voice does
+not scan the network, guess credentials, import devices, reverse-engineer a
+thermostat, or bypass an Aqara hub. Set `VOICE_HA_TOKEN` in the service's
+protected environment (or name another environment variable with `token_env`).
+Never put the token in `url` or `token_env` itself.
+
+```json
+"home_assistant": {
+  "url": "http://192.168.1.20:8123",
+  "token_env": "VOICE_HA_TOKEN",
+  "entities": [
+    {"id": "bedroom", "entity_id": "climate.bedroom", "operations": ["read", "temperature", "hvac_mode"]},
+    {"id": "door", "entity_id": "lock.front_door", "operations": ["read"]},
+    {"id": "desk", "entity_id": "switch.desk", "operations": ["read", "on", "off"]}
+  ]
+}
+```
+
+The URL must be a local/private/loopback origin, without credentials, path,
+query, or fragment. Redirects and proxy routing are disabled. Plain HTTP exposes
+the token to that LAN; use trusted local TLS where available. Entities and
+operations are explicit allowlists. Discovery only reads candidates from this
+configured server; an owner must choose and configure them.
+
+```sh
+voice discover home-assistant
+voice climate bedroom read
+voice climate bedroom temperature 24
+voice climate bedroom hvac-mode cool
+voice lock door read
+voice switch desk off
+```
+
+Climate writes check the live entity's supported modes and temperature bounds,
+using Home Assistant's configured units. A write is not reported successful
+merely because the service accepted it: Voice reads the selected entity back
+and verifies its reported state. This is HA's state, not independent physical
+sensor proof. Reads replace model guesses with the verified state. Locks are
+read-only; unlock is deliberately unsupported.
+
+An ordinary non-smart thermostat still needs compatible smart hardware and HA
+integration. An Aqara lock that requires a hub still needs its compatible hub
+and supported HA exposure. No AC or door control is enabled on a host without
+those prerequisites.
 
 ## Spotify
 
@@ -499,11 +620,10 @@ required for playback through this client.
 ```
 
 `feedback.thinking` takes a file the same way, for the sound played while an
-answer is slow. That one LOOPS until the answer arrives, so the silence after
-the sound belongs inside the file and is **kept** - it is the gap between
-pulses, and trimming it would turn a tick into a rattle. A file shorter than
-250 ms once converted is refused, because looping it restarts the player
-continuously.
+answer is slow. The audible part repeats until the answer arrives. Trailing
+silence is preserved as an interruptible gap outside playback, allowing capture
+between pulses. A file shorter than 250 ms once converted is refused, because
+looping it would restart the player continuously.
 
 The reply does not wait for the cycle to finish: the loop is cancelled and
 the playback process killed when the answer arrives, so a long file is cut
@@ -518,12 +638,10 @@ first time someone speaks.
   that converts them. Accepting a file and playing noise would be worse.
 - **Stereo is mixed down and the rate is resampled** to the session format, so
   a file downloaded from any generator works without hand-conversion.
-- **Trailing silence is trimmed for `feedback.sound` only.** Generators pad to
-  round durations - a real example arrived as 0.504 s of file containing
-  0.186 s of sound - and for a one-shot acknowledgement that padding holds the
-  speaker open while the microphone is already listening for the command.
-  `feedback.thinking` is the exception: it loops, so its padding is the gap
-  between pulses and is kept.
+- **Trailing silence is trimmed from playback.** For `feedback.sound`, padding
+  is discarded so acknowledgement does not hold the speaker open unnecessarily.
+  For `feedback.thinking`, padding becomes the gap between audible pulses;
+  its timing is preserved without keeping the speaker process open.
 
 ## Feature proposals
 

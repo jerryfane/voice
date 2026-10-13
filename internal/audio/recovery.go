@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// RecoveryOptions bounds capture health checks and retries. Zero PCM means
-// exactly zero signed samples, not audio below a speech/volume threshold.
+// RecoveryOptions bounds capture health checks and retries. ZeroTimeout is an
+// opt-in signal watchdog: noise-gating microphones can legitimately send zeros.
 type RecoveryOptions struct {
 	ReadyTimeout      time.Duration
 	StallTimeout      time.Duration
@@ -25,7 +25,7 @@ type RecoveryOptions struct {
 func DefaultRecoveryOptions() RecoveryOptions {
 	return RecoveryOptions{
 		ReadyTimeout: 5 * time.Second, StallTimeout: 3 * time.Second,
-		ZeroTimeout: 10 * time.Second, RetryInterval: 2 * time.Second,
+		RetryInterval:     2 * time.Second,
 		PreferredInterval: 30 * time.Second, ReturnQuiet: 700 * time.Millisecond,
 		ReturnThreshold: 0.00045,
 	}
@@ -66,8 +66,8 @@ func NewRecoveringRecorder(choices []CaptureChoice, options RecoveryOptions, bou
 	if choices[0].Recorder.Format().SampleRate <= 0 || choices[0].Recorder.Format().SampleRate > MaxSampleRate || choices[0].Recorder.Format().Channels != 1 {
 		return nil, errors.New("capture recovery requires bounded positive-rate mono PCM")
 	}
-	if options.ReadyTimeout <= 0 || options.StallTimeout <= 0 || options.ZeroTimeout <= 0 || options.RetryInterval <= 0 || options.PreferredInterval <= 0 || options.ReturnQuiet <= 0 || options.ReturnThreshold <= 0 || math.IsNaN(options.ReturnThreshold) || math.IsInf(options.ReturnThreshold, 0) {
-		return nil, errors.New("capture recovery thresholds must be positive and finite")
+	if options.ReadyTimeout <= 0 || options.StallTimeout <= 0 || options.ZeroTimeout < 0 || options.RetryInterval <= 0 || options.PreferredInterval <= 0 || options.ReturnQuiet <= 0 || options.ReturnThreshold <= 0 || math.IsNaN(options.ReturnThreshold) || math.IsInf(options.ReturnThreshold, 0) {
+		return nil, errors.New("capture recovery thresholds must be positive and finite; zero timeout may be disabled")
 	}
 	for _, duration := range []time.Duration{options.ReadyTimeout, options.StallTimeout, options.ZeroTimeout, options.RetryInterval, options.PreferredInterval, options.ReturnQuiet} {
 		if duration > time.Hour {
@@ -144,6 +144,7 @@ func (r *RecoveringRecorder) start(ctx context.Context, index int, probe bool) *
 		}
 		started, last := time.Now(), time.Now()
 		ready := false
+		signalSeen := false
 		var zeros, quiet int64
 		var zeroSince time.Time
 		rate := int64(r.Format().SampleRate)
@@ -166,7 +167,10 @@ func (r *RecoveringRecorder) start(ctx context.Context, index int, probe bool) *
 			case <-timer.C:
 				reason := "no PCM (capture stalled)"
 				if !ready && !time.Now().Before(started.Add(r.options.ReadyTimeout)) {
-					reason = "no nonzero PCM before readiness deadline"
+					reason = "no PCM before readiness deadline"
+					if r.options.ZeroTimeout > 0 {
+						reason = "no nonzero PCM before readiness deadline"
+					}
 				}
 				if !zeroSince.IsZero() && !time.Now().Before(zeroSince.Add(r.options.ZeroTimeout)) {
 					reason = "persistent exactly-zero PCM"
@@ -205,7 +209,7 @@ func (r *RecoveringRecorder) start(ctx context.Context, index int, probe bool) *
 						energy += v * v
 					}
 				}
-				if allZero {
+				if allZero && r.options.ZeroTimeout > 0 {
 					zeros += int64(len(frame))
 					if zeroSince.IsZero() {
 						zeroSince = time.Now()
@@ -214,7 +218,7 @@ func (r *RecoveringRecorder) start(ctx context.Context, index int, probe bool) *
 					zeros = 0
 					zeroSince = time.Time{}
 				}
-				if zeros >= zeroLimit {
+				if r.options.ZeroTimeout > 0 && zeros >= zeroLimit {
 					send(captureEvent{err: errors.New("persistent exactly-zero PCM")})
 					return
 				}
@@ -225,9 +229,13 @@ func (r *RecoveringRecorder) start(ctx context.Context, index int, probe bool) *
 						quiet = 0
 					}
 				}
-				if !ready && !allZero {
+				if !signalSeen && !allZero {
+					signalSeen = true
+					r.log("stage=capture state=signal choice=%d probe=%v", index, probe)
+				}
+				if !ready && (!allZero || r.options.ZeroTimeout == 0) {
 					ready = true
-					r.log("stage=capture state=healthy choice=%d probe=%v", index, probe)
+					r.log("stage=capture state=streaming choice=%d probe=%v signal=%v", index, probe, signalSeen)
 				}
 				if ready {
 					blocked := time.Now()

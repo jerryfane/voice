@@ -207,6 +207,8 @@ func run(args []string) error {
 		return doctor(ctx, cfg, a, loaded)
 	case "devices":
 		return listDevices(ctx, a)
+	case "discover":
+		return discoverDevices(ctx, cfg, args[1:])
 	case "wake":
 		if len(args) < 2 {
 			return errors.New("usage: voice wake TRANSCRIPT")
@@ -241,8 +243,12 @@ func run(args []string) error {
 		if err := json.Unmarshal([]byte(args[1]), &p); err != nil {
 			return fmt.Errorf("decode plan: %w", err)
 		}
-		if err := a.ApplyActions(ctx, p.Actions); err != nil {
+		readReply, err := a.ApplyActions(ctx, p.Actions)
+		if err != nil {
 			return err
+		}
+		if readReply != "" {
+			p.Speak = readReply
 		}
 		if p.Speak == "" {
 			return nil
@@ -255,6 +261,8 @@ func run(args []string) error {
 		return commandDevice(ctx, a, "tv", args[1:])
 	case "music":
 		return commandDevice(ctx, a, "music", args[1:])
+	case "switch", "climate", "lock":
+		return commandDevice(ctx, a, args[0], args[1:])
 	case "proposals":
 		return proposalsCommand(a, cfg, loaded, args[1:])
 	case "config":
@@ -283,10 +291,14 @@ Usage: voice [--config PATH] COMMAND
   say TEXT                  synthesize and play speech
   execute PLAN_JSON         execute structured actions and spoken response
   devices                   list configured devices and live state
+  discover home-assistant   read candidates from the configured local HA endpoint; no import/scan
   wake TRANSCRIPT           report whether those words would wake Voice
-  light ID OP [VALUE]       control a Magic Home light
+  light ID OP [VALUE]       control a configured light
   tv ID OP                  control an HDMI-CEC TV
   music ID OP [TYPE QUERY]  control a configured music player
+  switch ID OP             control an explicitly allowlisted safe switch
+  climate ID OP [VALUE]    read/control an explicitly allowlisted smart thermostat
+  lock ID read             read an exposed HA lock; never lock/unlock
   proposals CMD [ARGS]      track what Voice was asked for and could not do
   config                    print effective config
   version                   print version
@@ -294,6 +306,12 @@ Usage: voice [--config PATH] COMMAND
 Light ops: on, off, toggle, color NAME, white 0-100, brightness 0-100
 TV ops: on, off, volume-up, volume-down, mute
 Music ops: play [track|album|artist|playlist QUERY], resume, pause, next, previous, volume 0-10, volume-up, volume-down
+HA ops: read; light/switch allowlisted on/off/toggle; light brightness/color when supported
+Climate ops: read, temperature VALUE (HA's configured units), hvac-mode MODE
+Discovery needs home_assistant.url and token_env (default VOICE_HA_TOKEN).
+Candidates require an owner config edit: choose id/entity_id and explicit operations.
+No mDNS/subnet scan, automatic import, vendor-cloud appliance or direct Aqara support.
+An ordinary non-smart thermostat needs compatible smart hardware before control.
 Proposals: list [--json], show ID, due [--json], record REQUEST [--title T] [--scope S] [--risks R],
            notified ID, approve ID, decline ID [REASON], issue ID NUMBER, implementing ID AGENT,
            retry ID, complete ID, fail ID DETAIL, expire
@@ -536,6 +554,22 @@ func commandDevice(ctx context.Context, a *session.Assistant, kind string, args 
 	}
 	op := strings.ReplaceAll(args[1], "-", "_")
 	cmd := device.Command{Op: device.Op(op)}
+	if cmd.Op == device.OpTemperature {
+		if len(args) != 3 {
+			return errors.New("temperature requires a value in the thermostat's configured units")
+		}
+		value, err := strconv.ParseFloat(args[2], 64)
+		if err != nil {
+			return errors.New("temperature requires a numeric value")
+		}
+		cmd.Args = map[string]any{"temperature": value}
+	}
+	if cmd.Op == device.OpHVACMode {
+		if len(args) != 3 {
+			return errors.New("hvac-mode requires a supported mode")
+		}
+		cmd.Args = map[string]any{"mode": args[2]}
+	}
 	if cmd.Op == device.OpColor {
 		if len(args) < 3 {
 			return errors.New("color requires a name")

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jerryfane/voice/internal/audio"
 	"github.com/jerryfane/voice/internal/config"
@@ -28,6 +29,9 @@ func TestBuildLoadsTheThinkingSoundFromAFile(t *testing.T) {
 	}
 
 	c := config.Default()
+	c.Timers.Enabled = false
+	c.Proposals.Enabled = false
+	c.Wake.Detector = "sherpa"
 	c.Input.SampleRate = 16000
 	c.Feedback.Thinking = path
 
@@ -35,7 +39,16 @@ func TestBuildLoadsTheThinkingSoundFromAFile(t *testing.T) {
 	if a.Feedback == nil {
 		t.Fatal("no feedback notifier was built")
 	}
-	if got := len(a.Feedback.Working); got != samples {
-		t.Errorf("thinking audio is %d samples, want %d from the file: the built-in tone was rendered instead of the owner's sound", got, samples)
+	lead := int(playbackLeadIn * 16000 / time.Second)
+	if got := len(a.Feedback.Working); got != samples+lead {
+		t.Fatalf("thinking audio is %d samples, want %d from the file plus %d speaker wake-up samples", got, samples, lead)
+	}
+	for i, sample := range a.Feedback.Working {
+		if i < lead && sample != 0 || i >= lead && sample == 0 {
+			t.Fatalf("thinking audio sample %d = %d: the file or speaker wake-up padding was lost", i, sample)
+		}
+	}
+	if a.Feedback.ThinkingGap < 2*playbackTail {
+		t.Fatal("a custom sound without trailing silence leaves no listening gap")
 	}
 }

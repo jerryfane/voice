@@ -32,6 +32,9 @@ type Utterance struct {
 	// a standalone wake before capturing this one follow-up command. The
 	// session must not play the acknowledgement twice.
 	WakeAcknowledged bool
+	// GateEpoch binds streaming audio to the playback/window generation in
+	// which capture began. Queued audio from a closed generation is discarded.
+	GateEpoch uint64
 }
 
 // Params tunes the gate. All durations are converted from config.

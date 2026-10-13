@@ -216,3 +216,138 @@ func (failingStore) Load() ([]timer.Timer, error) { return nil, nil }
 func (failingStore) Save([]timer.Timer) error     { return errStore }
 
 var errStore = errors.New("state directory is read-only")
+
+func TestRemindersSetListAndCancelWithoutPlanner(t *testing.T) {
+	a, tts, planner := timerAssistant(t,
+		"hey voice remind me in ten minutes to Call Sam",
+		"hey voice what reminders do I have",
+		"hey voice cancel the reminder to call Sam",
+		"hey voice list my reminders",
+	)
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if planner.calls != 0 || len(a.Timers.List()) != 0 {
+		t.Fatalf("local reminders leaked: planner=%d pending=%+v", planner.calls, a.Timers.List())
+	}
+	for _, want := range []string{"I'll remind you in 10 minutes to Call Sam", "In 10 minutes: Call Sam", "Cancelled your reminder to Call Sam", "no pending reminders"} {
+		if !saidContaining(tts.spoken(), want) {
+			t.Errorf("missing %q in %q", want, tts.spoken())
+		}
+	}
+}
+
+func TestTimerAndReminderCancellationStaySeparate(t *testing.T) {
+	a, _, _ := timerAssistant(t)
+	if _, err := a.Timers.Add(time.Hour, "one hour"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Timers.AddReminder(time.Hour, "call Sam"); err != nil {
+		t.Fatal(err)
+	}
+	a.cancelTimers(timer.Command{Kind: timer.Cancel, All: true})
+	if live := a.Timers.List(); len(live) != 1 || live[0].Reminder != "call Sam" {
+		t.Fatalf("cancel all timers touched reminder: %+v", live)
+	}
+	if _, err := a.Timers.Add(time.Hour, "one hour"); err != nil {
+		t.Fatal(err)
+	}
+	a.cancelReminders(timer.Command{Kind: timer.Cancel, Reminder: true, All: true})
+	if live := a.Timers.List(); len(live) != 1 || live[0].Reminder != "" {
+		t.Fatalf("cancel all reminders touched timer: %+v", live)
+	}
+}
+
+func TestAmbiguousReminderCancelDoesNotGuess(t *testing.T) {
+	a, _, _ := timerAssistant(t)
+	for _, text := range []string{"call Sam", "call Alex"} {
+		if _, err := a.Timers.AddReminder(time.Hour, text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reply := a.cancelReminders(timer.Command{Kind: timer.Cancel, Reminder: true})
+	if len(a.Timers.List()) != 2 || !strings.Contains(reply, "more than one") {
+		t.Fatalf("ambiguous cancel = %q, %+v", reply, a.Timers.List())
+	}
+	reply = a.cancelReminders(timer.Command{Kind: timer.Cancel, Reminder: true, Text: "call Sam"})
+	if live := a.Timers.List(); len(live) != 1 || live[0].Reminder != "call Alex" || !strings.Contains(reply, "call Sam") {
+		t.Fatalf("targeted cancel = %q, %+v", reply, live)
+	}
+}
+
+func TestReminderNotificationsSpeakContentAndHonestOverdueAge(t *testing.T) {
+	a, tts, planner := timerAssistant(t)
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	a.Now = func() time.Time { return now }
+	a.announceFired(context.Background(), timer.Timer{Reminder: "call Sam", Deadline: now})
+	a.announceFired(context.Background(), timer.Timer{Reminder: "check the oven", Deadline: now.Add(-3 * time.Minute)})
+	a.announceMissed(context.Background(), []timer.Timer{{Reminder: "take out the bins", Deadline: now.Add(-time.Hour)}})
+	for _, want := range []string{"Reminder: call Sam", "due 3 minutes ago: check the oven", "While I was off", "take out the bins", "due 1 hour ago"} {
+		if !saidContaining(tts.spoken(), want) {
+			t.Errorf("missing %q in %q", want, tts.spoken())
+		}
+	}
+	if planner.calls != 0 {
+		t.Fatal("delivery sent reminder contents to planner")
+	}
+}
+
+func TestReminderFiresWithoutWakePhrase(t *testing.T) {
+	a, tts, _ := timerAssistant(t)
+	a.VAD = idleSegmenter{}
+	if _, err := a.Timers.AddReminder(20*time.Millisecond, "call Sam"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for !saidContaining(tts.spoken(), "Reminder: call Sam") {
+		if time.Now().After(deadline) {
+			t.Fatalf("reminder never announced: %q", tts.spoken())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnsupportedReminderAndDisabledSchedulerStayHonest(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		a, tts, planner := timerAssistant(t, "hey voice remind me every Friday to put out the bins")
+		if disabled {
+			a.Timers = nil
+		}
+		if err := a.Run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		want := "Say remind me in"
+		if disabled {
+			want = "scheduler is disabled"
+		}
+		if planner.calls != 0 || !saidContaining(tts.spoken(), want) {
+			t.Fatalf("unsupported reminder: planner=%d speech=%q", planner.calls, tts.spoken())
+		}
+	}
+}
+
+type failedReminderSynthesizer struct{ recordingSynthesizer }
+
+func (*failedReminderSynthesizer) Synthesize(context.Context, string) ([]byte, error) {
+	return nil, errors.New("speaker unavailable")
+}
+
+func TestReminderControlReportsFailedSpeechWithoutLosingSchedule(t *testing.T) {
+	a, _, _ := timerAssistant(t)
+	a.TTS = &failedReminderSynthesizer{}
+	handled, spoken := a.timerControl(context.Background(), "remind me in ten minutes to call Sam", func() {})
+	if !handled || spoken || len(a.Timers.List()) != 1 {
+		t.Fatalf("handled=%v spoken=%v pending=%+v", handled, spoken, a.Timers.List())
+	}
+	if a.announceFired(context.Background(), timer.Timer{Reminder: "call Sam", Deadline: time.Now()}) {
+		t.Fatal("failed reminder announcement reported success")
+	}
+}

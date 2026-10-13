@@ -312,3 +312,62 @@ func TestThinkingPlaysForASlowAnswer(t *testing.T) {
 		t.Error("the thinking sound never played for a slow answer, so the wait is silent again")
 	}
 }
+
+func TestThinkingWaitsForSpeechAndReleasesCaptureDuringGap(t *testing.T) {
+	player := &loopPlayer{}
+	ready := make(chan struct{})
+	checked := make(chan struct{}, 1)
+	events := make(chan string, 4)
+	n := &Notifier{
+		Player: player, Working: []int16{1}, Format: audio.Default(),
+		ThinkingDelay: time.Millisecond, ThinkingGap: time.Hour,
+		CanThink: func() bool {
+			select {
+			case checked <- struct{}{}:
+			default:
+			}
+			select {
+			case <-ready:
+				return true
+			default:
+				return false
+			}
+		},
+		BeforeThinking: func() { events <- "suspend" },
+		AfterThinking:  func() { events <- "resume" },
+	}
+	stop := n.Thinking(context.Background())
+	defer stop()
+	select {
+	case <-checked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("thinking did not consult active capture")
+	}
+	if player.plays() != 0 {
+		t.Fatal("thinking played over captured speech")
+	}
+	close(ready)
+	for _, want := range []string{"suspend", "resume"} {
+		select {
+		case got := <-events:
+			if got != want {
+				t.Fatalf("playback boundary = %q, want %q", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("missing %s hook", want)
+		}
+	}
+	if player.inFlight() != 0 {
+		t.Fatal("capture resumed before playback ended")
+	}
+	stopped := make(chan struct{})
+	go func() { stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancellation waited for the silent gap")
+	}
+	if player.plays() != 1 {
+		t.Fatal("thinking played again during the silent gap")
+	}
+}

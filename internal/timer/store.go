@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS timers (
 	id       INTEGER PRIMARY KEY,
 	label    TEXT    NOT NULL,
 	duration INTEGER NOT NULL, -- nanoseconds
-	deadline TEXT    NOT NULL  -- RFC 3339 in UTC
+	deadline TEXT    NOT NULL, -- RFC 3339 in UTC
+	reminder TEXT    NOT NULL DEFAULT ''
 );`
 
 // Open prepares the database, creating the file and schema if needed. WAL is
@@ -80,6 +81,17 @@ func prepare(db *sql.DB, path string) error {
 		return fmt.Errorf("reading %s: %w", path, err)
 	}
 	if timers > 0 {
+		// Upgrade the existing scheduler in place, preserving active timers.
+		// Once upgraded, opening the database remains read-only.
+		var reminders int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('timers') WHERE name = 'reminder'`).Scan(&reminders); err != nil {
+			return fmt.Errorf("reading timer schema: %w", err)
+		}
+		if reminders == 0 {
+			if _, err := db.Exec(`ALTER TABLE timers ADD COLUMN reminder TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("adding reminder content to %s: %w", path, err)
+			}
+		}
 		return nil
 	}
 	if others > 0 {
@@ -123,7 +135,7 @@ func (s *Store) Load() (timers []Timer, err error) {
 	if s == nil || s.db == nil {
 		return nil, nil
 	}
-	rows, err := s.db.Query(`SELECT id, label, duration, deadline FROM timers ORDER BY deadline`)
+	rows, err := s.db.Query(`SELECT id, label, duration, deadline, reminder FROM timers ORDER BY deadline`)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +149,7 @@ func (s *Store) Load() (timers []Timer, err error) {
 			ns       int64
 			deadline string
 		)
-		if err := rows.Scan(&t.ID, &t.Label, &ns, &deadline); err != nil {
+		if err := rows.Scan(&t.ID, &t.Label, &ns, &deadline, &t.Reminder); err != nil {
 			return nil, err
 		}
 		when, err := time.Parse(time.RFC3339Nano, deadline)
@@ -172,13 +184,13 @@ func (s *Store) Save(ts []Timer) (err error) {
 	if _, err := tx.Exec(`DELETE FROM timers`); err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare(`INSERT INTO timers (id, label, duration, deadline) VALUES (?, ?, ?, ?)`)
+	stmt, err := tx.Prepare(`INSERT INTO timers (id, label, duration, deadline, reminder) VALUES (?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, stmt.Close()) }()
 	for _, t := range ts {
-		if _, err := stmt.Exec(t.ID, t.Label, int64(t.Duration), t.Deadline.UTC().Format(time.RFC3339Nano)); err != nil {
+		if _, err := stmt.Exec(t.ID, t.Label, int64(t.Duration), t.Deadline.UTC().Format(time.RFC3339Nano), t.Reminder); err != nil {
 			return err
 		}
 	}

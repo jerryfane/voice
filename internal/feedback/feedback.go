@@ -58,14 +58,22 @@ type Notifier struct {
 	Player    audio.Player
 	// Sound is pre-rendered PCM in Format. Nil disables the sound.
 	Sound []int16
-	// Working is one loopable cycle of the thinking sound, including its
-	// trailing silence. Nil disables it.
+	// Working is the rendered thinking pulse. Nil disables it. A caller can
+	// retain silent padding here or separate it into ThinkingGap for capture.
 	Working []int16
 	// ThinkingDelay is the grace period before Working starts. Zero uses
 	// DefaultThinkingDelay for callers that construct a Notifier directly.
 	ThinkingDelay time.Duration
-	Format        audio.Format
-	Logger        *log.Logger
+	// ThinkingGap is silence between cycles, kept outside playback so the
+	// microphone can listen. Build separates it from the rendered sound.
+	ThinkingGap time.Duration
+	// Playback hooks suppress capture only while a thinking pulse is audible.
+	// CanThink postpones a pulse while a person is already speaking.
+	BeforeThinking func()
+	AfterThinking  func()
+	CanThink       func() bool
+	Format         audio.Format
+	Logger         *log.Logger
 }
 
 func (n *Notifier) logf(f string, v ...any) {
@@ -76,19 +84,23 @@ func (n *Notifier) logf(f string, v ...any) {
 
 // Accepted runs the feedback for one accepted wake phrase: the light changes
 // first (it is the fastest signal and the one the user is looking at), then the
-// sound plays. Failures are logged, never returned: feedback must not stop a
-// command from being handled.
-func (n *Notifier) Accepted(ctx context.Context) {
+// sound plays. Failure does not stop an authorized command, but the result
+// lets the session avoid opening a new conversation without its audible cue.
+func (n *Notifier) Accepted(ctx context.Context) bool {
 	if n == nil {
-		return
+		return true
 	}
 	n.set(Listening)
 	if len(n.Sound) == 0 || n.Player == nil {
-		return
+		return true
 	}
-	if err := n.Player.PlayPCM(ctx, n.Sound, n.Format); err != nil && ctx.Err() == nil {
-		n.logf("feedback sound: %v", err)
+	if err := n.Player.PlayPCM(ctx, n.Sound, n.Format); err != nil {
+		if ctx.Err() == nil {
+			n.logf("feedback sound: %v", err)
+		}
+		return false
 	}
+	return ctx.Err() == nil
 }
 
 // Thinking plays the working sound on a loop until the returned stop function
@@ -121,13 +133,40 @@ func (n *Notifier) Thinking(ctx context.Context) (stop func()) {
 			return
 		case <-timer.C:
 		}
-		audibleAt = time.Now()
-		n.logf("stage=thinking state=started delay_ms=%.3f", feedbackMS(requested))
+		wait := func(delay time.Duration) bool {
+			timer.Reset(delay)
+			select {
+			case <-loop.Done():
+				return false
+			case <-timer.C:
+				return true
+			}
+		}
 		for loop.Err() == nil {
-			if err := n.Player.PlayPCM(loop, n.Working, n.Format); err != nil {
+			if n.CanThink != nil && !n.CanThink() {
+				if !wait(50 * time.Millisecond) {
+					return
+				}
+				continue
+			}
+			if n.BeforeThinking != nil {
+				n.BeforeThinking()
+			}
+			if audibleAt.IsZero() {
+				audibleAt = time.Now()
+				n.logf("stage=thinking state=started delay_ms=%.3f", feedbackMS(requested))
+			}
+			err := n.Player.PlayPCM(loop, n.Working, n.Format)
+			if n.AfterThinking != nil {
+				n.AfterThinking()
+			}
+			if err != nil {
 				if loop.Err() == nil {
 					n.logf("thinking sound: %v", err)
 				}
+				return
+			}
+			if n.ThinkingGap > 0 && !wait(n.ThinkingGap) {
 				return
 			}
 		}

@@ -7,6 +7,7 @@ package timer
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,8 @@ type Timer struct {
 	// Deadline is wall-clock, not a countdown: a suspended or slow host must
 	// not shift when a timer fires.
 	Deadline time.Time `json:"deadline"`
+	// Reminder is the spoken message; empty means an ordinary timer.
+	Reminder string `json:"reminder,omitempty"`
 }
 
 // Remaining is how long is left at now, never negative.
@@ -49,9 +52,10 @@ type Scheduler struct {
 	now   func() time.Time
 	after func(time.Duration) <-chan time.Time
 
-	mu     sync.Mutex
-	timers []Timer
-	nextID int
+	mu         sync.Mutex
+	timers     []Timer
+	nextID     int
+	retryAfter time.Time
 
 	fired   chan Timer
 	changed chan struct{}
@@ -102,8 +106,16 @@ func New(store Saver, report faults.Reporter, opts ...Option) (*Scheduler, []Tim
 	if len(missed) > 0 {
 		// The missed ones are gone from the live set, so persist immediately;
 		// a restart loop must not announce them twice.
-		if saveErr := store.Save(s.timers); saveErr != nil && err == nil {
-			err = saveErr
+		if saveErr := store.Save(s.timers); saveErr != nil {
+			// Never report an occurrence whose removal is not durable: doing
+			// so would repeat the same announcement on every restart.
+			s.timers = append(s.timers, missed...)
+			sortTimers(s.timers)
+			missed = nil
+			s.retryAfter = now.Add(time.Second)
+			if err == nil {
+				err = saveErr
+			}
 		}
 	}
 	return s, missed, err
@@ -121,8 +133,21 @@ func (s *Scheduler) Fired() <-chan Timer { return s.fired }
 // same lock as the mutation, so two writers cannot reorder on the way to disk
 // and leave the file describing a set that no longer exists.
 func (s *Scheduler) Add(d time.Duration, label string) (Timer, error) {
+	return s.add(d, label, "")
+}
+
+// AddReminder schedules a one-shot message on the same durable clock as timers.
+func (s *Scheduler) AddReminder(d time.Duration, text string) (Timer, error) {
+	text = strings.TrimSpace(text)
+	if d <= 0 || d > MaxReminderDuration || text == "" {
+		return Timer{}, fmt.Errorf("reminders need text and a duration between zero and 365 days")
+	}
+	return s.add(d, "", text)
+}
+
+func (s *Scheduler) add(d time.Duration, label, reminder string) (Timer, error) {
 	s.mu.Lock()
-	t := Timer{ID: s.nextID, Label: label, Duration: d, Deadline: s.now().Add(d)}
+	t := Timer{ID: s.nextID, Label: label, Duration: d, Deadline: s.now().Add(d), Reminder: reminder}
 	s.nextID++
 	s.timers = append(s.timers, t)
 	sortTimers(s.timers)
@@ -205,7 +230,11 @@ func (s *Scheduler) untilNext() (time.Duration, bool) {
 	if len(s.timers) == 0 {
 		return 0, false
 	}
-	d := s.timers[0].Deadline.Sub(s.now())
+	deadline := s.timers[0].Deadline
+	if s.retryAfter.After(deadline) {
+		deadline = s.retryAfter
+	}
+	d := deadline.Sub(s.now())
 	if d < 0 {
 		d = 0
 	}
@@ -227,14 +256,18 @@ func (s *Scheduler) emitDue() {
 		}
 		kept = append(kept, t)
 	}
-	s.timers = kept
 	if len(due) > 0 {
-		// Persisting before the send means a crash between firing and
-		// announcing loses the announcement, not the state.
-		if err := s.store.Save(s.timers); err != nil {
-			s.fail(fmt.Errorf("saving after %d timer(s) fired: %w", len(due), err))
+		// A failed write leaves the pending set intact. Retrying later is
+		// safer than speaking an occurrence that will reappear on restart.
+		if err := s.store.Save(kept); err != nil {
+			s.retryAfter = now.Add(time.Second)
+			s.mu.Unlock()
+			s.fail(fmt.Errorf("saving before %d timer(s) fire; delivery deferred: %w", len(due), err))
+			return
 		}
 	}
+	s.timers = kept
+	s.retryAfter = time.Time{}
 	s.mu.Unlock()
 	if len(due) == 0 {
 		return

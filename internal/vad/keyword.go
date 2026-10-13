@@ -30,15 +30,23 @@ type Keyword struct {
 	// Set before Run, alongside the capture producer's boundary.
 	captureBoundary *audio.CaptureBoundary
 
-	busyMu       sync.Mutex
-	busyUntil    time.Time
-	suspendUntil atomic.Int64
-	busyTurns    int
+	busyMu          sync.Mutex
+	busyUntil       time.Time
+	suspendUntil    atomic.Int64
+	busyTurns       int
+	epoch           atomic.Uint64
+	capturing       atomic.Bool
+	queued          atomic.Bool
+	discontinuities chan struct{}
 }
 
 func NewKeyword(p Params, detector wake.Detector, logger KeywordLogger) *Keyword {
-	return &Keyword{P: p, Detector: detector, Logger: logger}
+	return &Keyword{P: p, Detector: detector, Logger: logger, discontinuities: make(chan struct{}, 1)}
 }
+
+// Discontinuities reports capture-source loss without carrying microphone audio.
+// The session closes authorization before opening any subsequent listening window.
+func (k *Keyword) Discontinuities() <-chan struct{} { return k.discontinuities }
 
 // SetCaptureBoundary enables synchronous recovery decisions after each frame.
 // Configure it before Run; the capture producer must wait for every acknowledgement.
@@ -57,10 +65,11 @@ func (k *Keyword) SetFollowUp(frames int, acknowledge func(context.Context), res
 
 // SetInFlightWindow authorizes a bounded number of wake-free utterances after
 // a locally detected wake. A zero deadline or turn count closes the window.
-// The session must close it when its task finishes or fails.
+// The same bounded gate also serves post-answer conversation.
 func (k *Keyword) SetInFlightWindow(until time.Time, turns int) {
 	k.busyMu.Lock()
 	k.busyUntil, k.busyTurns = until, turns
+	k.epoch.Add(1)
 	k.busyMu.Unlock()
 }
 
@@ -70,9 +79,9 @@ func (k *Keyword) inFlight() bool {
 	return k.busyTurns > 0 && time.Now().Before(k.busyUntil)
 }
 
-func (k *Keyword) usedInFlightTurn() {
+func (k *Keyword) usedInFlightTurn(epoch uint64) {
 	k.busyMu.Lock()
-	if k.busyTurns > 0 {
+	if k.epoch.Load() == epoch && k.busyTurns > 0 {
 		k.busyTurns--
 	}
 	k.busyMu.Unlock()
@@ -81,12 +90,33 @@ func (k *Keyword) usedInFlightTurn() {
 // Suspend discards microphone frames while Voice speaks. ResumeAfter keeps
 // discarding the hardware playback tail before wake detection resumes.
 func (k *Keyword) Suspend() {
+	k.epoch.Add(1)
 	k.suspendUntil.Store(1<<63 - 1)
 }
 
 func (k *Keyword) ResumeAfter(tail time.Duration) {
 	k.suspendUntil.Store(time.Now().Add(tail).UnixNano())
 }
+
+// Accepts rejects audio queued before playback or a change of authorization.
+// The turn count is checked by the session: the final emitted turn has already
+// consumed the segmenter's own budget.
+func (k *Keyword) Accepts(u Utterance) bool {
+	k.queued.Store(false)
+	if u.GateEpoch != k.epoch.Load() || time.Now().UnixNano() < k.suspendUntil.Load() {
+		return false
+	}
+	if u.Keyword == "IN_FLIGHT" {
+		k.busyMu.Lock()
+		defer k.busyMu.Unlock()
+		return !k.busyUntil.IsZero() && time.Now().Before(k.busyUntil)
+	}
+	return true
+}
+
+// CanThink lets a feedback pulse wait for an utterance to finish rather than
+// repeatedly cutting off an owner speaking in the quiet gap between pulses.
+func (k *Keyword) CanThink() bool { return !k.capturing.Load() && !k.queued.Load() }
 
 func (k *Keyword) Name() string { return k.Detector.Name() }
 func (k *Keyword) Available() (bool, string) {
@@ -156,11 +186,14 @@ func (k *Keyword) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-
 			probeSilent      int
 			tailLeft         int
 			followWaited     int
+			candidateSpeech  int
+			candidateSilence int
 			peak             float64
 			followPeak       float64
 			keyword          string
 			detectedAt       time.Time
 			wakeAcknowledged bool
+			captureEpoch     uint64
 		)
 
 		restore := func() {
@@ -179,12 +212,24 @@ func (k *Keyword) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-
 			probeSilent = 0
 			tailLeft = 0
 			followWaited = 0
+			candidateSpeech = 0
+			candidateSilence = 0
 			peak = 0
 			followPeak = 0
 			keyword = ""
 			detectedAt = time.Time{}
+			k.capturing.Store(false)
 		}
 		emit := func(truncated bool) bool {
+			// There is one producer. If its single output slot is occupied,
+			// drop before copying PCM instead of deadlocking capture while
+			// the session is in STT or playback.
+			if len(out) == cap(out) {
+				k.logf("stage=segment state=dropped reason=session_busy")
+				wakeAcknowledged = false
+				reset()
+				return true
+			}
 			n := 0
 			for _, frame := range frames {
 				n += len(frame)
@@ -201,12 +246,14 @@ func (k *Keyword) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-
 				WakeMatched:      true,
 				Keyword:          keyword,
 				WakeAcknowledged: wakeAcknowledged,
+				GateEpoch:        captureEpoch,
 			}
 			wasBusy := state == busyCommand
+			k.queued.Store(true)
 			select {
 			case out <- utterance:
 				if wasBusy {
-					k.usedInFlightTurn()
+					k.usedInFlightTurn(captureEpoch)
 				}
 				// The session now owns restoring acknowledged feedback.
 				wakeAcknowledged = false
@@ -226,7 +273,15 @@ func (k *Keyword) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-
 
 		quiet := 0
 		discontinue := func() bool {
-			restore()
+			k.SetInFlightWindow(time.Time{}, 0)
+			select {
+			case k.discontinuities <- struct{}{}:
+			default:
+			}
+			if k.restore != nil {
+				k.restore()
+			}
+			wakeAcknowledged = false
 			reset()
 			quiet = 0
 			noise = 0.00015
@@ -293,20 +348,39 @@ func (k *Keyword) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-
 					quiet = 0
 					continue
 				}
+				if epoch := k.epoch.Load(); captureEpoch != epoch {
+					wakeAcknowledged = false
+					reset()
+					captureEpoch = epoch
+					quiet = 0
+				}
 				level := rms(frame)
 				if level >= threshold() {
+					k.capturing.Store(true)
 					quiet = 0
 				} else if quiet < p.Silence {
 					quiet++
+				}
+				if quiet >= p.Silence && state == armed {
+					k.capturing.Store(false)
 				}
 
 				switch state {
 				case armed:
 					if k.inFlight() {
 						if level >= threshold() {
-							followCandidate = append(followCandidate[:0], clone(frame))
+							followCandidate = append(followCandidate[:0], pre...)
+							followCandidate = append(followCandidate, clone(frame))
+							pre = pre[:0]
+							candidateSpeech, candidateSilence = 1, 0
+							captureEpoch = k.epoch.Load()
 							followPeak = level
 							state = busyProbing
+						} else {
+							pre = append(pre, clone(frame))
+							if len(pre) > followPreRoll {
+								pre = pre[1:]
+							}
 						}
 						continue
 					}
@@ -327,6 +401,8 @@ func (k *Keyword) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-
 					if match == "" {
 						continue
 					}
+					captureEpoch = k.epoch.Load()
+					k.capturing.Store(true)
 					keyword = match
 					detectedAt = time.Now()
 					state = probing
@@ -359,6 +435,7 @@ func (k *Keyword) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-
 					k.logf("stage=wake state=acknowledging source=sherpa keyword=%q latency_ms=%.3f", keyword, elapsedKeywordMS(detectedAt))
 					wakeAcknowledged = true
 					k.acknowledge(ctx)
+					captureEpoch = k.epoch.Load()
 					if ctx.Err() != nil {
 						restore()
 						return
@@ -395,24 +472,32 @@ func (k *Keyword) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-
 
 				case followUpWaiting:
 					followWaited++
-					if level >= threshold() {
+					if level >= threshold() || len(followCandidate) > 0 {
 						followCandidate = append(followCandidate, clone(frame))
+						if level >= threshold() {
+							candidateSpeech++
+							candidateSilence = 0
+						} else {
+							candidateSilence++
+						}
 						if level > followPeak {
 							followPeak = level
 						}
-						if len(followCandidate) >= minFollowSpeech {
+						if candidateSpeech >= minFollowSpeech {
 							frames = append(frames[:0], pre...)
 							frames = append(frames, followCandidate...)
 							pre = nil
 							followCandidate = nil
 							peak = followPeak
 							followPeak = 0
-							silent = 0
+							silent = candidateSilence
 							state = followUpCommand
+						} else if candidateSilence >= p.Silence || len(followCandidate) >= p.MaxUtterance {
+							followCandidate = nil
+							followPeak = 0
+							candidateSpeech, candidateSilence = 0, 0
 						}
 					} else {
-						followCandidate = nil
-						followPeak = 0
 						noise = noise*0.98 + level*0.02
 						pre = append(pre, clone(frame))
 						if len(pre) > followPreRoll {
@@ -426,23 +511,31 @@ func (k *Keyword) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-
 					}
 
 				case busyProbing:
-					if level < threshold() {
-						reset()
-						continue
-					}
+					// Unvoiced consonants and short inter-word pauses are part
+					// of speech. Count voiced frames without requiring them to
+					// be consecutive, retaining the whole candidate until the
+					// ordinary utterance silence boundary.
 					followCandidate = append(followCandidate, clone(frame))
+					if level >= threshold() {
+						candidateSpeech++
+						candidateSilence = 0
+					} else {
+						candidateSilence++
+					}
 					if level > followPeak {
 						followPeak = level
 					}
-					if len(followCandidate) >= minFollowSpeech {
+					if candidateSpeech >= minFollowSpeech {
 						frames = append(frames[:0], followCandidate...)
 						followCandidate = nil
 						peak = followPeak
 						followPeak = 0
-						silent = 0
+						silent = candidateSilence
 						keyword = "IN_FLIGHT"
 						wakeAcknowledged = true
 						state = busyCommand
+					} else if candidateSilence >= p.Silence || len(followCandidate) >= p.MaxUtterance {
+						reset()
 					}
 
 				case inlineCommand, followUpCommand, busyCommand:
