@@ -203,7 +203,6 @@ keywords_tmp=$(mktemp)
 printf '%s\n' \
   'HH EY1 V OY1 S :4.0 #0.05 @HEY_VOICE' \
   'HH EY1 B OY1 Z :4.0 #0.05 @HEY_BOYS' \
-  'V OY1 S :4.0 #0.05 @VOICE' \
   > "$keywords_tmp"
 sudo install -o "$agent_user" -g "$agent_user" -m 0644 "$keywords_tmp" /var/lib/voice/models/sherpa-kws/keywords.txt
 rm -f "$keywords_tmp"

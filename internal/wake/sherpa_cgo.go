@@ -14,13 +14,19 @@ type sherpaDetector struct {
 	spotter *sherpa.KeywordSpotter
 	stream  *sherpa.OnlineStream
 	floats  []float32
+	allowed map[string]struct{}
 }
 
-func newSherpa(c SherpaConfig) Detector { return &sherpaDetector{config: c} }
+func newSherpa(c SherpaConfig) Detector {
+	return &sherpaDetector{config: c, allowed: keywordAliases(c.Phrases)}
+}
 
 func (*sherpaDetector) Name() string { return "sherpa-onnx keyword spotter" }
 
 func (d *sherpaDetector) Available() (bool, string) {
+	if len(d.allowed) == 0 {
+		return false, "wake phrase allowlist is empty"
+	}
 	return validateSherpaFiles(d.config)
 }
 
@@ -82,7 +88,9 @@ func (d *sherpaDetector) Accept(sampleRate int, pcm []int16) (string, error) {
 		result := d.spotter.GetResult(d.stream)
 		if result != nil && result.Keyword != "" {
 			d.spotter.Reset(d.stream)
-			return result.Keyword, nil
+			if keywordAllowed(d.allowed, result.Keyword) {
+				return result.Keyword, nil
+			}
 		}
 	}
 	return "", nil

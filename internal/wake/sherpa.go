@@ -3,10 +3,12 @@ package wake
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 // SherpaConfig identifies one resident Sherpa-ONNX keyword model.
 type SherpaConfig struct {
+	Phrases           []string
 	Encoder           string
 	Decoder           string
 	Joiner            string
@@ -38,6 +40,27 @@ type ResettableDetector interface {
 // NewSherpa returns the native implementation for CGO builds and a fail-closed
 // unavailable implementation for builds that cannot link Sherpa-ONNX.
 func NewSherpa(c SherpaConfig) Detector { return newSherpa(c) }
+
+// Model-file aliases are not authorization: only the owner's configured full
+// phrases may open capture. Sherpa aliases conventionally use underscores.
+func keywordAliases(phrases []string) map[string]struct{} {
+	allowed := make(map[string]struct{}, len(phrases))
+	for _, phrase := range phrases {
+		if name := canonicalKeyword(phrase); name != "" {
+			allowed[name] = struct{}{}
+		}
+	}
+	return allowed
+}
+
+func canonicalKeyword(name string) string {
+	return strings.Join(strings.Fields(strings.ReplaceAll(strings.ToLower(name), "_", " ")), " ")
+}
+
+func keywordAllowed(allowed map[string]struct{}, keyword string) bool {
+	_, ok := allowed[canonicalKeyword(keyword)]
+	return ok
+}
 
 func validateSherpaFiles(c SherpaConfig) (bool, string) {
 	for _, required := range []struct {

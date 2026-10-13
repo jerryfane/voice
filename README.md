@@ -161,6 +161,11 @@ does not run Whisper over ambient segments. With OpenRouter configured, the
 accepted command is transcribed by the hosted primary; resident Whisper and
 `whisper-cli` remain ordered local fallbacks.
 
+Native keyword aliases must exactly match `wake.phrases` after case,
+underscore, and whitespace normalization (`HEY_VOICE` matches `hey voice`).
+Extra entries in a model's keyword file cannot authorize capture. The installers
+include only the full `HEY_VOICE` and `HEY_BOYS` phrases, not bare `VOICE`.
+
 Both interaction styles work:
 
 - Say `Hey Voice`, wait for the acknowledgement, then speak one command. Voice
@@ -189,6 +194,9 @@ work already handed to persistent OMP may still finish, and completed actions
 cannot be undone. Spoken replies are serialized with the thinking sound.
 Microphone frames during playback and its hardware tail are discarded. Voice
 does not repeatedly announce “you can say status or cancel.”
+Unrecognized wake-free speech during a running task is ignored silently and
+does not call the optional front model. Explicit status, cancellation, and local
+controls still work; free-form front-desk requests require a fresh wake phrase.
 
 The extra wake-free window and cheap front desk are **off by default**. For a
 short trial with a Sherpa wake detector, add these settings to the existing

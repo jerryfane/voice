@@ -110,6 +110,7 @@ func Build(c config.Config) *Assistant {
 	if c.Wake.Detector == "sherpa" && c.Wake.Sherpa != nil {
 		s := c.Wake.Sherpa
 		detector := wake.NewSherpa(wake.SherpaConfig{
+			Phrases:           c.Wake.Phrases,
 			Encoder:           s.Encoder,
 			Decoder:           s.Decoder,
 			Joiner:            s.Joiner,

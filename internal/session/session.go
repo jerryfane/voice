@@ -554,6 +554,10 @@ func (a *Assistant) Run(ctx context.Context) error {
 				case "correction":
 					return a.speakLogged(ctx, "I can't change work already underway. Please ask again after it finishes.")
 				default:
+					if followUp {
+						a.logf("stage=busy state=ignored reason=not_a_control")
+						return true
+					}
 					reply := "I'm still working on your previous request."
 					if a.Front != nil && time.Now().Before(active.until) && active.ctx.Err() == nil {
 						if candidate, err := a.frontReply(active.ctx, command); err == nil {
@@ -998,7 +1002,7 @@ func inFlightControl(command string) string {
 	switch normalized {
 	case "stop", "cancel", "cancel that", "cancel the request", "stop working on that", "stop that request":
 		return "cancel"
-	case "status", "what's happening", "what s happening", "what is happening", "are you done", "how's it going", "how s it going":
+	case "status", "what is the status", "what's the status", "what s the status", "what's happening", "what s happening", "what is happening", "are you done", "how's it going", "how s it going":
 		return "status"
 	}
 	if strings.HasPrefix(normalized, "actually ") || strings.HasPrefix(normalized, "make that ") ||
