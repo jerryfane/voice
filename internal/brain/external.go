@@ -88,6 +88,7 @@ The user said: %q
 Available local devices: %s
 
 Use your tools when they help. You may inspect or change files in your workspace, run commands, search the web, and use the browser. Do not call the voice executable to control listed local devices; request those through actions instead.
+Complexity alone is not a permission boundary: complete permitted research and workspace work with your tools before answering. If you collaborate, actually contact the peer and wait for its result. Never finish with only a promise to assign work. A proposal requests owner approval; it is not an assignment or a running task.
 
 After completing the work, return ONLY one JSON object with this exact shape:
 {"speak":"short natural response spoken aloud","actions":[{"device":"configured id","op":"advertised capability","args":{}}],"proposal":{"request":"the user's words, verbatim, one line","title":"short interpretation","scope":"what building it would involve","risks":"material risks"}}

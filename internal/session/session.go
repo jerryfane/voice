@@ -86,23 +86,9 @@ func (a *Assistant) HandleText(ctx context.Context, text string) (p brain.Plan, 
 	if err != nil {
 		return p, err
 	}
-	// A planner may ignore cancellation and return a plan after Run has
-	// stopped. Never execute its late actions or record its proposal.
-	if err := ctx.Err(); err != nil {
-		return p, err
-	}
-	// Recorded before the actions run: a device failure must not be able to
-	// swallow a request the owner has not heard about yet.
-	note := a.recordProposal(brain.Plan{Proposal: p.Proposal})
-	readReply, err := a.ApplyActions(ctx, p.Actions)
+	p, err = a.ApplyPlan(ctx, p)
 	if err != nil {
 		return p, err
-	}
-	if readReply != "" {
-		p.Speak = readReply
-	}
-	if note != "" {
-		p.Speak = withNote(p.Speak, note)
 	}
 	if p.Source == "rules" {
 		a.logf("stage=route state=local source=rules ms=%.3f", sinceMS(started))
@@ -110,18 +96,38 @@ func (a *Assistant) HandleText(ctx context.Context, text string) (p brain.Plan, 
 	return p, nil
 }
 
-// recordProposal stores a capability the agent could not deliver and returns
-// the reply to speak. The owner asked to be told out loud that the request
-// went to them for approval, because the alternative - an honest refusal and
-// nothing else - is how the thinking-sound-volume request was lost for days.
-// A storage failure costs the record, never the answer.
+// ApplyPlan is shared by spoken/text requests and the structured execute CLI.
+// Proposal receipts come from durable state, never the model's handoff claims.
+func (a *Assistant) ApplyPlan(ctx context.Context, p brain.Plan) (brain.Plan, error) {
+	if err := ctx.Err(); err != nil {
+		return p, err
+	}
+	if p.Proposal != nil {
+		p.Speak = a.recordProposal(p)
+	}
+	readReply, err := a.ApplyActions(ctx, p.Actions)
+	if err != nil {
+		return p, err
+	}
+	if readReply != "" {
+		if p.Proposal != nil {
+			p.Speak = withNote(readReply, p.Speak)
+		} else {
+			p.Speak = readReply
+		}
+	}
+	return p, nil
+}
+
+// recordProposal acknowledges only a persisted request, not owner notification
+// or implementation. Failure must not retain an unverified model promise.
 func (a *Assistant) recordProposal(p brain.Plan) string {
-	if p.Proposal == nil || a.Proposals == nil {
-		return p.Speak
+	if a.Proposals == nil {
+		return "I couldn't save that request because work approvals are disabled. No work has been started."
 	}
 	request := strings.TrimSpace(p.Proposal.Request)
 	if request == "" {
-		return p.Speak
+		return "I couldn't save an empty work request. Please tell me what you want changed."
 	}
 	stored, created, err := a.Proposals.Record(proposal.Proposal{
 		Request: request,
@@ -131,29 +137,31 @@ func (a *Assistant) recordProposal(p brain.Plan) string {
 	}, a.now())
 	if err != nil {
 		a.logf("stage=proposal state=failed request=%q err=%v", request, err)
-		return p.Speak
+		return "I couldn't save your request for approval. No work has been started."
 	}
 	a.logf("stage=proposal state=ok id=%s created=%v status=%s occurrences=%d", stored.ID, created, stored.Status, stored.Occurrences)
-	return withNote(p.Speak, proposalNote(stored, created))
+	return proposalNote(stored)
 }
 
-// proposalNote is played aloud, so each answer is one short sentence. A
-// repeat says the request is already with the owner: saying it was sent again
-// would suggest a second request exists, and the listener would stop asking
-// why nothing has happened.
-func proposalNote(stored proposal.Proposal, created bool) string {
-	if created {
-		return "I've sent that to the owner for approval."
-	}
+// Each state acknowledges only the boundary already crossed.
+func proposalNote(stored proposal.Proposal) string {
 	switch stored.Status {
 	case proposal.Declined:
-		return "I already sent that to the owner, and they declined it."
-	case proposal.Approved, proposal.IssueCreated, proposal.Implementing:
-		return "I already sent that to the owner, and it's approved and being worked on."
+		return "That request was declined. No new work has been started."
+	case proposal.Approved:
+		return "Your request is approved and waiting for the implementation task to start."
+	case proposal.IssueCreated:
+		return "An issue has been filed for your approved request. The implementation task hasn't started yet."
+	case proposal.Implementing:
+		return "The implementation task has been started for your approved request; it isn't marked complete yet."
 	case proposal.Completed:
-		return "I already sent that to the owner, and it's been done."
+		return "That request is marked complete."
+	case proposal.Failed:
+		return "That work request failed. It needs attention before it can continue."
+	case proposal.Expired:
+		return "That approval request expired. No new work has been started."
 	default:
-		return "I already sent that to the owner. It's still waiting for approval."
+		return "I've saved your request for approval. Work won't start until you approve it."
 	}
 }
 

@@ -60,8 +60,18 @@ proposals() { sudo -n -u "$agent_user" "$voice_bin" --config "$config" proposals
 # several fields.
 row_field() { printf '%s\n' "$1" | jq -r --arg k "$2" '.[$k] // "" | tostring'; }
 
-if ! cfg=$("$voice_bin" --config "$config" config 2>/dev/null); then
-  echo "cannot read $config as $owner; rerun scripts/install-local.sh, which grants the owner read access" >&2
+# This is an owner-side read, not a reason to run the broker as root or grant
+# voice-agent owner privileges. The installer keeps root ownership, agent
+# group read access and a read-only ACL for the owner.
+if [ ! -r "$config" ]; then
+  echo "cannot read $config as $owner; restore the root-owned config's agent-group and owner-ACL read access with scripts/install-local.sh" >&2
+  exit 1
+fi
+# `voice config` also validates the configuration and initializes the runtime.
+# Keep its actual diagnostic: a rejected setting or runtime failure is not a
+# permission problem, and reinstalling cannot be prescribed for every error.
+if ! cfg=$("$voice_bin" --config "$config" config); then
+  echo "cannot load $config as $owner; voice config failed (see diagnostic above)" >&2
   exit 1
 fi
 cfg_get() { printf '%s\n' "$cfg" | jq -r "$1"; }

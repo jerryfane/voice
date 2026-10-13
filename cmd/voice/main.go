@@ -254,12 +254,9 @@ func run(args []string) error {
 		if err := json.Unmarshal([]byte(args[1]), &p); err != nil {
 			return fmt.Errorf("decode plan: %w", err)
 		}
-		readReply, err := a.ApplyActions(ctx, p.Actions)
+		p, err = a.ApplyPlan(ctx, p)
 		if err != nil {
 			return err
-		}
-		if readReply != "" {
-			p.Speak = readReply
 		}
 		if p.Speak == "" {
 			return nil

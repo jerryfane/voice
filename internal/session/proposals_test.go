@@ -63,13 +63,11 @@ func proposalAssistant(t *testing.T, planner brain.Planner, store *proposal.Stor
 	}, tts, journal
 }
 
-// The whole feature exists because a request the account could not do was
-// answered and then forgotten, so the record must survive and the person who
-// spoke must hear that it went to the owner.
-func TestUnsupportedRequestIsRecordedAndSpokenAsSentToTheOwner(t *testing.T) {
+// A restricted request must survive without implying it has started.
+func TestUnsupportedRequestIsRecordedPendingApproval(t *testing.T) {
 	store := proposalStore(t)
 	planner := &proposingPlanner{
-		reply: "I can't change that from here",
+		reply: "I assigned this to an implementation agent.",
 		proposal: brain.Proposal{
 			Request: "make the thinking sound volume configurable",
 			Title:   "Configurable thinking sound volume",
@@ -77,7 +75,7 @@ func TestUnsupportedRequestIsRecordedAndSpokenAsSentToTheOwner(t *testing.T) {
 			Risks:   "none beyond a new config field",
 		},
 	}
-	a, tts, journal := proposalAssistant(t, planner, store, "hey voice make the thinking sound volume configurable")
+	a, tts, _ := proposalAssistant(t, planner, store, "hey voice make the thinking sound volume configurable")
 	if err := a.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -92,23 +90,17 @@ func TestUnsupportedRequestIsRecordedAndSpokenAsSentToTheOwner(t *testing.T) {
 	if stored[0].Request != "make the thinking sound volume configurable" {
 		t.Fatalf("recorded request %q, want the spoken words verbatim", stored[0].Request)
 	}
+	if stored[0].Status != proposal.Pending || !stored[0].Notified.IsZero() || stored[0].Issue != 0 || stored[0].Agent != "" {
+		t.Fatalf("request advanced without owner approval: %+v", stored[0])
+	}
 	said := tts.spoken()
-	if !saidContaining(said, "can't change that") {
-		t.Fatalf("the answer itself was dropped: %q", said)
-	}
-	if !saidContaining(said, "sent that to the owner") {
-		t.Fatalf("reply never tells the owner it was sent: %q", said)
-	}
-	if !strings.Contains(journal.String(), "stage=proposal") {
-		t.Fatalf("no stage=proposal line in the journal: %q", journal.String())
+	if len(said) != 1 || strings.Contains(said[0], planner.reply) {
+		t.Fatalf("unverified assignment claim escaped into speech: %q", said)
 	}
 }
 
-// Asking twice must not look like two separate requests, to the owner's queue
-// or to the person waiting: the second answer has to say it is still pending,
-// otherwise a listener hears a fresh filing every time and never learns that
-// nothing is moving.
-func TestRepeatedRequestRecordsOnceAndSaysItIsStillWaiting(t *testing.T) {
+// Repeated requests retain one pending approval, not multiple assignments.
+func TestRepeatedRequestRecordsOnce(t *testing.T) {
 	store := proposalStore(t)
 	planner := &proposingPlanner{
 		reply:    "I can't install software from this account",
@@ -125,11 +117,11 @@ func TestRepeatedRequestRecordsOnceAndSaysItIsStillWaiting(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- a.Run(context.Background()) }()
 	injectWake(utterances)
-	first := awaitAsync(t, synth.spoken)
+	awaitAsync(t, synth.spoken)
 	// A repeat after the first response is complete uses the stored
 	// proposal; an in-flight repeat is instead answered by the busy path.
 	injectWake(utterances)
-	second := awaitAsync(t, synth.spoken)
+	awaitAsync(t, synth.spoken)
 	close(utterances)
 	if err := awaitAsync(t, done); err != nil {
 		t.Fatal(err)
@@ -142,50 +134,78 @@ func TestRepeatedRequestRecordsOnceAndSaysItIsStillWaiting(t *testing.T) {
 	if len(stored) != 1 {
 		t.Fatalf("recorded %d proposals for the same request, want 1", len(stored))
 	}
-	said := []string{first, second}
-	if len(said) != 2 {
-		t.Fatalf("spoke %d replies, want 2: %q", len(said), said)
-	}
-	if !strings.Contains(strings.ToLower(said[1]), "still waiting") {
-		t.Fatalf("repeat reply does not say the request is still waiting: %q", said[1])
-	}
-	if strings.Contains(strings.ToLower(said[1]), "i've sent") {
-		t.Fatalf("repeat reply claims a second request was filed: %q", said[1])
+	if stored[0].Occurrences != 2 || stored[0].Status != proposal.Pending {
+		t.Fatalf("repeat changed approval or lost occurrence: %+v", stored[0])
 	}
 }
 
-// Proposals are optional. Without a store the assistant must still answer,
-// because a missing database is not a reason to stop talking.
-func TestNoProposalStoreStillAnswers(t *testing.T) {
+// Disabled approvals must not repeat an invented assignment.
+func TestNoProposalStoreDoesNotClaimHandoff(t *testing.T) {
 	planner := &proposingPlanner{
-		reply:    "I can't do that from here",
+		reply:    "I assigned this to an implementation agent.",
 		proposal: brain.Proposal{Request: "rewrite the wake word detector", Title: "New wake word detector"},
 	}
 	a, tts, _ := proposalAssistant(t, planner, nil, "hey voice rewrite the wake word detector")
 	if err := a.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !saidContaining(tts.spoken(), "can't do that") {
-		t.Fatalf("answer lost when no store is configured: %q", tts.spoken())
+	if said := tts.spoken(); len(said) != 1 || strings.Contains(said[0], planner.reply) {
+		t.Fatalf("unverified assignment claim escaped into speech: %q", said)
 	}
 }
 
-// A broken store costs the record, never the reply: silence would be the
-// worst of both, the request neither kept nor answered.
-func TestProposalStoreFailureStillSpeaksTheAnswer(t *testing.T) {
+// A failed write must not sound like successful dispatch.
+func TestProposalStoreFailureDoesNotClaimHandoff(t *testing.T) {
 	store := proposalStore(t)
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
 	planner := &proposingPlanner{
-		reply:    "I can't reach the code from here",
+		reply:    "I assigned this to an implementation agent.",
 		proposal: brain.Proposal{Request: "add a bedtime routine", Title: "Bedtime routine"},
 	}
 	a, tts, _ := proposalAssistant(t, planner, store, "hey voice add a bedtime routine")
 	if err := a.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !saidContaining(tts.spoken(), "can't reach the code") {
-		t.Fatalf("answer lost when the store failed: %q", tts.spoken())
+	if said := tts.spoken(); len(said) != 1 || strings.Contains(said[0], planner.reply) {
+		t.Fatalf("unverified assignment claim escaped into speech: %q", said)
+	}
+}
+
+func TestPreparedPlanPreservesRequestOnActionFailure(t *testing.T) {
+	store := proposalStore(t)
+	a := &Assistant{Devices: device.NewRegistry(), Proposals: store}
+	_, err := a.ApplyPlan(context.Background(), brain.Plan{
+		Proposal: &brain.Proposal{Request: "add a bedtime routine"},
+		Actions:  []brain.Action{{Device: "missing", Op: device.OpOn}},
+	})
+	if err == nil {
+		t.Fatal("missing device must fail")
+	}
+	stored, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].Request != "add a bedtime routine" || stored[0].Status != proposal.Pending {
+		t.Fatalf("device failure lost or approved the request: %+v", stored)
+	}
+}
+
+func TestCancelledPreparedPlanDoesNotRecordRequest(t *testing.T) {
+	store := proposalStore(t)
+	a := &Assistant{Devices: device.NewRegistry(), Proposals: store}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := a.ApplyPlan(ctx, brain.Plan{Proposal: &brain.Proposal{Request: "add a bedtime routine"}})
+	if err != context.Canceled {
+		t.Fatalf("cancelled plan returned %v", err)
+	}
+	stored, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("cancelled request was persisted: %+v", stored)
 	}
 }

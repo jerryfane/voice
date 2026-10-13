@@ -765,8 +765,17 @@ first time someone speaks.
 “I cannot do that” loses the request. When Voice cannot do something — change
 its own code, install software, anything needing the `pi` account — it records
 a durable proposal instead: your request in your own words, its reading of
-what you meant, a proposed scope and the material risks. It tells you it has
-sent a request for approval, and the turn ends there.
+what you meant, a proposed scope and the material risks. It confirms the request
+was saved and that approval is required before work starts. A saved proposal is
+not a delivered approval question, an assignment, or a running implementation.
+Research and work permitted inside the agent's workspace are performed with its
+tools; task complexity alone is not a reason to propose or promise a handoff.
+
+Both spoken requests and `voice execute` persist proposals before local device
+actions. Proposal replies are generated from the stored state, replacing model
+claims that work was assigned. Disabled approvals or a failed write are reported
+as failures to save; approved, issue-created, implementing, failed and completed
+requests have distinct receipts.
 
 Nothing else happens until you say so. A spoken sentence can only create a
 pending proposal; it cannot file an issue, write to a repository, or start an
@@ -791,6 +800,7 @@ taking requests while it waits.
 ```json
 "proposals": {
   "enabled": true,
+  "file": "/var/lib/voice/proposals.db",
   "approver": "",
   "repo": "jerryfane/voice",
   "max_per_hour": 4,
@@ -806,8 +816,15 @@ proposal approved by some other agent is not a proposal approved by you.
 Asking for the same thing again raises an occurrence count on the existing
 proposal instead of producing a second one, `max_per_hour` and `retry_after`
 bound how often you can be asked, and a proposal you never answer expires
-after `expire`. State lives in `proposals.db` next to the timers database, so
-a pending proposal survives a restart.
+after `expire`. The restricted installer pins `proposals.file` to
+`/var/lib/voice/proposals.db` unless a custom path is already configured. This
+keeps the listener, owner broker and CLI on one durable queue even when their
+`XDG_STATE_HOME` values differ; a pending proposal survives a restart.
+
+The owner-side broker must be able to read `/etc/voice/config.json`. The installer
+uses `root:voice-agent`, mode `0640`, with a read ACL for the owner; configuration
+updates must preserve that ACL. Do not make the file world-readable. Broker
+diagnostics distinguish missing read access from configuration-loading errors.
 
 ```sh
 voice proposals list

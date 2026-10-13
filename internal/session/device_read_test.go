@@ -8,6 +8,7 @@ import (
 
 	"github.com/jerryfane/voice/internal/brain"
 	"github.com/jerryfane/voice/internal/device"
+	"github.com/jerryfane/voice/internal/proposal"
 )
 
 type readStateDevice struct {
@@ -45,8 +46,12 @@ func TestHandleTextSpeaksReadStateNotPlannerGuessAndPreservesProposal(t *testing
 	if !strings.Contains(plan.Speak, "front lock is locked.") || strings.Contains(plan.Speak, "unlocked") {
 		t.Fatalf("unverified planner claim escaped: %q", plan.Speak)
 	}
-	if !strings.Contains(plan.Speak, "owner for approval") {
-		t.Fatalf("read state swallowed proposal notice: %q", plan.Speak)
+	stored, err := a.Proposals.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].Request != "support another device" || stored[0].Status != proposal.Pending {
+		t.Fatalf("device read lost or approved the request: %+v", stored)
 	}
 	if lock.calls != 1 {
 		t.Fatalf("state read executed %d times", lock.calls)

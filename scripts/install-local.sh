@@ -252,6 +252,9 @@ fi
 # the first jq died, the second produced an empty document, and a 0-byte
 # config was then installed OVER the working one. The single-jq form this
 # replaced aborted instead. Introduced by me and caught in review.
+# Pin the installed proposal store: voice.service sets XDG_STATE_HOME=/var/lib,
+# but owner-side sudo CLI calls do not. An environment-derived default split
+# spoken requests and owner decisions between two unrelated databases.
 config_filter="$wake_filter |
   .wake.detector = \"sherpa\" |
   .wake.sherpa = {\"encoder\":\"/var/lib/voice/models/sherpa-kws/encoder.int8.onnx\",\"decoder\":\"/var/lib/voice/models/sherpa-kws/decoder.onnx\",\"joiner\":\"/var/lib/voice/models/sherpa-kws/joiner.int8.onnx\",\"tokens\":\"/var/lib/voice/models/sherpa-kws/tokens.txt\",\"keywords\":\"/var/lib/voice/models/sherpa-kws/keywords.txt\",\"num_threads\":1,\"max_active_paths\":4,\"keywords_score\":4,\"keywords_threshold\":0.05} |
@@ -273,6 +276,7 @@ config_filter="$wake_filter |
   .brain.jev //= {\"endpoint\":\"https://openrouter.ai/api/alpha/decisions\",\"model\":\"typesafe/jev-1.13\",\"api_key_env\":\"OPENROUTER_API_KEY\",\"confidence\":0.85,\"timeout\":\"2s\"} |
   if .brain.jev.endpoint == \"https://openrouter.ai/api/v1/api/alpha/decisions\" then .brain.jev.endpoint = \"https://openrouter.ai/api/alpha/decisions\" else . end |
   .proposals.enabled //= true |
+  .proposals.file = (if (.proposals.file // \"\") == \"\" then \"/var/lib/voice/proposals.db\" else .proposals.file end) |
   .proposals.approver = (if (.proposals.approver // \"\") == \"\" then \$approver else .proposals.approver end) |
   .proposals.repo //= \"jerryfane/voice\""
 sudo jq --arg approver "$approver_seat" "$config_filter" /etc/voice/config.json > /tmp/voice-config.json
