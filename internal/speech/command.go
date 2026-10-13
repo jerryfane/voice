@@ -25,6 +25,9 @@ type CommandTranscriber struct {
 	Model   string
 	Timeout time.Duration
 	Faults  faults.Reporter
+	// Vocabulary is substituted only at an explicit {vocabulary} argv token.
+	// No flags are guessed or appended for arbitrary command engines.
+	Vocabulary string
 }
 
 // NewCommandTranscriber builds a transcriber. report receives failures that
@@ -329,7 +332,13 @@ func (t *CommandTranscriber) Transcribe(ctx context.Context, pcm []int16, f audi
 	if err = tmp.Close(); err != nil {
 		return "", err
 	}
-	argv := proc.Expand(t.Argv, map[string]string{"file": name, "model": t.Model})
+	// Expand in one pass so vocabulary containing another template spelling
+	// remains literal data, rather than depending on map iteration order.
+	replacer := strings.NewReplacer("{file}", name, "{model}", t.Model, "{vocabulary}", t.Vocabulary)
+	argv := make([]string, len(t.Argv))
+	for i, arg := range t.Argv {
+		argv[i] = replacer.Replace(arg)
+	}
 	stdin := []byte(nil)
 	if !contains(t.Argv, "{file}") {
 		stdin = audio.EncodeWAV(pcm, f)

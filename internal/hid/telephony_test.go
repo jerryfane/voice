@@ -1,12 +1,15 @@
 package hid
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // powerConfDescriptor is the HID report descriptor of the Anker PowerConf
@@ -357,5 +360,317 @@ func TestLogReadyRecordsThePathAndCapabilities(t *testing.T) {
 	}
 	if len(stream) != 2 || !strings.Contains(stream[1], "state=written") {
 		t.Fatalf("a successful write must add a distinguishable line, got %v", stream)
+	}
+}
+
+func TestOpenAndReconnectingConstructorErrors(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	for _, tc := range []struct {
+		name string
+		open func(string) (*Telephony, error)
+	}{
+		{"Open", Open},
+		{"NewReconnecting", NewReconnecting},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if dev, err := tc.open(" \t"); dev != nil || err == nil {
+				t.Fatalf("empty path: device=%v err=%v", dev, err)
+			}
+			dev, err := tc.open(missing)
+			if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("missing path: err=%v", err)
+			}
+			var warning *DescriptorWarning
+			if errors.As(err, &warning) {
+				t.Fatal("missing node was classified as a descriptor warning")
+			}
+			if (dev != nil) != (tc.name == "NewReconnecting") {
+				t.Fatalf("missing path: unexpected handle %v", dev)
+			}
+			node := filepath.Join(t.TempDir(), "descriptor-unavailable")
+			if err := os.WriteFile(node, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dev, err = tc.open(node)
+			if dev == nil || !errors.As(err, &warning) {
+				t.Fatalf("descriptor unavailable: device=%v err=%v", dev, err)
+			}
+			if err := dev.SetReportBit(StandardOffHook, true); err != nil {
+				t.Fatalf("standard fallback: %v", err)
+			}
+		})
+	}
+}
+
+func TestReconnectingMissingStartupNodeBecomesAvailable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "speakerphone")
+	dev, err := NewReconnecting(path)
+	if dev == nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing startup node: device=%v err=%v", dev, err)
+	}
+	if err := dev.SetReportBit(StandardOffHook, true); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing node accepted off-hook: %v", err)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var warning *DescriptorWarning
+	if err := dev.Reopen(); !errors.As(err, &warning) {
+		t.Fatalf("present node without descriptor: %v", err)
+	}
+	if dev.Has(PageLED, LEDOffHook) {
+		t.Fatal("unreadable descriptor advertised a control")
+	}
+	// The failed startup write must not leak into this capture's first report.
+	if err := dev.SetReportBit(Bit{ReportID: 2, Byte: 0, Mask: 0x10, Payload: 2}, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, path); string(got) != string([]byte{2, 0x10, 0}) {
+		t.Fatalf("retained startup bits survived reopen: % x", got)
+	}
+	if err := dev.SetReportBit(StandardOffHook, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := dev.SetReportBit(StandardOffHook, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, path); string(got) != string([]byte{2, 0x10, 0}) {
+		t.Fatalf("release disturbed shared indicator: % x", got)
+	}
+}
+
+func TestReopenRefreshesStableSymlinkDescriptorAndReportState(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first-node")
+	second := filepath.Join(dir, "second-node")
+	path := filepath.Join(dir, "speakerphone")
+	for _, node := range []string{first, second} {
+		if err := os.WriteFile(node, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(first, path); err != nil {
+		t.Fatal(err)
+	}
+	dev, err := NewReconnecting(path)
+	var warning *DescriptorWarning
+	if dev == nil || !errors.As(err, &warning) {
+		t.Fatalf("constructor: device=%v err=%v", dev, err)
+	}
+	// The replacement moves mute to report 7 and no longer advertises mic.
+	replacement := []byte{
+		0x05, 0x08, 0x09, 0x09, 0x15, 0x00, 0x25, 0x01,
+		0x85, 0x07, 0x75, 0x01, 0x95, 0x01, 0x91, 0x02,
+	}
+	load := func(path string) ([]byte, error) {
+		node, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return nil, err
+		}
+		if node == first {
+			return powerConfDescriptor, nil
+		}
+		if node == second {
+			return replacement, nil
+		}
+		return nil, fmt.Errorf("unexpected node %s", node)
+	}
+	if err := dev.reopen(load); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := dev.Set(PageLED, LEDMic, true); !ok || err != nil {
+		t.Fatalf("first mic indicator: ok=%v err=%v", ok, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(second, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := dev.reopen(load); err != nil {
+		t.Fatal(err)
+	}
+	if dev.Has(PageLED, LEDMic) || strings.Contains(dev.Describe(), "mic LED") {
+		t.Fatal("replacement retained the old descriptor")
+	}
+	if ok, err := dev.Set(PageLED, LEDMute, true); !ok || err != nil {
+		t.Fatalf("replacement mute: ok=%v err=%v", ok, err)
+	}
+	if got := read(t, second); string(got) != string([]byte{7, 1}) {
+		t.Fatalf("replacement report = % x, want 07 01", got)
+	}
+	if err := dev.SetReportBit(StandardOffHook, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, second); string(got) != string([]byte{2, 1, 0}) {
+		t.Fatalf("old report state survived replacement: % x", got)
+	}
+	if got := read(t, first); string(got) != string([]byte{2, 0x10, 0}) {
+		t.Fatalf("replacement writes reached old node: % x", got)
+	}
+	if err := os.Remove(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := dev.Reopen(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dangling symlink: %v", err)
+	}
+	if dev.Has(PageLED, LEDMute) || len(dev.state) != 0 {
+		t.Fatal("missing replacement retained descriptor or state")
+	}
+}
+
+func TestReopenDescriptorWarningsResetOldCapabilities(t *testing.T) {
+	node := filepath.Join(t.TempDir(), "speakerphone")
+	if err := os.WriteFile(node, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dev, _ := NewReconnecting(node)
+	unverified := errors.New("descriptor length unavailable")
+	for _, tc := range []struct {
+		name string
+		desc []byte
+		err  error
+		have bool
+	}{
+		{"unavailable", nil, os.ErrPermission, false},
+		{"empty", nil, nil, false},
+		{"malformed", []byte{0x05}, nil, false},
+		{"unverified", powerConfDescriptor, unverified, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := dev.reopen(func(string) ([]byte, error) { return powerConfDescriptor, nil }); err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := dev.Set(PageLED, LEDMic, true); !ok || err != nil {
+				t.Fatalf("seed retained state: ok=%v err=%v", ok, err)
+			}
+			err := dev.reopen(func(string) ([]byte, error) { return tc.desc, tc.err })
+			var warning *DescriptorWarning
+			if !errors.As(err, &warning) {
+				t.Fatalf("descriptor failure was not a warning: %v", err)
+			}
+			if tc.err != nil && !errors.Is(err, tc.err) {
+				t.Fatalf("descriptor warning lost cause: %v", err)
+			}
+			if got := dev.Has(PageLED, LEDMic); got != tc.have {
+				t.Fatalf("has mic=%v, want %v", got, tc.have)
+			}
+			if err := dev.SetReportBit(StandardOffHook, true); err != nil {
+				t.Fatal(err)
+			}
+			if got := read(t, node); string(got) != string([]byte{2, 1, 0}) {
+				t.Fatalf("descriptor refresh retained old indicator: % x", got)
+			}
+		})
+	}
+}
+
+func TestConcurrentReopenAndTelephonyAPIs(t *testing.T) {
+	node := filepath.Join(t.TempDir(), "speakerphone")
+	if err := os.WriteFile(node, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dev, _ := NewReconnecting(node)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for worker := range 6 {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			<-start
+			for range 40 {
+				switch worker {
+				case 0:
+					if err := dev.reopen(func(string) ([]byte, error) { return powerConfDescriptor, nil }); err != nil {
+						t.Error(err)
+					}
+				case 1:
+					var warning *DescriptorWarning
+					if err := dev.Reopen(); !errors.As(err, &warning) {
+						t.Errorf("refresh unreadable descriptor: %v", err)
+					}
+				case 2:
+					dev.Has(PageLED, LEDMic)
+					dev.Describe()
+				case 3:
+					if _, err := dev.Set(PageLED, LEDMic, true); err != nil {
+						t.Error(err)
+					}
+					if err := dev.SetReportBit(StandardOffHook, false); err != nil {
+						t.Error(err)
+					}
+				case 4:
+					dev.SetLogger(func(string, ...any) {})
+					dev.SetLogger(nil)
+				case 5:
+					dev.LogReady()
+				}
+			}
+		}(worker)
+	}
+	close(start)
+	wg.Wait()
+}
+
+func TestTelephonyWriteDoesNotBlockOpeningUnavailableTransport(t *testing.T) {
+	node := filepath.Join(t.TempDir(), "speakerphone")
+	if err := syscall.Mkfifo(node, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dev, _ := NewReconnecting(node)
+	done := make(chan error, 1)
+	go func() { done <- dev.SetReportBit(StandardOffHook, true) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, syscall.ENXIO) {
+			t.Fatalf("nonblocking FIFO without reader: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("report write blocked opening an unavailable transport")
+	}
+}
+
+func TestTelephonyWriteDoesNotWaitForTransportCapacity(t *testing.T) {
+	node := filepath.Join(t.TempDir(), "speakerphone")
+	if err := syscall.Mkfifo(node, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := syscall.Open(node, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := syscall.Close(reader); err != nil {
+			t.Error(err)
+		}
+	}()
+	writer, err := syscall.Open(node, syscall.O_WRONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := syscall.Close(writer); err != nil {
+			t.Error(err)
+		}
+	}()
+	var chunk [4096]byte
+	for {
+		if _, err := syscall.Write(writer, chunk[:]); err != nil {
+			if !errors.Is(err, syscall.EAGAIN) {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	dev, _ := NewReconnecting(node)
+	done := make(chan error, 1)
+	go func() { done <- dev.SetReportBit(StandardOffHook, true) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, syscall.EAGAIN) {
+			t.Fatalf("full nonblocking transport: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("report write waited for transport capacity")
 	}
 }

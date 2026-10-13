@@ -25,6 +25,8 @@ func Default() Format { return Format{SampleRate: 16000, Channels: 1} }
 // fixed-size buffers into the returned channel. The samples channel is closed
 // when capture stops. Any fatal error is delivered on the error channel before
 // the samples channel closes.
+// A nil PCM buffer marks a capture discontinuity: consumers must discard
+// incomplete utterances and pre-roll, never concatenate across this boundary.
 type Recorder interface {
 	Stream(ctx context.Context) (<-chan []int16, <-chan error)
 	// Format reports the PCM shape the recorder emits.

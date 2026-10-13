@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jerryfane/voice/internal/faults"
@@ -26,6 +27,9 @@ type CommandRecorder struct {
 	frameSamples int
 	telephony    *hid.Telephony
 	faults       faults.Reporter
+	// ReopenHID refreshes a configured stable HID path before every attempt.
+	// Set before Stream; the shared handle remains valid for feedback writers.
+	ReopenHID bool
 }
 
 // NewCommandRecorder builds a recorder. frameSamples controls the size of each
@@ -42,6 +46,9 @@ func NewCommandRecorder(argv []string, device string, f Format, frameSamples int
 
 func (r *CommandRecorder) Format() Format { return r.format }
 func (r *CommandRecorder) Describe() string {
+	if len(r.argv) == 0 {
+		return "empty capture command"
+	}
 	return fmt.Sprintf("command input %q on %s (%d Hz mono)", r.argv[0], r.device, r.format.SampleRate)
 }
 
@@ -74,7 +81,7 @@ func (r *CommandRecorder) setOffHook(on bool) error {
 
 func (r *CommandRecorder) Stream(ctx context.Context) (<-chan []int16, <-chan error) {
 	out := make(chan []int16, 8)
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
 		defer close(out)
 		defer close(errCh)
@@ -82,9 +89,17 @@ func (r *CommandRecorder) Stream(ctx context.Context) (<-chan []int16, <-chan er
 			errCh <- errors.New("capture command is empty")
 			return
 		}
-		if err := r.setOffHook(true); err != nil {
-			errCh <- err
-			return
+		if r.ReopenHID && r.telephony != nil {
+			if err := r.telephony.Reopen(); err != nil {
+				var warning *hid.DescriptorWarning
+				if !errors.As(err, &warning) {
+					errCh <- err
+					return
+				}
+				if r.faults != nil {
+					r.faults.Report(err)
+				}
+			}
 		}
 		// Clearing off-hook happens as capture unwinds, when nothing is left
 		// to return an error to: a silent failure here leaves the
@@ -94,6 +109,10 @@ func (r *CommandRecorder) Stream(ctx context.Context) (<-chan []int16, <-chan er
 				r.faults.Report(err)
 			}
 		}()
+		if err := r.setOffHook(true); err != nil {
+			errCh <- err
+			return
+		}
 
 		vars := map[string]string{
 			"device": r.device, "rate": strconv.Itoa(r.format.SampleRate),
@@ -101,12 +120,24 @@ func (r *CommandRecorder) Stream(ctx context.Context) (<-chan []int16, <-chan er
 		}
 		argv := proc.Expand(r.argv, vars)
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+		// Capture helpers may launch children. Kill the process group and
+		// close our read end so cancellation also unblocks inherited pipes.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.WaitDelay = 500 * time.Millisecond
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			errCh <- err
 			return
 		}
-		var stderr bytes.Buffer
+		cmd.Cancel = func() error {
+			_ = stdout.Close() // discard: cancellation closes a read-only pipe; an already-closed pipe needs no recovery.
+			err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			if errors.Is(err, syscall.ESRCH) {
+				return nil
+			}
+			return err
+		}
+		var stderr captureStderr
 		cmd.Stderr = &stderr
 		if err := cmd.Start(); err != nil {
 			errCh <- fmt.Errorf("start capture: %w", err)
@@ -141,6 +172,18 @@ func (r *CommandRecorder) Stream(ctx context.Context) (<-chan []int16, <-chan er
 		}
 	}()
 	return out, errCh
+}
+
+// captureStderr retains a bounded diagnostic prefix even if a failing device
+// prints forever. Write still consumes the entire input for os/exec's copier.
+type captureStderr struct{ bytes.Buffer }
+
+func (b *captureStderr) Write(p []byte) (int, error) {
+	n := len(p)
+	if left := 4096 - b.Len(); left > 0 {
+		_, _ = b.Buffer.Write(p[:min(left, n)]) // discard: bytes.Buffer.Write always consumes the slice without error.
+	}
+	return n, nil
 }
 
 // CommandPlayer renders WAV data by writing it to an external command's stdin.

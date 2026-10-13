@@ -11,6 +11,7 @@ import (
 	"github.com/jerryfane/voice/internal/brain"
 	"github.com/jerryfane/voice/internal/device"
 	"github.com/jerryfane/voice/internal/proposal"
+	"github.com/jerryfane/voice/internal/vad"
 )
 
 // proposingPlanner stands in for the agent seat answering a request it cannot
@@ -113,11 +114,24 @@ func TestRepeatedRequestRecordsOnceAndSaysItIsStillWaiting(t *testing.T) {
 		reply:    "I can't install software from this account",
 		proposal: brain.Proposal{Request: "install the new speech model", Title: "Install speech model"},
 	}
-	a, tts, _ := proposalAssistant(t, planner, store,
+	a, _, _ := proposalAssistant(t, planner, store,
 		"hey voice install the new speech model",
 		"hey voice install the new speech model",
 	)
-	if err := a.Run(context.Background()); err != nil {
+	utterances := make(chan vad.Utterance)
+	a.VAD = injectedSegmenter{utterances}
+	synth := &signalingSynthesizer{spoken: make(chan string, 2)}
+	a.TTS = synth
+	done := make(chan error, 1)
+	go func() { done <- a.Run(context.Background()) }()
+	injectWake(utterances)
+	first := awaitAsync(t, synth.spoken)
+	// A repeat after the first response is complete uses the stored
+	// proposal; an in-flight repeat is instead answered by the busy path.
+	injectWake(utterances)
+	second := awaitAsync(t, synth.spoken)
+	close(utterances)
+	if err := awaitAsync(t, done); err != nil {
 		t.Fatal(err)
 	}
 
@@ -128,7 +142,7 @@ func TestRepeatedRequestRecordsOnceAndSaysItIsStillWaiting(t *testing.T) {
 	if len(stored) != 1 {
 		t.Fatalf("recorded %d proposals for the same request, want 1", len(stored))
 	}
-	said := tts.spoken()
+	said := []string{first, second}
 	if len(said) != 2 {
 		t.Fatalf("spoke %d replies, want 2: %q", len(said), said)
 	}

@@ -25,7 +25,7 @@ Nontrivial requests run in one persistent OMP session. The session:
 - runs as the restricted `voice-agent` OS account, not as your login account;
 - cannot read the `pi` account’s private files or authenticated browser profile.
 
-Audio is always wake-gated locally by a resident 3M-parameter Sherpa-ONNX keyword spotter. Only a bounded utterance accepted after `HEY_VOICE` or `HEY_BOYS` is detected can reach OpenRouter; ambient and non-wake audio is discarded without transcription. Provider failure falls back to the loopback resident Whisper server and then `whisper-cli`.
+Audio is wake-gated locally by a resident 3M-parameter Sherpa-ONNX keyword spotter. Normally only a bounded utterance accepted after `HEY_VOICE` or `HEY_BOYS` reaches transcription; ambient audio is discarded. An explicitly configured, time- and turn-limited in-flight window can admit follow-up speech without another wake phrase while a wake-authorized agent task is still running. Provider failure falls back to the loopback resident Whisper server and then `whisper-cli`.
 
 ## Install
 
@@ -132,12 +132,177 @@ Both interaction styles work:
 - Say `Hey Voice, what's the time?` continuously. Voice retains the original
   inline command behavior instead of playing over the command.
 
+On a Raspberry Pi with a Bluetooth PowerConf, a connected headset profile may
+still deliver silent or corrupted microphone frames. Check for
+`stage=wake state=detected` before debugging transcription or the agent. On one
+Pi 5, CVSD (`bluez5.enable-msbc = false` in WirePlumber) plus basic SCO
+(`options bluetooth disable_esco=1` in `/etc/modprobe.d/`) and 100% microphone
+source volume restored wake detection. The SCO option affects all Bluetooth
+headsets on that host and takes effect when the `bluetooth` module loads; test
+the audio path before applying it to another machine.
+
 Say `Hey Voice, turn off` to stop the listener without an LLM call; run
 `voice on` to start it again.
 
+While an agent task runs, Voice keeps listening instead of blocking capture on
+the planner. It runs at most one agent request at a time: a busy turn can ask
+for status, request cancellation, or acknowledge a correction that must be
+resubmitted after the task completes. Cancellation cannot undo actions already
+performed. Spoken replies are serialized with the thinking sound, and
+microphone frames during playback and its hardware tail are discarded.
+
+The extra wake-free window and cheap front desk are **off by default**. For a
+short trial with a Sherpa wake detector, add these settings to the existing
+config (keep its other fields unchanged):
+
+```json
+{
+  "wake": {
+    "in_flight_window": "25s",
+    "in_flight_turns": 2
+  },
+  "brain": {
+    "front": {
+      "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+      "model": "openai/gpt-4.1-nano",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "timeout": "2s"
+    }
+  }
+}
+```
+
+These are fields within the existing `wake` and `brain` objects, not replacement
+objects. Only a wake-authorized agent task opens the window; it closes on expiry,
+the turn limit, completion, or shutdown. Outside it, another wake phrase is
+required. The optional text model receives the accepted utterance and verified
+busy status, never ambient audio, tools, action authority, or agent history. It
+can choose a local reply or a bounded clarification question; invalid,
+unverified, late, or unavailable responses fall back to local speech. Its
+request has a 48-token response cap and usage/cost logging. Disabling
+`brain.front` keeps the bounded local controls without front-model spend.
+
 ALSA capture and playback are configurable argv templates. The current Pi deployment uses an Anker PowerConf. `packaging/99-voice-powerconf.rules` grants only `voice-agent` permission to send the USB telephony off-hook report required by that microphone.
 
+### Microphone recovery
+
+Enable `input.recovery` to supervise capture instead of terminating the listener
+on a recoverable microphone failure. `input.fallbacks` also enables recovery
+and lists additional capture commands in preference order, after the main
+input. Every source uses the configured input sample rate and mono PCM format.
+
+```json
+"recovery": {
+  "ready_timeout": "5s",
+  "stall_timeout": "3s",
+  "zero_timeout": "10s",
+  "retry_interval": "2s",
+  "preferred_interval": "30s"
+},
+"fallbacks": [
+  {
+    "device": "bluez_input.00_7F_1D_20_CC_F2.0",
+    "command": ["sudo", "-n", "-u", "pi", "/usr/local/libexec/voice-bt-capture"],
+    "output": {
+      "device": "bluez_output.00_7F_1D_20_CC_F2.1",
+      "command": ["sudo", "-n", "-u", "pi", "/usr/local/libexec/voice-bt-playback"]
+    }
+  }
+]
+```
+
+These fields belong inside `input`. This PowerConf example requires the named
+Bluetooth wrappers, a running user audio session, and scoped sudo permissions
+on the host; it is not a portable Bluetooth installer. A paired fallback
+`output` routes replies to that source's speaker, rather than leaving playback
+pinned to a disconnected USB device. Omitting it retains the primary output.
+
+For the deployed Pi, `packaging/voice-bt-connect` and
+`packaging/voice-bt-capture` are host-specific helpers (owner `pi`, the MAC above).
+Install them into `/usr/local/libexec` with mode 0755 when maintaining that host;
+the existing `voice-bt-connect.timer` invokes the reconnect helper. It temporarily
+blocks this paired Bluetooth device while `/proc/asound/PowerConf` exists and
+unblocks/reconnects it when USB is removed. `Blocked: yes` with USB attached is
+intentional; pairing is retained. Do not force both transports onto the same
+speakerphone. A connected Bluetooth audio link was observed to stall USB capture.
+
+The capture helper sets PipeWire `node.dont-fallback=true` and
+`node.dont-reconnect=true`. A named `parec --device` alone is insufficient:
+PipeWire can otherwise move a disappearing Bluetooth stream onto USB, falsely
+reporting a healthy Bluetooth source and keeping ALSA USB capture busy.
+Voice, not the audio server, must own microphone failover.
+
+Hardware regression check: with USB attached and Bluetooth disconnected, the
+Bluetooth capture helper must fail without recording from USB; direct USB
+capture must still deliver full-length PCM. After restarting the listener,
+confirm `stage=capture state=ready choice=0` and continued capture across timer
+ticks. A physical USB-unplug test is needed to verify Bluetooth-only audio.
+If the kernel repeatedly reports `SCO packet for unknown connection handle`,
+a one-time Bluetooth controller power-off/on cleared the stuck transport on
+this Pi; that interrupts all host Bluetooth devices and is not an automatic
+recovery action. Also check Pi undervoltage warnings independently.
+
+Readiness requires audio samples, not merely an open device. Missing frames,
+capture exits, and persistent exactly-zero PCM trigger recovery; ordinary
+quiet nonzero input is not treated as a dead microphone. The configured order
+is never overwritten when a fallback is selected. A preferred source is
+probed while fallback capture continues and is restored only at a quiet,
+idle utterance boundary. Sources sharing a configured device or HID are not
+probed concurrently. A broken stream discards an incomplete utterance rather
+than joining speech from two microphones.
+
+Omitted recovery timings use the values above. Ready, stall, and retry times
+must be 100 ms–1 minute; zero timeout 1 second–10 minutes; preferred probe
+interval 1 second–1 hour. There may be at most eight fallbacks. Leaving both
+recovery and fallbacks absent retains the original single-device behavior.
+`voice doctor` checks the capture executable, not live microphone health;
+inspect the listener's capture health events to confirm usable input.
+
 Speech engines and models are external. `scripts/setup-speech.sh` installs the Sherpa-ONNX keyword model, `whisper-cli`, the loopback `whisper-server`, Piper, and their default English models under `~/.local/share/voice`; the restricted installer copies them to `/var/lib/voice`. `voice-whisper.service` keeps the fallback Whisper model loaded once and binds only to `127.0.0.1:8178`.
+
+### Personal vocabulary
+
+`stt.vocabulary` supplies spelling hints and explicit corrections without a
+second LLM pass or model training. It is optional; an empty configuration keeps
+the original transcription behavior.
+
+```json
+"vocabulary": {
+  "terms": ["PowerConf", "Pebble"],
+  "replacements": [
+    {"from": "power conf", "to": "PowerConf"}
+  ],
+  "context": "",
+  "contexts": {
+    "music": {
+      "terms": ["Miles Davis"],
+      "replacements": [{"from": "miles davies", "to": "Miles Davis"}]
+    }
+  }
+}
+```
+
+Place this object inside `stt`. Set `context` to `"music"` to combine that
+context's terms and corrections with the global ones. Context selection is
+explicit configuration, not inferred from ambient audio, the screen, or the
+clipboard. Leave it empty to use global terms only.
+
+Corrections match whole terms case-insensitively, prefer the longest match at
+the same position, and never cascade into another replacement. Targets must
+be declared vocabulary terms. No fuzzy substitutions are made: unrelated
+words, numbers, and negation remain unchanged unless an owner explicitly
+configures a matching replacement. Review rules before using them for device
+commands. Wake authorization uses the original transcript; a correction cannot
+manufacture a wake phrase. Session diagnostics retain the raw recognition and
+report corrected text separately.
+
+The resident Whisper server receives the selected terms as a `prompt` hint.
+A command engine receives them only where its argv includes `{vocabulary}`;
+for Whisper CLI, append that placeholder to the existing `--prompt` value.
+Other engines must explicitly support their own hint argument. OpenRouter
+transcription does not receive unverified hint parameters; deterministic
+corrections still apply after recognition. Hints guide recognition but do not
+guarantee a particular spelling.
 
 ## Activation feedback
 
@@ -152,9 +317,12 @@ Once a wake-authorized utterance closes, processing feedback begins before
 transcription and remains active through routing, device work, and agent
 planning. `thinking_delay` is a short grace period: requests that finish inside
 it stay silent by construction. Processing playback is cancelled and joined
-before response speech starts. Ambient noise, an embedded mention, or an
-approximate wake phrase produce no feedback. The light returns to idle on
-success, failure, timeout, cancellation, and shutdown.
+before response speech starts. The in-flight window adds no routine spoken
+acknowledgement: the thinking sound continues while work is pending.
+Status replies and other explicitly requested speech briefly
+pause the loop; completion or cancellation stops it. Ambient noise, an embedded
+mention, or an approximate wake phrase produce no feedback. The light returns
+to idle on success, failure, timeout, cancellation, and shutdown.
 
 ```json
 "feedback": {
@@ -271,7 +439,11 @@ controls are:
     voice music spotify volume 7
     voice music spotify volume-up
 
-Spotify plays to a second speaker and **cannot reach the microphone**.
+Spotify plays on the Creative Pebble V3 and **cannot reach the microphone**.
+Voice can speak on the same speaker without stopping music: set
+`output.command` to `["/usr/bin/sudo","-n","-H","-u","spotify-player","/usr/local/bin/voice-spotify-control","play-wav"]`.
+The command accepts WAV bytes on stdin and uses the same ALSA dmix route as
+Spotify. Voice's input can remain on the PowerConf USB or Bluetooth microphone.
 
 Two independent guarantees, because one of them is only advice:
 
@@ -280,16 +452,22 @@ Two independent guarantees, because one of them is only advice:
   the string `"default"`. So `packaging/spotify/alsa.conf`, selected through
   `ALSA_CONFIG_PATH`, defines what `"default"` *means* for that process: the
   Creative Pebble V3, addressed as `card "V3"` and never as a card number,
-  which shifts with probe order. That file is **self-contained on purpose** -
+  which shifts with probe order. Its ALSA dmix route shares playback with
+  Voice's spoken replies. That file is **self-contained on purpose** -
   including `/usr/share/alsa/alsa.conf` made it decorative, because that file's
   trailing `@hooks` load `/etc/alsa/conf.d/*` *after* the root config is parsed
   and the PipeWire file there redefines `pcm.!default`.
 - **Which devices are reachable at all.** The client runs as `spotify-player`,
   an account that is **not** in the `audio` group. A udev rule grants it access
-  to the Pebble's nodes alone, matched by USB vendor and product. Reaching any
-  other card - including the capture device the Voice service holds - fails with
+  only to the Pebble's playback nodes and the global ALSA playback timer.
+  Reaching another card - including the Voice capture device - fails with
   `EACCES`. A config a client can ignore is advice; a permission it cannot
   escape is a boundary.
+
+Voice reaches the authenticated daemon through an allowlisted sudo bridge.
+The daemon restarts even after a clean exit. A play request transfers playback
+to the Pebble and waits for Spotify to report the new device; volume, pause,
+and skip refuse to control a different active device, such as a phone.
 
 The installer refuses to proceed unless it can demonstrate the ALSA namespace is
 load-bearing, using a **paired control** - the same binary, the same invocation,

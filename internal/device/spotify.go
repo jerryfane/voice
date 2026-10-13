@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -15,17 +16,18 @@ import (
 // socket. The daemon owns credentials and audio; Voice only sends playback
 // commands and reads the resulting state.
 type Spotify struct {
-	Name       string
-	DeviceName string
-	Command    []string
-	Timeout    time.Duration
+	Name          string
+	DeviceName    string
+	Command       []string
+	Timeout       time.Duration
+	daemonAddress string
 }
 
 func NewSpotify(id, deviceName string, command []string) *Spotify {
 	if strings.TrimSpace(deviceName) == "" {
 		deviceName = "spotify-player"
 	}
-	return &Spotify{Name: id, DeviceName: deviceName, Command: append([]string(nil), command...), Timeout: 12 * time.Second}
+	return &Spotify{Name: id, DeviceName: deviceName, Command: append([]string(nil), command...), Timeout: 12 * time.Second, daemonAddress: "127.0.0.1:8080"}
 }
 
 func (s *Spotify) ID() string   { return s.Name }
@@ -37,7 +39,43 @@ func (s *Spotify) Capabilities() []Op {
 	return []Op{OpPlay, OpResume, OpPause, OpNext, OpPrevious, OpVolume, OpVolumeUp, OpVolumeDown}
 }
 
+// spotify_player starts an independent client when its UDP daemon is absent.
+// That client would run under Voice's account, without the daemon's credentials
+// or pinned audio configuration, and can hang while trying to authenticate.
+// The daemon answers the empty-datagram handshake before any CLI command runs.
+func (s *Spotify) checkDaemon(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	conn, err := net.Dial("udp", s.daemonAddress)
+	if err == nil {
+		defer conn.Close() // discard: UDP close has no buffered payload to flush.
+		err = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	}
+	if err == nil {
+		_, err = conn.Write(nil)
+	}
+	if err == nil {
+		var reply [1]byte
+		var count int
+		count, err = conn.Read(reply[:])
+		if err == nil && count != 0 {
+			err = fmt.Errorf("unexpected daemon handshake")
+		}
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil {
+		return fmt.Errorf("Spotify daemon unavailable at %s (check spotify-player.service): %w", s.daemonAddress, err)
+	}
+	return nil
+}
+
 func (s *Spotify) run(ctx context.Context, args ...string) ([]byte, error) {
+	if err := s.checkDaemon(ctx); err != nil {
+		return nil, err
+	}
 	argv := make([]string, 0, len(s.Command)+len(args))
 	argv = append(argv, s.Command...)
 	argv = append(argv, args...)
@@ -100,25 +138,29 @@ func (s *Spotify) Apply(ctx context.Context, cmd Command) (State, error) {
 	if !Supports(s, cmd.Op) {
 		return nil, fmt.Errorf("Spotify does not support %q", cmd.Op)
 	}
-	// Spotify's Web API returns 404 when no playback device is active, even
-	// though the integrated librespot endpoint is online. Read first and only
-	// activate the daemon when necessary: reconnecting an already-active but
-	// paused device resumes it, so doing that for a volume change unexpectedly
-	// starts music.
+	// Spotify's Web API reports the account's active device, which may be a
+	// phone rather than this daemon. Only play/resume may transfer playback to
+	// the configured endpoint; pause, skip, and volume must never affect a
+	// different device. Reconnecting a paused target would resume it.
 	before, err := s.Read(ctx)
 	if err != nil {
 		return nil, err
 	}
 	active, _ := before["active"].(bool)
+	device, _ := before["device"].(string)
+	onTarget := active && device == s.DeviceName
 	isVolume := cmd.Op == OpVolume || cmd.Op == OpVolumeUp || cmd.Op == OpVolumeDown
 	if isVolume && !active {
 		return nil, fmt.Errorf("Spotify has no active playback device; start music before changing its volume")
 	}
-	if cmd.Op != OpPause && !active {
+	if active && !onTarget && cmd.Op != OpPlay && cmd.Op != OpResume {
+		return nil, fmt.Errorf("Spotify playback is on %q, not %q; start music on this device first", device, s.DeviceName)
+	}
+	if !onTarget && cmd.Op != OpPause {
 		if _, err := s.run(ctx, "connect", "--name", s.DeviceName); err != nil {
 			return nil, err
 		}
-		before, err = s.Read(ctx)
+		before, err = s.waitForDevice(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -140,6 +182,32 @@ func (s *Spotify) Apply(ctx context.Context, cmd Command) (State, error) {
 		return nil, err
 	}
 	return s.waitForApplied(ctx, cmd.Op, previousTrack, expectedVolume)
+}
+
+// Connect returns before Spotify's active-device state catches up. Do not
+// start playback until the configured speaker, rather than a phone, is active.
+func (s *Spotify) waitForDevice(ctx context.Context) (State, error) {
+	deadline := time.NewTimer(s.Timeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	var last string
+	for {
+		state, err := s.Read(ctx)
+		if err == nil {
+			last, _ = state["device"].(string)
+			if last == s.DeviceName {
+				return state, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline.C:
+			return nil, fmt.Errorf("Spotify did not select %q before timeout; current device is %q", s.DeviceName, last)
+		case <-tick.C:
+		}
+	}
 }
 
 func spotifyCommandArgs(cmd Command, currentVolume int) ([]string, int, error) {

@@ -224,14 +224,32 @@ func feedbackAssistant(t *testing.T, planner brain.Planner, texts ...string) (*A
 	return a, ind, player
 }
 
+// These assertions describe two completed conversations, not a second turn
+// arriving while the first planner is still running.
+func runTwoSequentialWake(t *testing.T, a *Assistant) {
+	t.Helper()
+	utterances := make(chan vad.Utterance)
+	a.VAD = injectedSegmenter{utterances}
+	synth := &signalingSynthesizer{spoken: make(chan string, 2)}
+	a.TTS = synth
+	done := make(chan error, 1)
+	go func() { done <- a.Run(context.Background()) }()
+	injectWake(utterances)
+	awaitAsync(t, synth.spoken)
+	injectWake(utterances)
+	awaitAsync(t, synth.spoken)
+	close(utterances)
+	if err := awaitAsync(t, done); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEachAcceptedWakeLightsUpThenReturnsToIdle(t *testing.T) {
-	a, ind, player := feedbackAssistant(t, &countingPlanner{},
+	a, ind, player := feedbackAssistant(t, replyPlanner{},
 		"hey voice turn on the light",
 		"hey voice turn off the light",
 	)
-	if err := a.Run(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	runTwoSequentialWake(t, a)
 	if player.pcm != 2 {
 		t.Errorf("acknowledgement sound played %d times for 2 accepted wakes, want 2", player.pcm)
 	}
@@ -263,9 +281,7 @@ func TestIndicatorReturnsToIdleWhenCommandFails(t *testing.T) {
 		"hey voice turn on the light",
 		"hey voice turn on the light",
 	)
-	if err := a.Run(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	runTwoSequentialWake(t, a)
 	if player.pcm != 2 {
 		t.Errorf("acknowledgement sound played %d times, want 2", player.pcm)
 	}

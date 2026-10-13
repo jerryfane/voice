@@ -1,0 +1,4 @@
+# Installed by scripts/install-spotify.sh. The root-owned wrapper accepts only
+# Voice's Spotify read/connect/playback grammar; no authenticate, shell, config
+# overrides, or arbitrary spotify_player subcommands are permitted.
+voice-agent ALL=(spotify-player) NOPASSWD: /usr/local/bin/voice-spotify-control *

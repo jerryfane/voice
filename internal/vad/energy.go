@@ -8,7 +8,10 @@ import (
 )
 
 // Energy is a low-cost RMS gate with ambient-noise adaptation and hysteresis.
-type Energy struct{ P Params }
+type Energy struct {
+	P               Params
+	captureBoundary *audio.CaptureBoundary
+}
 
 func NewEnergy(p Params) *Energy {
 	if p.FrameSize <= 0 {
@@ -27,6 +30,12 @@ func NewEnergy(p Params) *Energy {
 		p.PreRoll = 0
 	}
 	return &Energy{P: p}
+}
+
+// SetCaptureBoundary enables synchronous recovery decisions after each frame.
+// Configure it before Run; the capture producer must wait for every acknowledgement.
+func (e *Energy) SetCaptureBoundary(boundary *audio.CaptureBoundary) {
+	e.captureBoundary = boundary
 }
 
 func rms(x []int16) float64 {
@@ -83,7 +92,20 @@ func (e *Energy) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-c
 			silent = 0
 			peak = 0
 		}
+		quiet := 0
+		pending := false
+		acknowledge := func() bool {
+			if !pending || e.captureBoundary == nil {
+				return true
+			}
+			pending = false
+			return e.captureBoundary.Acknowledge(ctx, quiet >= p.Silence && !candidate && !active)
+		}
+		defer acknowledge()
 		for {
+			if !acknowledge() {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				emit(false)
@@ -92,6 +114,17 @@ func (e *Energy) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-c
 				if !ok {
 					emit(false)
 					return
+				}
+				pending = e.captureBoundary != nil
+				if len(frame) == 0 {
+					// A device discontinuity is not end-of-speech: discard it.
+					pre = nil
+					frames = nil
+					active, candidate = false, false
+					speech, silent, quiet = 0, 0, 0
+					peak = 0
+					noise = 0.00015
+					continue
 				}
 				level := rms(frame)
 				if level > peak {
@@ -102,6 +135,11 @@ func (e *Energy) Run(ctx context.Context, in <-chan []int16, f audio.Format) <-c
 					threshold = math.Max(0.00045, noise*3.2)
 				}
 				isSpeech := level >= threshold
+				if isSpeech {
+					quiet = 0
+				} else if quiet < p.Silence {
+					quiet++
+				}
 				if !active {
 					if !isSpeech {
 						noise = noise*0.98 + level*0.02

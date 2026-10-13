@@ -28,6 +28,13 @@ type Detector interface {
 	Close()
 }
 
+// ResettableDetector discards all streaming state at a capture discontinuity,
+// including buffered acoustic features, without unloading the resident model.
+// Detectors without this optional interface are closed and started again.
+type ResettableDetector interface {
+	Reset() error
+}
+
 // NewSherpa returns the native implementation for CGO builds and a fail-closed
 // unavailable implementation for builds that cannot link Sherpa-ONNX.
 func NewSherpa(c SherpaConfig) Detector { return newSherpa(c) }

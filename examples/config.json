@@ -16,7 +16,15 @@
       "raw",
       "-"
     ],
-    "sample_rate": 16000
+    "sample_rate": 16000,
+    "recovery": {
+      "ready_timeout": "5s",
+      "stall_timeout": "3s",
+      "zero_timeout": "10s",
+      "retry_interval": "2s",
+      "preferred_interval": "30s"
+    },
+    "fallbacks": []
   },
   "output": {
     "device": "default",
@@ -90,6 +98,12 @@
     ],
     "model": "models/ggml-tiny.en.bin",
     "timeout": "30s",
+    "vocabulary": {
+      "terms": [],
+      "replacements": [],
+      "context": "",
+      "contexts": {}
+    },
     "resident": {
       "endpoint": "http://127.0.0.1:8178/inference",
       "timeout": "10s"

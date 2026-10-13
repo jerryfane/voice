@@ -19,4 +19,7 @@ func (d *unavailableSherpa) Start() error {
 func (*unavailableSherpa) Accept(int, []int16) (string, error) {
 	return "", errors.New("Sherpa-ONNX keyword spotter is unavailable")
 }
+func (*unavailableSherpa) Reset() error {
+	return errors.New("Sherpa-ONNX keyword spotter is unavailable")
+}
 func (*unavailableSherpa) Close() {}

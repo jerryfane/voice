@@ -390,7 +390,8 @@ func doctor(ctx context.Context, c config.Config, a *session.Assistant, loaded s
 	// does not name is how someone ends up tuning the wrong one.
 	check("config", true, loaded)
 	_, ok := proc.Which(c.Input.Command[0])
-	check("microphone", ok, a.Recorder.Describe())
+	check("capture tool", ok, a.Recorder.Describe())
+	stdout.println("microphone   INFO live capture health is reported by the listener; finding the capture executable does not verify audio")
 	_, ok = proc.Which(c.Output.Command[0])
 	check("speaker", ok, a.Player.Describe())
 	ok, d := a.STT.Available()

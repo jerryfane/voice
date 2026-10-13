@@ -2,6 +2,7 @@ package device
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -98,6 +99,37 @@ func TestSpotifyRejectsInvalidPlaybackArguments(t *testing.T) {
 	}
 }
 
+func startSpotifyTestDaemon(t *testing.T) string {
+	t.Helper()
+	daemon, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var packet [1]byte
+		for {
+			n, peer, err := daemon.ReadFrom(packet[:])
+			if err != nil {
+				return
+			}
+			if n == 0 {
+				if _, err := daemon.WriteTo(nil, peer); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		if err := daemon.Close(); err != nil {
+			t.Error(err)
+		}
+		<-done
+	})
+	return daemon.LocalAddr().String()
+}
+
 // Reconnecting a paused but active endpoint resumes playback. Volume changes
 // must use the existing endpoint rather than waking it first.
 func TestSpotifyVolumeDoesNotReconnectPausedActiveDevice(t *testing.T) {
@@ -116,6 +148,7 @@ fi
 	t.Setenv("SPOTIFY_LOG", logPath)
 
 	s := NewSpotify("spotify", "spotify-player", []string{script})
+	s.daemonAddress = startSpotifyTestDaemon(t)
 	state, err := s.Apply(context.Background(), Command{Op: OpVolume, Args: map[string]any{"level": 4}})
 	if err != nil {
 		t.Fatal(err)
@@ -129,5 +162,97 @@ fi
 	}
 	if strings.Contains(string(calls), "connect --name") {
 		t.Fatalf("volume change reconnected the active device:\n%s", calls)
+	}
+}
+
+// An account can be playing on a phone even while the local daemon is online.
+// Connect transfers asynchronously: playback must wait for the local device.
+func TestSpotifyTransfersPlayButRejectsOtherDeviceControls(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "calls")
+	connectedPath := filepath.Join(dir, "connected")
+	script := filepath.Join(dir, "spotify-player")
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> "$SPOTIFY_LOG"
+if [ "$*" = "get key playback" ]; then
+  if [ -e "$SPOTIFY_CONNECTED" ]; then
+    reads=$(cat "$SPOTIFY_CONNECTED")
+    if [ "$reads" -ge 2 ]; then
+      printf '%s\n' '{"device":{"name":"spotify-player","volume_percent":40},"is_playing":true}'
+      exit 0
+    fi
+    printf '%s\n' "$((reads + 1))" > "$SPOTIFY_CONNECTED"
+  fi
+  printf '%s\n' '{"device":{"name":"iPhone","volume_percent":60},"is_playing":true}'
+elif [ "$*" = "connect --name spotify-player" ]; then
+  printf '0\n' > "$SPOTIFY_CONNECTED"
+fi
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SPOTIFY_LOG", logPath)
+	t.Setenv("SPOTIFY_CONNECTED", connectedPath)
+	s := NewSpotify("spotify", "spotify-player", []string{script})
+	s.daemonAddress = startSpotifyTestDaemon(t)
+
+	for _, op := range []Op{OpPause, OpVolume, OpNext} {
+		if _, err := s.Apply(context.Background(), Command{Op: op, Args: map[string]any{"level": 4}}); err == nil || !strings.Contains(err.Error(), "not \"spotify-player\"") {
+			t.Fatalf("%s on other device = %v", op, err)
+		}
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(calls), "playback ") || strings.Contains(string(calls), "connect ") {
+		t.Fatalf("affected the other device: %s", calls)
+	}
+
+	state, err := s.Apply(context.Background(), Command{Op: OpPlay})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state["device"] != "spotify-player" {
+		t.Fatalf("play returned wrong device: %v", state)
+	}
+	calls, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectAt := strings.Index(string(calls), "connect --name spotify-player")
+	playAt := strings.Index(string(calls), "playback start liked --random")
+	if connectAt < 0 || playAt <= connectAt {
+		t.Fatalf("play did not select local device first: %s", calls)
+	}
+}
+
+// The CLI would start its own unauthenticated client if the service vanished.
+// Never invoke it when the daemon is unavailable.
+func TestSpotifyDoesNotInvokeCLIWithoutDaemon(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "calls")
+	script := filepath.Join(dir, "spotify-player")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'called\\n' >> \"$SPOTIFY_LOG\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SPOTIFY_LOG", logPath)
+
+	daemon, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := daemon.LocalAddr().String()
+	if err := daemon.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewSpotify("spotify", "spotify-player", []string{script})
+	s.daemonAddress = address
+	if _, err := s.Read(context.Background()); err == nil || !strings.Contains(err.Error(), "Spotify daemon unavailable") {
+		t.Fatalf("read without daemon = %v", err)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("CLI was invoked without daemon: %v", err)
 	}
 }

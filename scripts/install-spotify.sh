@@ -8,6 +8,7 @@
 #
 # It stops before the Spotify login. That step needs the owner.
 set -eu
+umask 077
 
 alsa_conf=/etc/voice/spotify-alsa.conf
 account=spotify-player
@@ -17,7 +18,7 @@ voice_account=voice-agent
 cd "$(dirname "$0")/.."
 
 if ! command -v setfacl > /dev/null; then
-  echo "setfacl is required (package acl): the udev rule uses it to grant the client access to the Pebble only" >&2
+  echo "setfacl is required (package acl): udev grants the client access to the Pebble and playback timer only" >&2
   exit 1
 fi
 if ! command -v jq > /dev/null; then
@@ -28,7 +29,7 @@ fi
 if ! id -u "$account" > /dev/null 2>&1; then
   # Deliberately NOT in the audio group. Membership there would grant every
   # card, including the capture device the Voice service holds; the udev rule
-  # grants the Pebble alone.
+  # grants only Pebble playback nodes and the ALSA timer.
   sudo useradd --system --user-group --home-dir "$state" --shell /usr/sbin/nologin "$account"
 fi
 sudo mkdir -p "$state/config" "$state/cache"
@@ -38,17 +39,16 @@ sudo install -m 0644 packaging/spotify/alsa.conf "$alsa_conf"
 sudo install -m 0644 packaging/spotify/99-voice-spotify-pebble.rules \
   /etc/udev/rules.d/99-voice-spotify-pebble.rules
 sudo install -m 0755 packaging/spotify/spotify-player-run /usr/local/bin/spotify-player-run
+sudo install -m 0755 packaging/spotify/voice-spotify-control /usr/local/bin/voice-spotify-control
+# Keep the privilege boundary separate from the Herdr and proposals rules.
+# Validate the packaged rule before installing it: a malformed sudoers file
+# would prevent both Voice and the owner from using sudo.
+sudo visudo -cf packaging/spotify/voice-spotify-sudoers > /dev/null
+sudo install -m 0440 packaging/spotify/voice-spotify-sudoers /etc/sudoers.d/voice-spotify
 sudo install -m 0644 packaging/spotify/spotify-player.service /etc/systemd/system/spotify-player.service
 sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=sound
 
-# The client cannot name an output device, so "default" is defined for it by
-# the ALSA namespace above. That only helps if the namespace is actually being
-# read - and ALSA_CONFIG_PATH being ignored would look exactly like it working,
-# since audio would still play, just out of the wrong device.
-#
-# So: prove the file is load-bearing before trusting it. Point its default at a
-# card that does not exist and require playback to FAIL.
 # The client cannot name an output device, so "default" is defined for it by
 # the ALSA namespace above. That only helps if the namespace is actually being
 # read - and ALSA_CONFIG_PATH being ignored would look exactly like it working,
@@ -73,6 +73,7 @@ fi
 
 proof=$(mktemp -d)
 trap 'rm -rf "$proof"' EXIT
+setfacl -m "u:$account:x" "$proof"
 # The bogus namespace MUST mirror the real one's structure - self-contained,
 # no base-config include - or the arms are not comparable. The first version
 # included /usr/share/alsa/alsa.conf here, which is what made the real file
@@ -94,9 +95,10 @@ pcm.!default {
     }
 }
 CONF
+setfacl -m "u:$account:r" "$proof/bogus.conf"
 
 probe_playback() {
-  ALSA_CONFIG_PATH="$1" aplay -q -d 1 -f cd /dev/zero > "$proof/out" 2>&1
+  sudo -H -u "$account" env ALSA_CONFIG_PATH="$1" aplay -q -d 1 -f cd /dev/zero > "$proof/out" 2>&1
 }
 
 if probe_playback "$proof/bogus.conf"; then
@@ -108,12 +110,12 @@ negative_output=$(cat "$proof/out")
 
 if ! probe_playback "$alsa_conf"; then
   # Both arms failed, so this proves nothing about the namespace: aplay may be
-  # broken, the Pebble may be absent, or the device may be busy. Report it as
-  # UNPROVEN rather than concluding from the negative arm alone.
+  # broken, the Pebble or ALSA timer may be absent, or the client lacks access.
+  # Report it as UNPROVEN rather than concluding from the negative arm alone.
   echo "UNPROVEN: playback failed with the real namespace too, so the negative above shows nothing." >&2
   echo "  with the bogus namespace: $negative_output" >&2
   echo "  with $alsa_conf: $(cat "$proof/out")" >&2
-  echo "Fix playback to the Pebble first - it must be plugged in and free - then re-run." >&2
+  echo "Fix playback to the Pebble first, then re-run." >&2
   exit 1
 fi
 
@@ -137,11 +139,15 @@ sudo systemctl daemon-reload
 # an older Voice binary rejects the new field, and must not be allowed to turn a
 # working device into a restart loop.
 if [ -f /etc/voice/config.json ]; then
-  jq '.spotify //= {
+  # Root reads the restricted live config; the candidate is private in the
+  # mktemp directory (umask 077) until it is validated and installed as 0640.
+  sudo jq '.spotify //= {
     "id": "spotify",
-    "device": "spotify-player",
-    "command": ["/usr/local/bin/spotify_player"]
-  }' /etc/voice/config.json > "$proof/voice-config.json"
+    "device": "spotify-player"
+  } | .spotify.command = [
+    "/usr/bin/sudo", "-n", "-H", "-u", "spotify-player",
+    "/usr/local/bin/voice-spotify-control"
+  ]' /etc/voice/config.json > "$proof/voice-config.json"
   if ! /usr/local/bin/voice --config "$proof/voice-config.json" config > /dev/null; then
     echo "The installed Voice binary does not support Spotify controls." >&2
     echo "Install the current Voice build first, then re-run this script." >&2
@@ -154,7 +160,7 @@ if [ -f /etc/voice/config.json ]; then
   fi
 fi
 echo
-echo "Installed. The client is pinned to the Pebble by name and cannot open the microphone."
+echo "Installed. The client is pinned to the Pebble and cannot open the microphone."
 echo
 echo "NOT done, and needs the owner: Spotify login. Run"
 echo "  sudo -u $account -H /usr/local/bin/spotify-player-run -c $state/config -C $state/cache authenticate"

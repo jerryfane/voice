@@ -10,7 +10,7 @@ User=spotify-player
 Group=spotify-player
 UMask=0077
 ExecStart=/usr/local/bin/spotify-player-run -c /var/lib/spotify-player/config -C /var/lib/spotify-player/cache -d
-Restart=on-failure
+Restart=always
 RestartSec=5s
 
 # The client plays audio and talks to Spotify. It has no business anywhere

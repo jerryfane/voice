@@ -88,6 +88,22 @@ func (d *sherpaDetector) Accept(sampleRate int, pcm []int16) (string, error) {
 	return "", nil
 }
 
+// Reset replaces the stream, not just the keyword search state: buffered audio
+// and encoder context from the previous microphone must not survive.
+func (d *sherpaDetector) Reset() error {
+	if d.spotter == nil {
+		return errors.New("keyword spotter is not started")
+	}
+	if d.stream != nil {
+		sherpa.DeleteOnlineStream(d.stream)
+	}
+	d.stream = sherpa.NewKeywordStream(d.spotter)
+	if d.stream == nil {
+		return errors.New("Sherpa-ONNX could not create the keyword stream")
+	}
+	return nil
+}
+
 func (d *sherpaDetector) Close() {
 	if d.stream != nil {
 		sherpa.DeleteOnlineStream(d.stream)

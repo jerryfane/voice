@@ -31,8 +31,13 @@ type Assistant struct {
 	// primary. Nil preserves the single-transcriber local pipeline.
 	WakeSTT speech.Transcriber
 	STT     speech.Transcriber
-	TTS     speech.Synthesizer
-	Brain   brain.Planner
+	// Vocabulary is applied only to commands after raw wake authorization.
+	Vocabulary *speech.Vocabulary
+	TTS        speech.Synthesizer
+	Brain      brain.Planner
+	// Front is an optional text-only conversational front desk. It cannot
+	// execute a device action or write to the persistent agent.
+	Front   brain.FrontDesk
 	Devices *device.Registry
 	// Feedback acknowledges an accepted wake phrase locally. A nil Notifier
 	// disables light and sound without changing command handling.
@@ -49,6 +54,9 @@ type Assistant struct {
 	Missed      []timer.Timer
 	WakePhrases []string
 	WakeFuzz    float64
+	// Zero turns (the default) keeps wake-free in-flight interaction disabled.
+	InFlightWindow time.Duration
+	InFlightTurns  int
 	// Now is the clock used for timer arithmetic. Nil means time.Now.
 	Now    func() time.Time
 	Logger *log.Logger
@@ -66,6 +74,11 @@ func (a *Assistant) HandleText(ctx context.Context, text string) (brain.Plan, er
 	started := time.Now()
 	p, err := a.Brain.Plan(ctx, strings.TrimSpace(text), a.Devices.Infos())
 	if err != nil {
+		return p, err
+	}
+	// A planner may ignore cancellation and return a plan after Run has
+	// stopped. Never execute its late actions or record its proposal.
+	if err := ctx.Err(); err != nil {
 		return p, err
 	}
 	// Recorded before the actions run: a device failure must not be able to
@@ -144,6 +157,9 @@ func withNote(speak, note string) string {
 // It is the common boundary for microphone, CLI and OMP-extension requests.
 func (a *Assistant) ApplyActions(ctx context.Context, actions []brain.Action) error {
 	for _, act := range actions {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		dev, err := a.Devices.Get(act.Device)
 		if err != nil {
 			return err
@@ -162,10 +178,22 @@ func (a *Assistant) ApplyActions(ctx context.Context, actions []brain.Action) er
 
 const playbackLeadIn = 250 * time.Millisecond
 
+type conversationGate interface {
+	SetInFlightWindow(time.Time, int)
+	Suspend()
+	ResumeAfter(time.Duration)
+}
+
+const playbackTail = 200 * time.Millisecond
+
 // Speak synthesizes and plays one response.
 func (a *Assistant) Speak(ctx context.Context, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return nil
+	}
+	if gate, ok := a.VAD.(conversationGate); ok {
+		gate.Suspend()
+		defer gate.ResumeAfter(playbackTail)
 	}
 	wav, err := a.TTS.Synthesize(ctx, text)
 	if err != nil {
@@ -178,8 +206,8 @@ func (a *Assistant) Speak(ctx context.Context, text string) error {
 	return a.Player.PlayWAV(ctx, wav)
 }
 
-// Run listens until ctx is cancelled. Every model request must contain the wake
-// phrase and command in the same utterance.
+// Run listens until ctx is cancelled. New agent requests require a wake phrase;
+// while one is running, only bounded, locally gated conversation can omit it.
 func (a *Assistant) Run(ctx context.Context) error {
 	if managed, ok := a.VAD.(vad.ManagedSegmenter); ok {
 		if err := managed.Start(); err != nil {
@@ -206,12 +234,186 @@ func (a *Assistant) Run(ctx context.Context) error {
 	if a.Timers != nil {
 		done := make(chan struct{})
 		defer close(done)
+
 		go a.Timers.Run(done)
 		fired = a.Timers.Fired()
 		a.announceMissed(ctx, a.Missed)
 	}
+	// Only Run owns speech and feedback. The worker owns the entire existing
+	// HandleText path (including typed actions and proposals), never the player.
+	type plannerResult struct {
+		id      uint64
+		plan    brain.Plan
+		err     error
+		started time.Time
+	}
+	type plannerWork struct {
+		id              uint64
+		ctx             context.Context
+		cancel          context.CancelFunc
+		done            chan struct{}
+		stop            func()
+		until           time.Time
+		remaining       int
+		cancelRequested bool
+	}
+	results := make(chan plannerResult, 1)
+	var active *plannerWork
+	var nextID uint64
+	gate, hasGate := a.VAD.(conversationGate)
+	windowEnabled := hasGate && a.InFlightTurns > 0 && a.InFlightWindow > 0
+	defer func() {
+		if active == nil {
+			return
+		}
+		active.cancel()
+		if windowEnabled {
+			gate.SetInFlightWindow(time.Time{}, 0)
+		}
+		active.stop()
+		select {
+		case <-active.done:
+		case <-time.After(plannerStopTimeout):
+			a.logf("planner did not stop within %s; exiting without its result", plannerStopTimeout)
+		}
+	}()
+	// A timer or a busy acknowledgement can speak while a planner is pending.
+	// Stop and join its sound first, then resume it if work is still pending.
+	speakDuringWork := func(fn func()) {
+		if active != nil {
+			if windowEnabled {
+				gate.SetInFlightWindow(time.Time{}, 0)
+			}
+			active.stop()
+		}
+		fn()
+		if active != nil {
+			select {
+			case <-active.done:
+				return // Completion during speech must not reopen capture.
+			default:
+			}
+		}
+		if active != nil && active.ctx.Err() == nil && ctx.Err() == nil {
+			if !active.until.IsZero() {
+				if active.remaining > 0 && time.Now().Before(active.until) {
+					gate.SetInFlightWindow(active.until, active.remaining)
+				}
+			}
+			active.stop = a.Feedback.Thinking(ctx)
+		}
+	}
+	accept := func(command string, stopThinking func(), acknowledge bool) (stop bool) {
+		if stopThinking == nil {
+			stopThinking = func() {}
+		}
+		stopThinking = sync.OnceFunc(stopThinking)
+		if active != nil {
+			stopThinking()
+			// OMP is single-flight. No busy turn can start another planner.
+			select {
+			case <-active.done:
+				return false // The completed result is already queued.
+			default:
+			}
+			speakDuringWork(func() {
+				if acknowledge {
+					a.Feedback.Accepted(ctx)
+				}
+				if a.timerControl(ctx, command, func() {}) {
+					return
+				}
+				if reply, shutdown, handled := localControl(command); handled {
+					if shutdown {
+						active.cancelRequested = true
+						active.cancel()
+					}
+					a.speakLogged(ctx, reply)
+					stop = shutdown
+					return
+				}
+				switch inFlightControl(command) {
+				case "cancel":
+					active.cancelRequested = true
+					active.cancel()
+					a.speakLogged(ctx, "I've asked it to stop. Anything already done may not be undone.")
+				case "status":
+					a.speakLogged(ctx, "I'm still working on your request. I don't have a confirmed result yet.")
+				case "correction":
+					a.speakLogged(ctx, "I can't change work already underway. Please ask again after it finishes.")
+				default:
+					reply := "I'm still working on your previous request."
+					if a.Front != nil && !active.until.IsZero() {
+						if candidate, err := a.Front.Reply(active.ctx, command, "The previous request is still running."); err == nil {
+							reply = candidate
+						} else {
+							a.logf("stage=front state=fallback err=%v", err)
+						}
+					}
+					select {
+					case <-active.done:
+						return // Do not narrate a stale state before the final result.
+					default:
+					}
+					a.speakLogged(ctx, reply)
+				}
+			})
+			return stop
+		}
+		if command == "" {
+			stopThinking()
+			a.Feedback.Restore()
+			a.speakLogged(ctx, "Please say Hey Voice followed by your request.")
+			return false
+		}
+		if a.timerControl(ctx, command, stopThinking) {
+			a.Feedback.Restore()
+			return false
+		}
+		if reply, shutdown, handled := localControl(command); handled {
+			stopThinking()
+			a.Feedback.Restore()
+			a.speakLogged(ctx, reply)
+			return shutdown
+		}
+		nextID++
+		workCtx, cancel := context.WithCancel(ctx)
+		work := &plannerWork{id: nextID, ctx: workCtx, cancel: cancel, done: make(chan struct{}), stop: stopThinking}
+		active = work
+		go func() {
+			defer close(work.done)
+			started := time.Now()
+			p, err := a.HandleText(workCtx, command)
+			results <- plannerResult{id: work.id, plan: p, err: err, started: started}
+		}()
+		if windowEnabled {
+			// Keep processing feedback running; no routine spoken preamble.
+			select {
+			case <-work.done:
+				return false
+			default:
+			}
+			work.until = time.Now().Add(a.InFlightWindow)
+			work.remaining = a.InFlightTurns
+			if work.ctx.Err() == nil {
+				gate.SetInFlightWindow(work.until, work.remaining)
+			}
+		}
+		return false
+	}
+	beginAuthorized := func(acknowledge bool) (func(), bool) {
+		if active != nil {
+			// Do not start a second thinking loop or play the wake sound over
+			// current feedback. Busy feedback is serialized before speech.
+			return func() {}, acknowledge
+		}
+		return a.beginProcessing(ctx, acknowledge), false
+	}
 
 	for {
+		if utterances == nil && active == nil {
+			return nil
+		}
 		select {
 		case <-ctx.Done():
 			// Capture's cleanup runs as its goroutine unwinds: it clears the
@@ -227,12 +429,57 @@ func (a *Assistant) Run(ctx context.Context) error {
 				return err
 			}
 			recErr = nil
-		case t := <-fired:
-			a.announceFired(ctx, t)
+		case t, ok := <-fired:
+			if ctx.Err() != nil {
+				continue
+			}
+			if !ok {
+				fired = nil
+				continue
+			}
+			speakDuringWork(func() { a.announceFired(ctx, t) })
+		case result := <-results:
+			if active == nil || result.id != active.id {
+				a.logf("stage=plan state=stale id=%d", result.id)
+				continue
+			}
+			active.stop()
+			cancelRequested := active.cancelRequested
+			active.cancel()
+			if windowEnabled {
+				gate.SetInFlightWindow(time.Time{}, 0)
+			}
+			active = nil
+			if ctx.Err() != nil {
+				continue
+			}
+			a.Feedback.Restore()
+			if cancelRequested {
+				a.logf("stage=plan state=cancelled ms=%.3f err=%v", sinceMS(result.started), result.err)
+				a.speakLogged(ctx, "The request has ended. Anything already done may remain.")
+				continue
+			}
+			if result.err != nil {
+				a.logf("stage=plan state=failed ms=%.3f err=%v", sinceMS(result.started), result.err)
+				a.say(ctx, "I couldn't do that.")
+				continue
+			}
+			a.logf("stage=plan state=ok ms=%.3f reply=%d", sinceMS(result.started), len(result.plan.Speak))
+			a.speakLogged(ctx, result.plan.Speak)
 		case u, ok := <-utterances:
 			if !ok {
 				a.logf("stage=segment state=closed")
-				return nil
+				utterances = nil
+				continue
+			}
+			if ctx.Err() != nil {
+				continue
+			}
+			if u.Keyword == "IN_FLIGHT" {
+				if active == nil || !windowEnabled || active.remaining <= 0 {
+					continue // a late wake-free turn has no live authorization
+				}
+				active.remaining--
 			}
 			ms := len(u.PCM) * 1000 / max(u.Format.SampleRate, 1)
 			a.logf("stage=segment state=ok samples=%d ms=%d peak=%.4f truncated=%v",
@@ -242,18 +489,22 @@ func (a *Assistant) Run(ctx context.Context) error {
 				// wake-authorized, so processing feedback can cover STT too.
 				// Inline commands acknowledge here; standalone follow-ups
 				// were acknowledged before their command capture began.
-				stopThinking := a.beginProcessing(ctx, !u.WakeAcknowledged)
+				stopThinking, acknowledge := beginAuthorized(!u.WakeAcknowledged)
 				text, err := a.STT.Transcribe(ctx, u.PCM, u.Format)
 				if err != nil {
 					stopThinking()
-					a.Feedback.Restore()
+					if active == nil {
+						a.Feedback.Restore()
+					}
 					a.logf("stage=transcribe state=failed err=%v", err)
 					continue
 				}
 				text = strings.TrimSpace(text)
 				if text == "" {
 					stopThinking()
-					a.Feedback.Restore()
+					if active == nil {
+						a.Feedback.Restore()
+					}
 					a.logf("stage=transcribe state=empty peak=%.4f", u.Peak)
 					continue
 				}
@@ -262,8 +513,9 @@ func (a *Assistant) Run(ctx context.Context) error {
 				if cloudMatched, cloudCommand, _ := wake.Match(text, a.WakePhrases, a.WakeFuzz); cloudMatched {
 					command = cloudCommand
 				}
+				command = a.correctCommand(command)
 				a.logf("stage=wake state=accepted source=streaming keyword=%q command=%q follow_up=%v", u.Keyword, command, u.WakeAcknowledged)
-				if stop := a.accepted(ctx, command, stopThinking); stop {
+				if stop := accept(command, stopThinking, acknowledge); stop {
 					return nil
 				}
 				continue
@@ -276,6 +528,7 @@ func (a *Assistant) Run(ctx context.Context) error {
 					continue
 				}
 				gateText = strings.TrimSpace(gateText)
+				a.logf("stage=transcribe state=ok source=local-stt heard=%q peak=%.4f", gateText, u.Peak)
 				matched, command, _ := wake.Match(gateText, a.WakePhrases, a.WakeFuzz)
 				if !matched {
 					a.logf("stage=wake state=nomatch source=local-stt ms=%.3f", sinceMS(started))
@@ -284,10 +537,10 @@ func (a *Assistant) Run(ctx context.Context) error {
 				a.logf("stage=wake state=matched source=local-stt ms=%.3f", sinceMS(started))
 				// This local transcript is the privacy gate: feedback begins
 				// only after it proves the utterance contains a wake phrase.
-				stopThinking := a.beginProcessing(ctx, true)
+				stopThinking, acknowledge := beginAuthorized(true)
 				if command == "" {
 					a.logf("stage=wake state=accepted command=%q", command)
-					if stop := a.accepted(ctx, command, stopThinking); stop {
+					if stop := accept(command, stopThinking, acknowledge); stop {
 						return nil
 					}
 					continue
@@ -296,14 +549,18 @@ func (a *Assistant) Run(ctx context.Context) error {
 				text, err := a.STT.Transcribe(ctx, u.PCM, u.Format)
 				if err != nil {
 					stopThinking()
-					a.Feedback.Restore()
+					if active == nil {
+						a.Feedback.Restore()
+					}
 					a.logf("stage=transcribe state=failed err=%v", err)
 					continue
 				}
 				text = strings.TrimSpace(text)
 				if text == "" {
 					stopThinking()
-					a.Feedback.Restore()
+					if active == nil {
+						a.Feedback.Restore()
+					}
 					a.logf("stage=transcribe state=empty peak=%.4f", u.Peak)
 					continue
 				}
@@ -311,8 +568,9 @@ func (a *Assistant) Run(ctx context.Context) error {
 				if cloudMatched, cloudCommand, _ := wake.Match(text, a.WakePhrases, a.WakeFuzz); cloudMatched {
 					command = cloudCommand
 				}
+				command = a.correctCommand(command)
 				a.logf("stage=wake state=accepted command=%q", command)
-				if stop := a.accepted(ctx, command, stopThinking); stop {
+				if stop := accept(command, stopThinking, acknowledge); stop {
 					return nil
 				}
 				continue
@@ -334,13 +592,26 @@ func (a *Assistant) Run(ctx context.Context) error {
 				a.logf("stage=wake state=nomatch")
 				continue
 			}
+			command = a.correctCommand(command)
 			a.logf("stage=wake state=matched command=%q", command)
-			stopThinking := a.beginProcessing(ctx, true)
-			if stop := a.accepted(ctx, command, stopThinking); stop {
+			stopThinking, acknowledge := beginAuthorized(true)
+			if stop := accept(command, stopThinking, acknowledge); stop {
 				return nil
 			}
 		}
 	}
+}
+
+// correctCommand never participates in wake matching. Keep the engine's raw
+// heard= diagnostic above, and log both command forms only when a rule changes
+// text. In a remote pipeline the raw local gate command remains the fallback
+// when the remote transcript does not contain an authorized wake prefix.
+func (a *Assistant) correctCommand(raw string) string {
+	corrected := a.Vocabulary.Correct(raw)
+	if corrected != raw {
+		a.logf("stage=vocabulary state=corrected context=%q raw=%q corrected=%q", a.Vocabulary.Context(), raw, corrected)
+	}
+	return corrected
 }
 
 // captureStopTimeout bounds the wait for capture to unwind at shutdown. A
@@ -348,6 +619,9 @@ func (a *Assistant) Run(ctx context.Context) error {
 // stop timeout would kill it anyway, and this way the delay is ours and
 // explained rather than a hang.
 const captureStopTimeout = 2 * time.Second
+
+// A planner that ignores cancellation cannot hold shutdown indefinitely.
+const plannerStopTimeout = 2 * time.Second
 
 // awaitCaptureStop drains samples until the recorder closes the channel, which
 // it does only after its deferred cleanup has run.
@@ -380,45 +654,6 @@ func (a *Assistant) beginProcessing(ctx context.Context, acknowledge bool) func(
 	return a.Feedback.Thinking(ctx)
 }
 
-// accepted handles one utterance that passed the wake gate. stopThinking owns
-// the processing-feedback lifecycle that may already have covered STT. Every
-// spoken exit stops and joins it first, so processing audio cannot overlap the
-// answer.
-func (a *Assistant) accepted(ctx context.Context, command string, stopThinking func()) (stop bool) {
-	if stopThinking == nil {
-		stopThinking = func() {}
-	}
-	stopThinking = sync.OnceFunc(stopThinking)
-	defer stopThinking()
-	defer a.Feedback.Restore()
-	if command == "" {
-		stopThinking()
-		a.speakLogged(ctx, "Please say Hey Voice followed by your request.")
-		return false
-	}
-	if a.timerControl(ctx, command, stopThinking) {
-		return false
-	}
-	if reply, stop, handled := localControl(command); handled {
-		stopThinking()
-		a.speakLogged(ctx, reply)
-		return stop
-	}
-	// The planner and speaker remain timed independently, while the processing
-	// sound now spans the earlier transcription and routing stages as well.
-	started := time.Now()
-	p, err := a.HandleText(ctx, command)
-	stopThinking()
-	if err != nil {
-		a.logf("stage=plan state=failed ms=%.3f err=%v", sinceMS(started), err)
-		a.say(ctx, "I couldn't do that.")
-		return false
-	}
-	a.logf("stage=plan state=ok ms=%.3f reply=%d", sinceMS(started), len(p.Speak))
-	a.speakLogged(ctx, p.Speak)
-	return false
-}
-
 // speakLogged times synthesis and playback together, which is what a person
 // waits through, and reports the text length so a slow reply can be told from
 // a long one.
@@ -448,4 +683,22 @@ func localControl(command string) (reply string, stop bool, handled bool) {
 	default:
 		return "", false, false
 	}
+}
+
+// inFlightControl handles only unambiguous task controls. A bare "stop"
+// remains available to the existing timer/device route rather than being
+// guessed as cancellation of a possibly irreversible agent operation.
+func inFlightControl(command string) string {
+	normalized := strings.Trim(strings.ToLower(strings.TrimSpace(command)), " .!?")
+	switch normalized {
+	case "cancel that", "cancel the request", "stop working on that", "stop that request":
+		return "cancel"
+	case "status", "what's happening", "what is happening", "are you done", "how's it going":
+		return "status"
+	}
+	if strings.HasPrefix(normalized, "actually ") || strings.HasPrefix(normalized, "make that ") ||
+		strings.HasPrefix(normalized, "instead ") {
+		return "correction"
+	}
+	return ""
 }

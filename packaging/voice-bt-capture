@@ -1,0 +1,10 @@
+#!/bin/sh
+# Do not let PipeWire silently move this stream to USB if Bluetooth disappears.
+# Voice owns source selection and must see the failure to reset utterance state.
+exec env HOME=/home/pi \
+  PULSE_SERVER=unix:/run/user/1000/pulse/native \
+  PULSE_COOKIE=/home/pi/.config/pulse/cookie \
+  XDG_RUNTIME_DIR=/run/user/1000 \
+  parec --device=bluez_input.00_7F_1D_20_CC_F2.0 \
+    --property=node.dont-fallback=true --property=node.dont-reconnect=true \
+    --format=s16le --rate=16000 --channels=1 --raw

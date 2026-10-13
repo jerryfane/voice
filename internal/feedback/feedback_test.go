@@ -106,6 +106,32 @@ func (d *fakeDevice) Set(page, usage uint16, on bool) (bool, error) {
 }
 func (*fakeDevice) Describe() string { return "fake speakerphone" }
 
+func TestReconnectingLightRefreshesCapabilitiesAndFollowsCapture(t *testing.T) {
+	first := &fakeDevice{usages: map[uint16]bool{}}
+	light := NewReconnectingLight(first, LightAuto)
+	if err := light.Set(Listening); err != nil {
+		t.Fatal(err)
+	}
+	first.usages[hid.LEDMic] = true
+	if err := light.Set(Listening); err != nil {
+		t.Fatal(err)
+	}
+	if !first.on[hid.LEDMic] {
+		t.Fatal("reconnected microphone did not regain indicator")
+	}
+	if err := light.Set(Idle); err != nil {
+		t.Fatal(err)
+	}
+	second := &fakeDevice{usages: map[uint16]bool{hid.LEDRing: true}}
+	light.Select(second)
+	if err := light.Set(Listening); err != nil {
+		t.Fatal(err)
+	}
+	if !second.on[hid.LEDRing] || first.on[hid.LEDMic] {
+		t.Fatal("indicator did not follow capture selection")
+	}
+}
+
 func TestAutoLightPrefersMicrophoneLED(t *testing.T) {
 	dev := &fakeDevice{usages: map[uint16]bool{hid.LEDOffHook: true, hid.LEDRing: true, hid.LEDMic: true}}
 	ind, why := NewLight(dev, LightAuto)

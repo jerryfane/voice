@@ -21,6 +21,7 @@ import (
 
 	"github.com/jerryfane/voice/internal/audio"
 	"github.com/jerryfane/voice/internal/feedback"
+	"github.com/jerryfane/voice/internal/speech"
 )
 
 // Command is an argv template. Placeholders are expanded by internal/proc:
@@ -180,6 +181,97 @@ type Input struct {
 	// capture until the host signals "off hook" (for example Anker PowerConf).
 	// Voice sends the standard report before capture and clears it on stop.
 	TelephonyHID string `json:"telephony_hid,omitempty"`
+	// Recovery opts into continuous health monitoring, even without fallbacks.
+	// Fallbacks also enable recovery with defaults when Recovery is omitted.
+	Recovery  *InputRecovery  `json:"recovery,omitempty"`
+	Fallbacks []InputFallback `json:"fallbacks,omitempty"`
+}
+
+// InputFallback inherits input.sample_rate and must emit the same mono PCM
+// format. Output optionally pairs a speaker with this capture source; omitted
+// output keeps the primary speaker. Order is preference, never persisted state.
+type InputFallback struct {
+	Device       string  `json:"device"`
+	Command      Command `json:"command"`
+	TelephonyHID string  `json:"telephony_hid,omitempty"`
+	Output       *Output `json:"output,omitempty"`
+}
+
+// InputRecovery zero/omitted durations use defaults. Readiness requires actual
+// nonzero samples; quiet nonzero audio is healthy, unlike persistent exact zeros.
+type InputRecovery struct {
+	ReadyTimeout      Duration `json:"ready_timeout,omitempty"`
+	StallTimeout      Duration `json:"stall_timeout,omitempty"`
+	ZeroTimeout       Duration `json:"zero_timeout,omitempty"`
+	RetryInterval     Duration `json:"retry_interval,omitempty"`
+	PreferredInterval Duration `json:"preferred_interval,omitempty"`
+}
+
+func (i Input) RecoveryEnabled() bool { return i.Recovery != nil || len(i.Fallbacks) != 0 }
+
+// RecoveryOptions resolves omitted durations without mutating loaded config.
+func (i Input) RecoveryOptions() audio.RecoveryOptions {
+	o := audio.DefaultRecoveryOptions()
+	if r := i.Recovery; r != nil {
+		if r.ReadyTimeout != 0 {
+			o.ReadyTimeout = r.ReadyTimeout.D()
+		}
+		if r.StallTimeout != 0 {
+			o.StallTimeout = r.StallTimeout.D()
+		}
+		if r.ZeroTimeout != 0 {
+			o.ZeroTimeout = r.ZeroTimeout.D()
+		}
+		if r.RetryInterval != 0 {
+			o.RetryInterval = r.RetryInterval.D()
+		}
+		if r.PreferredInterval != 0 {
+			o.PreferredInterval = r.PreferredInterval.D()
+		}
+	}
+	return o
+}
+
+func (i Input) validateRecovery() error {
+	if !i.RecoveryEnabled() {
+		return nil
+	}
+	if len(i.Fallbacks) > 8 {
+		return fmt.Errorf("input.fallbacks must contain at most 8 choices")
+	}
+	if len(i.Command) == 0 || strings.TrimSpace(i.Command[0]) == "" {
+		return fmt.Errorf("input.command executable is empty")
+	}
+	if i.TelephonyHID != "" && strings.TrimSpace(i.TelephonyHID) == "" {
+		return fmt.Errorf("input.telephony_hid cannot be whitespace")
+	}
+	o := i.RecoveryOptions()
+	for _, setting := range []struct {
+		name            string
+		value, min, max time.Duration
+	}{
+		{"ready_timeout", o.ReadyTimeout, 100 * time.Millisecond, time.Minute},
+		{"stall_timeout", o.StallTimeout, 100 * time.Millisecond, time.Minute},
+		{"zero_timeout", o.ZeroTimeout, time.Second, 10 * time.Minute},
+		{"retry_interval", o.RetryInterval, 100 * time.Millisecond, time.Minute},
+		{"preferred_interval", o.PreferredInterval, time.Second, time.Hour},
+	} {
+		if setting.value < setting.min || setting.value > setting.max {
+			return fmt.Errorf("input.recovery.%s must be between %s and %s", setting.name, setting.min, setting.max)
+		}
+	}
+	for n, fallback := range i.Fallbacks {
+		if len(fallback.Command) == 0 || strings.TrimSpace(fallback.Command[0]) == "" {
+			return fmt.Errorf("input.fallbacks[%d].command is empty", n)
+		}
+		if fallback.TelephonyHID != "" && strings.TrimSpace(fallback.TelephonyHID) == "" {
+			return fmt.Errorf("input.fallbacks[%d].telephony_hid cannot be whitespace", n)
+		}
+		if output := fallback.Output; output != nil && (len(output.Command) == 0 || strings.TrimSpace(output.Command[0]) == "") {
+			return fmt.Errorf("input.fallbacks[%d].output.command is empty", n)
+		}
+	}
+	return nil
 }
 
 // Output describes audio playback.
@@ -212,6 +304,10 @@ type Wake struct {
 	// FollowUpTimeout is how long a standalone wake keeps one unwaked command
 	// slot open after its acknowledgement sound finishes.
 	FollowUpTimeout Duration `json:"follow_up_timeout"`
+	// InFlightWindow allows a few wake-free turns while an already authorized
+	// agent task runs. Zero turns (the default) keeps this feature off.
+	InFlightWindow Duration `json:"in_flight_window,omitempty"`
+	InFlightTurns  int      `json:"in_flight_turns,omitempty"`
 	// VAD tunes speech segmentation.
 	VAD VAD `json:"vad"`
 }
@@ -265,6 +361,8 @@ type STT struct {
 	Engine
 	Resident   *ResidentSTT   `json:"resident,omitempty"`
 	OpenRouter *OpenRouterSTT `json:"openrouter,omitempty"`
+	// Vocabulary is optional terminology and explicit whole-term corrections.
+	Vocabulary *speech.VocabularyConfig `json:"vocabulary,omitempty"`
 }
 
 // ResidentSTT describes a loopback-only whisper.cpp server.
@@ -321,6 +419,9 @@ type Brain struct {
 	Rules bool `json:"rules"`
 	// Jev optionally routes bounded device actions before the agent.
 	Jev *Jev `json:"jev,omitempty"`
+	// Front optionally handles brief conversational replies during in-flight work.
+	// Nil leaves the front desk disabled and makes no provider requests.
+	Front *Front `json:"front,omitempty"`
 }
 
 // Jev configures one OpenRouter Decisions request. APIKeyEnv names the
@@ -331,6 +432,15 @@ type Jev struct {
 	APIKeyEnv  string   `json:"api_key_env"`
 	Confidence float64  `json:"confidence"`
 	Timeout    Duration `json:"timeout"`
+}
+
+// Front is a text-only OpenRouter Chat Completions front desk. The API key is
+// read from the named environment variable, never stored in config.
+type Front struct {
+	Endpoint  string   `json:"endpoint"`
+	Model     string   `json:"model"`
+	APIKeyEnv string   `json:"api_key_env"`
+	Timeout   Duration `json:"timeout"`
 }
 
 // Light is a Zengge/Magic Home controller.
@@ -685,6 +795,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("input.sample_rate must be between %d and %d (16000 for whisper), got %d",
 			audio.MinSampleRate, audio.MaxSampleRate, c.Input.SampleRate)
 	}
+	if err := c.Input.validateRecovery(); err != nil {
+		return err
+	}
 	if len(c.Wake.Phrases) == 0 {
 		return fmt.Errorf("wake.phrases is empty: Voice would never wake")
 	}
@@ -727,11 +840,28 @@ func (c Config) Validate() error {
 	if c.Wake.FollowUpTimeout.D() <= 0 {
 		return fmt.Errorf("wake.follow_up_timeout must be positive")
 	}
+	if c.Wake.InFlightTurns < 0 || c.Wake.InFlightTurns > 3 {
+		return fmt.Errorf("wake.in_flight_turns must be between 0 and 3")
+	}
+	if c.Wake.InFlightTurns > 0 {
+		if c.Wake.Detector != "sherpa" {
+			return fmt.Errorf("wake.in_flight_turns requires the local sherpa wake detector")
+		}
+		if c.Wake.InFlightWindow.D() <= 0 || c.Wake.InFlightWindow.D() > 30*time.Second {
+			return fmt.Errorf("wake.in_flight_window must be positive and at most 30s when enabled")
+		}
+	}
 	if c.Wake.VAD.Silence.D() <= 0 {
 		return fmt.Errorf("wake.vad.silence must be positive, else an utterance never ends")
 	}
+	if c.Input.RecoveryEnabled() && c.Wake.VAD.Silence.D() > time.Hour {
+		return fmt.Errorf("wake.vad.silence must not exceed 1h with microphone recovery enabled")
+	}
 	if c.Wake.VAD.MaxUtterance.D() <= c.Wake.VAD.MinSpeech.D() {
 		return fmt.Errorf("wake.vad.max_utterance must exceed min_speech")
+	}
+	if err := c.STT.Vocabulary.Validate(); err != nil {
+		return fmt.Errorf("stt.vocabulary: %w", err)
 	}
 	if c.STT.Resident != nil {
 		if strings.TrimSpace(c.STT.Resident.Endpoint) == "" {
@@ -857,6 +987,21 @@ func (c Config) Validate() error {
 			return fmt.Errorf("brain.jev.timeout must be positive")
 		}
 	}
+	if front := c.Brain.Front; front != nil {
+		u, err := url.Parse(front.Endpoint)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("brain.front.endpoint must be an HTTPS URL without credentials, query or fragment")
+		}
+		if strings.TrimSpace(front.Model) == "" {
+			return fmt.Errorf("brain.front.model is empty")
+		}
+		if !validFrontKeyEnv(front.APIKeyEnv) {
+			return fmt.Errorf("brain.front.api_key_env must name an environment variable (uppercase letters, digits and underscores)")
+		}
+		if front.Timeout.D() <= 0 {
+			return fmt.Errorf("brain.front.timeout must be positive")
+		}
+	}
 	// Only meaningful when the feature is on: a deployment that never
 	// records proposals should not be refused startup over the interval
 	// between questions it will never ask.
@@ -930,4 +1075,17 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validFrontKeyEnv(s string) bool {
+	if s == "" || !((s[0] >= 'A' && s[0] <= 'Z') || s[0] == '_') {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
 }

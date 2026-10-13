@@ -3,7 +3,7 @@ set -eu
 
 agent_user=voice-agent
 responses=${VOICE_AGENT_RESPONSES:-/home/voice-agent/.local/share/voice/responses}
-herdr=${VOICE_AGENT_HERDR:-/usr/local/bin/herdr}
+herdr=${VOICE_AGENT_HERDR:-/usr/local/libexec/voice-herdr}
 ensure=${VOICE_AGENT_HERDR_ENSURE:-/usr/local/bin/voice-herdr-ensure}
 timeout_ms=${VOICE_AGENT_HERDR_TIMEOUT_MS:-600000}
 
@@ -40,16 +40,15 @@ prompt="$1
 <voice-request id=\"$request_id\">
 Use this identifier only for the structured response channel; do not mention it in your answer."
 
+deadline_ms=$(( $(date +%s%3N) + timeout_ms ))
 if ! "$herdr" agent prompt voice "$prompt" --wait --timeout "$timeout_ms" >/dev/null; then
   echo "failed to prompt the Herdr voice agent" >&2
   exit 1
 fi
 
-attempt=0
 while [ ! -s "$response" ]; do
-  attempt=$((attempt + 1))
-  if [ "$attempt" -ge 100 ]; then
-    echo "the Herdr voice agent finished without a structured response" >&2
+  if [ "$(date +%s%3N)" -ge "$deadline_ms" ]; then
+    echo "the Herdr voice agent did not produce a structured response within the configured timeout" >&2
     exit 1
   fi
   sleep 0.1

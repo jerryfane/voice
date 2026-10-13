@@ -1,0 +1,68 @@
+#!/bin/sh
+# Sudoers grants voice-agent this command as spotify-player, not arbitrary
+# programs. Validate the complete argv before reaching the private credentials
+# or the shared Pebble audio device.
+set -eu
+
+if [ "$(id -un)" != spotify-player ]; then
+    echo 'voice-spotify-control must run as spotify-player' >&2
+    exit 1
+fi
+
+if [ "$#" -eq 1 ] && [ "$1" = play-wav ]; then
+    export ALSA_CONFIG_PATH=/etc/voice/spotify-alsa.conf
+    exec /usr/bin/aplay -q -
+fi
+
+valid=false
+case "${1-}" in
+    get)
+        if [ "$#" -eq 3 ] && [ "$2" = key ] && [ "$3" = playback ]; then
+            valid=true
+        fi
+        ;;
+    connect)
+        if [ "$#" -eq 3 ] && [ "$2" = --name ] && [ "$3" = spotify-player ]; then
+            valid=true
+        fi
+        ;;
+    playback)
+        case "${2-}" in
+            play|pause|next|previous)
+                if [ "$#" -eq 2 ]; then valid=true; fi
+                ;;
+            volume)
+                if [ "$#" -eq 3 ]; then
+                    case "$3" in
+                        ''|*[!0-9]*) ;;
+                        *) if [ "$3" -le 100 ] 2>/dev/null; then valid=true; fi ;;
+                    esac
+                fi
+                ;;
+            start)
+                case "${3-}" in
+                    liked)
+                        if [ "$#" -eq 4 ] && [ "$4" = --random ]; then valid=true; fi
+                        ;;
+                    track)
+                        if [ "$#" -eq 5 ] && [ "$4" = --name ] && [ -n "$5" ]; then valid=true; fi
+                        ;;
+                    context)
+                        if [ "$#" -eq 6 ] && [ "$4" = --name ] && [ -n "$5" ]; then
+                            case "$6" in album|artist|playlist) valid=true ;; esac
+                        fi
+                        ;;
+                esac
+                ;;
+        esac
+        ;;
+esac
+
+if [ "$valid" != true ]; then
+    echo 'unsupported Voice Spotify command' >&2
+    exit 2
+fi
+
+export ALSA_CONFIG_PATH=/etc/voice/spotify-alsa.conf
+exec /usr/local/bin/spotify_player \
+    -c /var/lib/spotify-player/config -C /var/lib/spotify-player/cache "$@"

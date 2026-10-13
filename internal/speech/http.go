@@ -116,6 +116,8 @@ type WhisperServerTranscriber struct {
 	Endpoint string
 	Timeout  time.Duration
 	Client   HTTPDoer
+	// Vocabulary uses whisper.cpp's multipart "prompt" field (v1.9.4).
+	Vocabulary string
 }
 
 func NewWhisperServerTranscriber(endpoint string, timeout time.Duration) *WhisperServerTranscriber {
@@ -143,11 +145,15 @@ func (t *WhisperServerTranscriber) Available() (bool, string) {
 }
 
 func (t *WhisperServerTranscriber) Transcribe(ctx context.Context, pcm []int16, f audio.Format) (string, error) {
-	body, contentType, err := transcriptionForm(audio.EncodeWAV(pcm, f), map[string]string{
+	fields := map[string]string{
 		"language":        "en",
 		"response_format": "json",
 		"temperature":     "0.0",
-	})
+	}
+	if t.Vocabulary != "" {
+		fields["prompt"] = t.Vocabulary
+	}
+	body, contentType, err := transcriptionForm(audio.EncodeWAV(pcm, f), fields)
 	if err != nil {
 		return "", err
 	}

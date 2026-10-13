@@ -3,6 +3,7 @@ package feedback
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/jerryfane/voice/internal/hid"
 )
@@ -107,3 +108,37 @@ func (t *TelephonyLight) Set(s State) error {
 }
 
 func (t *TelephonyLight) Describe() string { return t.name + " on " + t.dev.Describe() }
+
+// ReconnectingLight resolves capabilities on each state change, not only at
+// startup. A USB microphone absent during Build can therefore regain its light
+// after the shared Telephony handle reopens; unsupported hardware stays benign.
+type ReconnectingLight struct {
+	mu     sync.Mutex
+	device Device
+	choice string
+}
+
+func NewReconnectingLight(device Device, choice string) *ReconnectingLight {
+	return &ReconnectingLight{device: device, choice: choice}
+}
+
+// Select pairs subsequent indicator writes with the selected capture source.
+func (l *ReconnectingLight) Select(device Device) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.device = device
+}
+
+func (l *ReconnectingLight) Set(state State) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	light, _ := NewLight(l.device, l.choice)
+	return light.Set(state)
+}
+
+func (l *ReconnectingLight) Describe() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, description := NewLight(l.device, l.choice)
+	return description
+}

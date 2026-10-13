@@ -1,0 +1,40 @@
+#!/bin/sh
+# Host-specific PowerConf reconnect helper. USB and Bluetooth must not compete
+# for this speakerphone's microphone. Keep pairing, but block its Bluetooth
+# link while USB is present; disconnect alone permits an incoming reconnect.
+set -eu
+mac=00:7F:1D:20:CC:F2
+card=bluez_card.00_7F_1D_20_CC_F2
+
+info=$(bluetoothctl info "$mac")
+connected=$(printf '%s\n' "$info" | awk '/Connected:/ {print $2}')
+blocked=$(printf '%s\n' "$info" | awk '/Blocked:/ {print $2}')
+if [ -d /proc/asound/PowerConf ]; then
+  [ "$blocked" = yes ] || bluetoothctl block "$mac"
+  exit 0
+fi
+
+# USB removal restores Bluetooth automatically without re-pairing.
+if [ "$blocked" = yes ]; then
+  bluetoothctl unblock "$mac"
+fi
+
+if [ "$connected" != yes ]; then
+  bluetoothctl connect "$mac" >/dev/null || exit 0
+  sleep 3
+fi
+
+profile=$(sudo -n -u pi env HOME=/home/pi \
+  PULSE_SERVER=unix:/run/user/1000/pulse/native \
+  PULSE_COOKIE=/home/pi/.config/pulse/cookie \
+  XDG_RUNTIME_DIR=/run/user/1000 \
+  pactl list cards 2>/dev/null | awk -v c="$card" '
+    $1 == "Name:" && $2 == c {found=1}
+    found && $1 == "Active" && $2 == "Profile:" {print $3; exit}')
+
+[ "$profile" = headset-head-unit ] && exit 0
+sudo -n -u pi env HOME=/home/pi \
+  PULSE_SERVER=unix:/run/user/1000/pulse/native \
+  PULSE_COOKIE=/home/pi/.config/pulse/cookie \
+  XDG_RUNTIME_DIR=/run/user/1000 \
+  pactl set-card-profile "$card" headset-head-unit

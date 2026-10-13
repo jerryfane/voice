@@ -9,17 +9,24 @@ import (
 )
 
 type fakeKeywordDetector struct {
-	matchAt int
-	calls   int
-	started bool
-	closed  bool
-	err     error
+	matchAt  int
+	calls    int
+	started  bool
+	closed   bool
+	err      error
+	resets   int
+	resetErr error
 }
 
 func (*fakeKeywordDetector) Name() string              { return "fake keyword detector" }
 func (*fakeKeywordDetector) Available() (bool, string) { return true, "available" }
 func (d *fakeKeywordDetector) Start() error            { d.started = true; return nil }
 func (d *fakeKeywordDetector) Close()                  { d.closed = true }
+func (d *fakeKeywordDetector) Reset() error {
+	d.resets++
+	d.calls = 0
+	return d.resetErr
+}
 func (d *fakeKeywordDetector) Accept(int, []int16) (string, error) {
 	d.calls++
 	if d.err != nil {
@@ -29,6 +36,102 @@ func (d *fakeKeywordDetector) Accept(int, []int16) (string, error) {
 		return "HEY_VOICE", nil
 	}
 	return "", nil
+}
+
+func TestInFlightWindowBoundsWakeFreeCapture(t *testing.T) {
+	detector := &fakeKeywordDetector{}
+	segmenter := NewKeyword(Params{Threshold: .01, FrameSize: 4, MinSpeech: 2, Silence: 2, MaxUtterance: 10}, detector, nil)
+	if err := segmenter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer segmenter.Close() // discard: Close only releases the fake detector and has no result.
+	segmenter.SetInFlightWindow(time.Now().Add(time.Minute), 1)
+
+	in := make(chan []int16, 12)
+	for range 3 {
+		in <- sampleFrame(2000, 4)
+	}
+	in <- sampleFrame(0, 4)
+	in <- sampleFrame(0, 4)
+	for range 3 {
+		in <- sampleFrame(2000, 4)
+	}
+	in <- sampleFrame(0, 4)
+	in <- sampleFrame(0, 4)
+	close(in)
+	out := segmenter.Run(context.Background(), in, audio.Format{SampleRate: 40, Channels: 1})
+	u, ok := <-out
+	if !ok || !u.WakeMatched || !u.WakeAcknowledged || u.Keyword != "IN_FLIGHT" {
+		t.Fatalf("authorized in-flight utterance = %+v, present=%v", u, ok)
+	}
+	if _, ok := <-out; ok {
+		t.Fatal("one-turn window accepted a second wake-free command")
+	}
+}
+
+func TestInFlightCommandCompletesWhenCaptureCloses(t *testing.T) {
+	segmenter := NewKeyword(Params{Threshold: .01, FrameSize: 4, MinSpeech: 2, Silence: 2, MaxUtterance: 10}, &fakeKeywordDetector{}, nil)
+	if err := segmenter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer segmenter.Close() // discard: Close only releases the fake detector and has no result.
+	segmenter.SetInFlightWindow(time.Now().Add(time.Minute), 1)
+	in := make(chan []int16, 2)
+	in <- sampleFrame(2000, 4)
+	in <- sampleFrame(2000, 4)
+	close(in)
+	out := segmenter.Run(context.Background(), in, audio.Format{SampleRate: 40, Channels: 1})
+	u, ok := <-out
+	if !ok || u.Keyword != "IN_FLIGHT" || !u.WakeMatched {
+		t.Fatalf("closed capture lost authorized turn: %+v, present=%v", u, ok)
+	}
+	if _, ok := <-out; ok {
+		t.Fatal("closed capture emitted a second turn")
+	}
+}
+
+func TestExpiredInFlightWindowDoesNotUploadAmbientAudio(t *testing.T) {
+	detector := &fakeKeywordDetector{}
+	segmenter := NewKeyword(Params{Threshold: .01, FrameSize: 4, MinSpeech: 1, Silence: 2}, detector, nil)
+	if err := segmenter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer segmenter.Close() // discard: Close only releases the fake detector and has no result.
+	segmenter.SetInFlightWindow(time.Now().Add(-time.Second), 2)
+	in := make(chan []int16, 4)
+	for range 4 {
+		in <- sampleFrame(2000, 4)
+	}
+	close(in)
+	if _, ok := <-segmenter.Run(context.Background(), in, audio.Format{SampleRate: 40, Channels: 1}); ok {
+		t.Fatal("expired authorization emitted ambient audio")
+	}
+	if detector.calls != 4 {
+		t.Fatalf("wake detector saw %d ambient frames, want 4", detector.calls)
+	}
+}
+
+func TestInFlightWindowDiscardsSpeakerAudioAndTail(t *testing.T) {
+	detector := &fakeKeywordDetector{}
+	segmenter := NewKeyword(Params{Threshold: .01, FrameSize: 4, MinSpeech: 1, Silence: 2}, detector, nil)
+	if err := segmenter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer segmenter.Close() // discard: Close only releases the fake detector and has no result.
+	segmenter.SetInFlightWindow(time.Now().Add(time.Minute), 2)
+	segmenter.Suspend()
+
+	in := make(chan []int16, 5)
+	for range 3 {
+		in <- sampleFrame(2000, 4)
+	}
+	segmenter.ResumeAfter(time.Hour) // the hardware tail is still in the input buffer
+	in <- sampleFrame(2000, 4)
+	in <- sampleFrame(0, 4)
+	close(in)
+	if _, ok := <-segmenter.Run(context.Background(), in, audio.Format{SampleRate: 40, Channels: 1}); ok {
+		t.Fatal("speaker output was transcribed as an in-flight command")
+	}
 }
 
 func TestKeywordSegmenterDiscardsNonWakeAudio(t *testing.T) {
