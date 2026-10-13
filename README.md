@@ -937,6 +937,11 @@ A spoken command can cause shell or browser activity. Isolation is therefore an 
 
 Anyone who can speak near the microphone may still exercise the authority available to `voice-agent`. Do not grant that account secrets or host permissions you would not expose to nearby speakers.
 
+Runtime cleanup failures are reported rather than silently discarded, including
+capture-pipe cancellation, device response/socket closure, health snapshot
+closure, and timer-schema rollback. Home Assistant cleanup errors remain
+redacted; cleanup errors do not replace the original request or migration failure.
+
 ## License
 
 MIT

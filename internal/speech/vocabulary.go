@@ -245,8 +245,12 @@ func (v *Vocabulary) Correct(raw string) string {
 					end = pos
 					continue
 				}
-				out.WriteString(raw[copied:pos])
-				out.WriteString(rule.to)
+				if _, err := out.WriteString(raw[copied:pos]); err != nil {
+					panic(err) // strings.Builder writes cannot fail.
+				}
+				if _, err := out.WriteString(rule.to); err != nil {
+					panic(err) // strings.Builder writes cannot fail.
+				}
 				copied = end
 				break
 			}
@@ -262,6 +266,8 @@ func (v *Vocabulary) Correct(raw string) string {
 	if copied == 0 {
 		return raw
 	}
-	out.WriteString(raw[copied:])
+	if _, err := out.WriteString(raw[copied:]); err != nil {
+		panic(err) // strings.Builder writes cannot fail.
+	}
 	return out.String()
 }

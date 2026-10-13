@@ -3,6 +3,7 @@ package device
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -36,6 +37,37 @@ func haJSON(t *testing.T, w http.ResponseWriter, value any) {
 	t.Helper()
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		t.Errorf("write response: %v", err)
+	}
+}
+
+type haCloseFailureBody struct{ *strings.Reader }
+
+func (haCloseFailureBody) Close() error { return errors.New(haTestToken) }
+
+type haCloseFailureTransport struct{ status int }
+
+func (t haCloseFailureTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: t.status,
+		Body:       haCloseFailureBody{strings.NewReader(`{}`)},
+		Header:     make(http.Header),
+	}, nil
+}
+
+func TestHomeAssistantCloseFailureIsReportedWithoutSecrets(t *testing.T) {
+	t.Setenv("VOICE_HA_TEST_TOKEN", haTestToken)
+	for _, status := range []int{http.StatusOK, http.StatusForbidden} {
+		api := &haAPI{
+			base: "http://127.0.0.1", tokenEnv: "VOICE_HA_TEST_TOKEN",
+			client: &http.Client{Transport: haCloseFailureTransport{status: status}},
+		}
+		err := api.request(context.Background(), http.MethodGet, "/api/", nil, nil)
+		if err == nil || strings.Contains(err.Error(), haTestToken) {
+			t.Fatalf("cleanup error was lost or leaked a secret: %v", err)
+		}
+		if status == http.StatusForbidden && !strings.Contains(err.Error(), "403") {
+			t.Fatalf("cleanup error replaced the HTTP failure: %v", err)
+		}
 	}
 }
 

@@ -214,9 +214,13 @@ func (a *Assistant) ApplyActions(ctx context.Context, actions []brain.Action) (s
 		}
 		if reply != "" {
 			if reads.Len() > 0 {
-				reads.WriteByte(' ')
+				if err := reads.WriteByte(' '); err != nil {
+					return "", err
+				}
 			}
-			reads.WriteString(reply)
+			if _, err := reads.WriteString(reply); err != nil {
+				return "", err
+			}
 		}
 	}
 	return reads.String(), nil
