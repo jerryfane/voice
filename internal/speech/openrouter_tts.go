@@ -63,6 +63,18 @@ func nativeSpeechEndpoint(endpoint string) bool {
 	return err == nil && strings.HasSuffix(strings.TrimRight(u.Path, "/"), "/audio/speech")
 }
 
+func dramaSpeechModel(model string) bool {
+	const base = "fish-audio/drama-3"
+	if model == base {
+		return true
+	}
+	if !strings.HasPrefix(model, base+"-") {
+		return false
+	}
+	_, err := time.Parse("20060102", strings.TrimPrefix(model, base+"-"))
+	return err == nil
+}
+
 func (s *OpenRouterSynthesizer) Available() (bool, string) {
 	if strings.TrimSpace(s.APIKey) == "" {
 		return false, "API key is not set"
@@ -84,6 +96,7 @@ func (s *OpenRouterSynthesizer) Synthesize(ctx context.Context, text string) ([]
 	if ok, why := s.Available(); !ok {
 		return nil, errors.New(why)
 	}
+	direction, text := SplitDelivery(text)
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, errors.New("speech text is empty")
@@ -91,6 +104,9 @@ func (s *OpenRouterSynthesizer) Synthesize(ctx context.Context, text string) ([]
 	native := nativeSpeechEndpoint(s.Endpoint)
 	var payload any
 	if native {
+		if direction != "" && dramaSpeechModel(s.Model) {
+			text = "[" + direction + "] " + text
+		}
 		payload = struct {
 			Model  string `json:"model"`
 			Input  string `json:"input"`

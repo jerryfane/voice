@@ -387,6 +387,10 @@ func (s *CommandSynthesizer) Available() (bool, string) {
 	return runnable(p)
 }
 func (s *CommandSynthesizer) Synthesize(ctx context.Context, text string) ([]byte, error) {
+	_, text = SplitDelivery(text)
+	if strings.TrimSpace(text) == "" {
+		return nil, errors.New("speech text is empty")
+	}
 	out, err := os.CreateTemp("", "voice-tts-*.wav")
 	if err != nil {
 		return nil, err

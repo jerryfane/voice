@@ -8,6 +8,7 @@ import (
 
 	"github.com/jerryfane/voice/internal/brain"
 	"github.com/jerryfane/voice/internal/device"
+	"github.com/jerryfane/voice/internal/speech"
 )
 
 type phoneReceiptDevice struct {
@@ -80,5 +81,50 @@ func TestPhoneReceiptPreservesReadResultsAndProposalReceipt(t *testing.T) {
 	}
 	if strings.Contains(plan.Speak, "call is complete") {
 		t.Fatalf("model claim escaped: %q", plan.Speak)
+	}
+}
+
+func TestDeliveryPreservesVerifiedReceiptsNotPlannerClaims(t *testing.T) {
+	const falseClaim = "The call is complete and the new feature is already installed."
+	const direction = "angry"
+	for _, scenario := range []struct {
+		name     string
+		actions  []brain.Action
+		proposal *brain.Proposal
+	}{
+		{name: "phone", actions: []brain.Action{{Device: "phone", Op: device.Op("dial")}}},
+		{name: "read", actions: []brain.Action{{Device: "front lock", Op: device.OpRead}}},
+		{name: "proposal", proposal: &brain.Proposal{Request: "support messages"}},
+		{name: "combined", actions: []brain.Action{{Device: "phone", Op: device.Op("dial")}, {Device: "front lock", Op: device.OpRead}}, proposal: &brain.Proposal{Request: "support messages"}},
+	} {
+		t.Run(direction+"/"+scenario.name, func(t *testing.T) {
+			a := &Assistant{Devices: device.NewRegistry(), Proposals: proposalStore(t)}
+			a.Devices.Add(&phoneReceiptDevice{state: device.State{"receipt": "Review the dialer on your phone."}})
+			a.Devices.Add(&readStateDevice{state: device.State{"state": "locked"}})
+			input := brain.Plan{Speak: falseClaim, Actions: scenario.actions, Proposal: scenario.proposal}
+			plain, err := a.ApplyPlan(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			input.Speak = "[voice: " + direction + "] " + falseClaim
+			styled, err := a.ApplyPlan(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotDirection, spoken := speech.SplitDelivery(styled.Speak)
+			if gotDirection != direction || spoken != plain.Speak {
+				t.Fatalf("delivery changed verified receipt: direction=%q spoken=%q; want direction=%q receipt=%q", gotDirection, spoken, direction, plain.Speak)
+			}
+			if spoken == "" || strings.Contains(spoken, falseClaim) {
+				t.Fatalf("model claim survived receipt replacement: %q", styled.Speak)
+			}
+			next, err := a.ApplyPlan(context.Background(), brain.Plan{Speak: "An ordinary reply with [literal brackets]."})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if next.Speak != "An ordinary reply with [literal brackets]." {
+				t.Fatalf("delivery leaked into a later reply: %q", next.Speak)
+			}
+		})
 	}
 }

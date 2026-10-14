@@ -511,6 +511,29 @@ the playback speed. Missing/invalid format metadata, empty or incomplete audio,
 oversized responses, missing credentials, timeouts and network failures fall
 back to Piper. Native TTS does not provide a transcript for comparison.
 
+With Drama 3, explicitly request delivery: “answer in an angry voice”,
+“sound excited”, or “check the phone and whisper the answer.” The agent marks
+that reply with a leading `[voice: direction]` inside the existing `speak`
+string. The synthesizer translates it to Drama's `[direction]` performance
+instruction, rather than changing the answer into aggressive wording. This
+applies only to the requested reply; subsequent ordinary replies and requests
+for a normal/natural voice are untagged.
+
+The reserved prefix is removed before Piper or other speech engines receive
+the text, including on fallback. Ordinary bracketed text and inline markers
+are preserved; only a valid leading `[voice: ...]` is metadata. Verified
+device/proposal receipts retain the delivery, never the model's unverified
+claims. Fast routing sends requests with delivery requirements to the agent.
+Changing the installed response guidance requires an idle agent `/restart`,
+in addition to restarting `voice.service` for the new binary.
+
+To exercise delivery directly, with the service's protected environment:
+
+```sh
+voice say "[voice: angry, speaking firmly] This is a voice test."
+voice say "[voice: whispering] This is a quiet voice test."
+```
+
 The shipped default remains `openai/gpt-audio-mini` with `marin` through
 `https://openrouter.ai/api/v1/chat/completions`. To switch back, restore those
 three fields and restart `voice.service`. That conversational audio path

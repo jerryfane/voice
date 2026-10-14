@@ -76,7 +76,7 @@ func (j *Jev) Plan(ctx context.Context, transcript string, inventory []device.In
 		Questions: map[string]interface{}{
 			"route": map[string]any{
 				"type":         "choice",
-				"instructions": "Choose exactly one safe route. Select a device action only for a direct, unambiguous request that needs no missing argument. Otherwise choose agent.",
+				"instructions": "Choose exactly one safe route. Select a device action only for a direct, unambiguous request that needs no missing argument or additional response behavior. Requests for a particular speaking tone or delivery must choose agent. Otherwise choose agent.",
 				"criteria":     criteria,
 			},
 		},
@@ -153,7 +153,7 @@ type routeAction struct {
 
 func routeChoices(inventory []device.Info) (map[string]string, map[string]routeAction) {
 	criteria := map[string]string{
-		"agent": "Any conversational, informational, ambiguous, named-search, or argument-bearing request; any request not exactly covered by another choice.",
+		"agent": "Any conversational, informational, ambiguous, named-search, or argument-bearing request; any request for a speaking tone or delivery (such as angry, excited, or whispered); any request not exactly covered by another choice.",
 	}
 	actions := make(map[string]routeAction)
 	n := 0

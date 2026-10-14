@@ -102,11 +102,15 @@ func (a *Assistant) ApplyPlan(ctx context.Context, p brain.Plan) (brain.Plan, er
 	if err := ctx.Err(); err != nil {
 		return p, err
 	}
+	direction, _ := speech.SplitDelivery(p.Speak)
 	if p.Proposal != nil {
 		p.Speak = a.recordProposal(p)
 	}
 	readReply, err := a.ApplyActions(ctx, p.Actions)
 	if err != nil {
+		if direction != "" && p.Proposal != nil {
+			p.Speak = "[voice: " + direction + "] " + p.Speak
+		}
 		return p, err
 	}
 	if readReply != "" {
@@ -115,6 +119,10 @@ func (a *Assistant) ApplyPlan(ctx context.Context, p brain.Plan) (brain.Plan, er
 		} else {
 			p.Speak = readReply
 		}
+	}
+	// Carry only delivery metadata across receipt replacement, never model words.
+	if direction != "" && (p.Proposal != nil || readReply != "") {
+		p.Speak = "[voice: " + direction + "] " + p.Speak
 	}
 	return p, nil
 }
