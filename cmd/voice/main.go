@@ -312,7 +312,7 @@ Usage: voice [--config PATH] COMMAND
   climate ID OP [VALUE]    read/control an explicitly allowlisted smart thermostat
   lock ID read             read an exposed HA lock; never lock/unlock
   phone ID OP [VALUE]       request a configured structured Android phone task
-  phone ID observe         JSON UI hierarchy + private local full-screen PNG path
+  phone ID observe [--screenshot|--both] compact UI (default), image only, or both
   phone ID adb COMMAND [ARGS...] general phone ADB command (configured serial pinned)
   proposals CMD [ARGS]      track what Voice was asked for and could not do
   config                    print effective config
@@ -327,9 +327,16 @@ Phone ops: read, open-app ALIAS, dial NUMBER, volume-up, volume-down, pause, res
 Phone tools observe/adb require android.agent_control=true (false by default), adb,
 an explicit serial, and existing on-phone ADB authorization. They do not use audio.
 General control has no app/action allowlist and can access private screen/data content.
-Observe returns screenshot_path, ui_hierarchy, and optional warnings; read the PNG
-visually, act with adb, then observe again to verify. The latest PNG is replaced on
-each observation and kept 0600 in the private state directory. UI XML may be unavailable.
+Observe returns kind="voice.android.observation", compact ui.elements, and optional warnings.
+Elements retain labels, descriptions, roles, resource IDs, bounds and true state flags;
+absent state flags are false. parent_id links the nearest retained ancestor target.
+Large UI output explicitly marks truncated fields and omitted elements. No raw XML is
+returned; general adb can retrieve the full hierarchy when needed. Default observation
+uses UI only, falling back to a fresh screenshot if UI is missing, invalid or timed out.
+--screenshot skips UI automation entirely; --both requests UI plus a full-screen image.
+screenshot_path appears only for a fresh PNG, kept 0600 in the private state directory
+and replaced or removed on the next observation. Read it visually when provided.
+Act with adb, group predictable safe steps, then observe again to verify the final result.
 ADB forwards raw stdout/stderr, fails on nonzero exit, and intentionally supports remote
 shell commands, e.g. phone ID adb shell input tap X Y. No host shell is constructed.
 Global ADB options and host transport management are denied; wait-for-* must stand alone.

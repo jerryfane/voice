@@ -153,7 +153,11 @@ sudo install -m 0755 packaging/voice-herdr-ensure /usr/local/bin/voice-herdr-ens
 sudo install -m 0755 packaging/voice-proposals-broker /usr/local/bin/voice-proposals-broker
 sudo install -m 0755 packaging/voice-agent-session /usr/local/bin/voice-agent-session
 sudo install -m 0755 packaging/voice-agent-run /usr/local/bin/voice-agent-run
-sudo install -o "$agent_user" -g "$agent_user" -m 0644 packaging/voice-response.ts "$agent_home/.omp/agent/extensions/voice-response.ts"
+# Keep helpers inside one directory-style extension, not separate auto-loaded modules.
+sudo install -d -o "$agent_user" -g "$agent_user" -m 0750 "$agent_home/.omp/agent/extensions/voice-response"
+sudo install -o "$agent_user" -g "$agent_user" -m 0644 packaging/voice-response.ts "$agent_home/.omp/agent/extensions/voice-response/index.ts"
+sudo install -o "$agent_user" -g "$agent_user" -m 0644 packaging/voice-phone-context.ts "$agent_home/.omp/agent/extensions/voice-response/voice-phone-context.ts"
+sudo rm -f "$agent_home/.omp/agent/extensions/voice-response.ts"
 
 # The public wrapper has two security domains: the owner keeps the complete
 # Herdr CLI (federation uses `api`), while voice-agent crosses sudo into the

@@ -18,6 +18,10 @@ jobs:
           go-version: '1.24.x'
           cache: false
       - run: go test ./...
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - run: node --experimental-strip-types --test packaging/voice-phone-context.test.ts
       - run: go vet ./...
       - run: test -z "$(gofmt -l .)"
       # Type-aware unhandled-error check. Run with `go run pkg@version` so it

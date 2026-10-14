@@ -3,6 +3,7 @@ package device
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -13,20 +14,60 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jerryfane/voice/internal/config"
 	"github.com/jerryfane/voice/internal/proc"
 )
 
-const androidUITimeout = 5 * time.Second
+const (
+	androidUITimeout     = 5 * time.Second
+	androidUIMaxElements = 128
+	androidUIMaxBytes    = 32 * 1024
+)
 
-// AndroidObservation is tool output, never a spoken device receipt. The PNG is
-// the full screencap, not a rendered hierarchy. Each observation replaces the
-// previous local screenshot; callers should inspect it before the next observe.
+// AndroidObserveMode selects compact UI, a screenshot without UI automation,
+// or both. UI failure automatically falls back to a fresh screenshot.
+type AndroidObserveMode uint8
+
+const (
+	AndroidObserveUI AndroidObserveMode = iota
+	AndroidObserveScreenshot
+	AndroidObserveBoth
+)
+
+// AndroidObservation is private tool output, never a spoken device receipt.
+// ScreenshotPath is present only for a fresh full-screen capture. Its private
+// file is replaced or removed by the next observation.
 type AndroidObservation struct {
-	ScreenshotPath string   `json:"screenshot_path"`
-	UIHierarchy    string   `json:"ui_hierarchy"`
-	Warnings       []string `json:"warnings,omitempty"`
+	Kind           string     `json:"kind"`
+	UI             *AndroidUI `json:"ui,omitempty"`
+	ScreenshotPath string     `json:"screenshot_path,omitempty"`
+	Warnings       []string   `json:"warnings,omitempty"`
+}
+
+// AndroidUI omits decorative containers and bounds the serialized elements.
+// Truncated includes shortened fields; OmittedElements counts excluded useful
+// nodes. General ADB access remains available for full hierarchy recovery.
+type AndroidUI struct {
+	Elements        []AndroidUIElement `json:"elements"`
+	Truncated       bool               `json:"truncated,omitempty"`
+	OmittedElements int                `json:"omitted_elements,omitempty"`
+}
+
+// AndroidUIElement retains labels and the nearest retained ancestor target.
+// IDs are observation-local. States lists true flags; absent flags are false.
+// Enabled, checked and selected therefore preserve their negative states too.
+type AndroidUIElement struct {
+	ID              int      `json:"id"`
+	ParentID        int      `json:"parent_id,omitempty"`
+	Text            string   `json:"text,omitempty"`
+	Description     string   `json:"description,omitempty"`
+	Role            string   `json:"role,omitempty"`
+	ResourceID      string   `json:"resource_id,omitempty"`
+	Bounds          string   `json:"bounds,omitempty"`
+	States          []string `json:"states"`
+	TruncatedFields []string `json:"truncated_fields,omitempty"`
 }
 
 func (d *Android) checkAgentControl() error {
@@ -89,12 +130,14 @@ func (d *Android) agentRun(ctx context.Context, args ...string) (proc.Result, er
 	return out, err
 }
 
-// Observe captures the actual screen before attempting UI XML. UI automation
-// is not supported on every screen; its bounded failure becomes an explicit
-// warning, while a failed screenshot or caller cancellation remains an error.
-func (d *Android) Observe(ctx context.Context) (observation AndroidObservation, err error) {
+// Observe returns compact actionable UI by default. Missing, invalid or timed
+// out UI triggers a fresh PNG; screenshot-only mode never starts UI automation.
+func (d *Android) Observe(ctx context.Context, mode AndroidObserveMode) (observation AndroidObservation, err error) {
 	if err := d.checkAgentControl(); err != nil {
 		return AndroidObservation{}, err
+	}
+	if mode > AndroidObserveBoth {
+		return AndroidObservation{}, errors.New("invalid Android observation mode")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
@@ -116,6 +159,34 @@ func (d *Android) Observe(ctx context.Context) (observation AndroidObservation, 
 			err = errors.Join(err, fmt.Errorf("close Android observation lock: %w", closeErr))
 		}
 	}()
+	// Invalidate the previous image even for UI-only observations or failures.
+	// No old screenshot may masquerade as the current screen.
+	path := filepath.Join(dir, "screen.png")
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return AndroidObservation{}, fmt.Errorf("remove previous Android screenshot: %w", err)
+	}
+	observation = AndroidObservation{Kind: "voice.android.observation"}
+	if mode != AndroidObserveScreenshot {
+		uiCtx, uiCancel := context.WithTimeout(ctx, androidUITimeout)
+		// Remove the fixed remote file before dumping so stale XML cannot
+		// masquerade as the current screen; clean it on normal exit.
+		out, uiErr := d.agentRun(uiCtx, "shell", "-T", "sh", "-c", "'p=/data/local/tmp/voice-window.xml; trap \"rm -f $p\" EXIT; rm -f \"$p\" && uiautomator dump \"$p\" >/dev/null && cat \"$p\"'")
+		uiCancel()
+		if ctx.Err() != nil {
+			return AndroidObservation{}, ctx.Err()
+		}
+		if uiErr == nil {
+			observation.UI, uiErr = androidHierarchy(out.Stdout)
+		}
+		if ctx.Err() != nil {
+			return AndroidObservation{}, ctx.Err()
+		}
+		if uiErr != nil {
+			observation.Warnings = []string{fmt.Sprintf("UI hierarchy unavailable: %v; inspect the fresh screenshot visually", uiErr)}
+		} else if mode == AndroidObserveUI {
+			return observation, nil
+		}
+	}
 
 	captureCtx, captureCancel := context.WithTimeout(ctx, androidTimeout)
 	out, err := d.agentRun(captureCtx, "exec-out", "screencap", "-p")
@@ -129,26 +200,10 @@ func (d *Android) Observe(ctx context.Context) (observation AndroidObservation, 
 	if err := ctx.Err(); err != nil {
 		return AndroidObservation{}, err
 	}
-	path := filepath.Join(dir, "screen.png")
 	if err := androidSaveScreenshot(path, out.Stdout); err != nil {
 		return AndroidObservation{}, fmt.Errorf("store private Android screenshot: %w", err)
 	}
-	observation = AndroidObservation{ScreenshotPath: path}
-	uiCtx, uiCancel := context.WithTimeout(ctx, androidUITimeout)
-	defer uiCancel()
-	// A fixed remote temporary file is necessary on phones where /dev/tty is
-	// unavailable under exec-out. Remove it before dumping, so stale XML can
-	// never masquerade as this observation, and clean it on normal exit.
-	out, err = d.agentRun(uiCtx, "shell", "-T", "sh", "-c", "'p=/data/local/tmp/voice-window.xml; trap \"rm -f $p\" EXIT; rm -f \"$p\" && uiautomator dump \"$p\" >/dev/null && cat \"$p\"'")
-	if ctx.Err() != nil {
-		return AndroidObservation{}, ctx.Err()
-	}
-	if err == nil {
-		observation.UIHierarchy, err = androidHierarchy(out.Stdout)
-	}
-	if err != nil {
-		observation.Warnings = []string{fmt.Sprintf("UI hierarchy unavailable: %v; inspect the screenshot visually", err)}
-	}
+	observation.ScreenshotPath = path
 	return observation, nil
 }
 
@@ -168,38 +223,132 @@ func androidScreenshot(data []byte) error {
 	return nil
 }
 
-func androidHierarchy(data []byte) (string, error) {
+func androidHierarchy(data []byte) (*AndroidUI, error) {
+	if len(data) > 2*1024*1024 {
+		return nil, errors.New("UI hierarchy exceeds the 2 MiB parsing limit")
+	}
 	decoder := xml.NewDecoder(bytes.NewReader(data))
-	depth, roots := 0, 0
+	ui := &AndroidUI{Elements: make([]AndroidUIElement, 0, 32)}
+	parents := make([]int, 0, 32)
+	roots, nextID, size := 0, 0, 0
 	for {
 		token, err := decoder.Token()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return "", errors.New("uiautomator returned invalid XML")
+			return nil, errors.New("uiautomator returned invalid XML")
 		}
 		switch token := token.(type) {
 		case xml.StartElement:
-			if depth == 0 {
+			if len(parents) == 0 {
 				roots++
 				if token.Name.Local != "hierarchy" || roots != 1 {
-					return "", errors.New("uiautomator returned no unique hierarchy root")
+					return nil, errors.New("uiautomator returned no unique hierarchy root")
+				}
+				parents = append(parents, 0)
+				continue
+			}
+			if token.Name.Local != "node" || len(parents) >= 256 {
+				return nil, errors.New("uiautomator returned an unsupported hierarchy structure")
+			}
+			parent := parents[len(parents)-1]
+			element, useful := androidUIElement(token.Attr)
+			if useful {
+				nextID++
+				element.ID, element.ParentID = nextID, parent
+				// Once a node is omitted, keep a prefix so descendants never
+				// point at missing ancestors. Continue parsing to validate all
+				// XML and count the useful nodes explicitly excluded.
+				if ui.OmittedElements > 0 || len(ui.Elements) >= androidUIMaxElements {
+					ui.OmittedElements++
+					ui.Truncated = true
+				} else {
+					encoded, err := json.Marshal(element)
+					if err != nil {
+						return nil, fmt.Errorf("encode UI element: %w", err)
+					}
+					if size+len(encoded)+1 > androidUIMaxBytes {
+						ui.OmittedElements++
+						ui.Truncated = true
+					} else {
+						size += len(encoded) + 1
+						ui.Elements = append(ui.Elements, element)
+						parent = element.ID
+						ui.Truncated = ui.Truncated || len(element.TruncatedFields) > 0
+					}
 				}
 			}
-			depth++
+			parents = append(parents, parent)
 		case xml.EndElement:
-			depth--
+			parents = parents[:len(parents)-1]
 		case xml.CharData:
-			if depth == 0 && strings.TrimSpace(string(token)) != "" {
-				return "", errors.New("uiautomator returned non-XML output")
+			if strings.TrimSpace(string(token)) != "" {
+				return nil, errors.New("uiautomator returned non-hierarchy text")
 			}
 		}
 	}
-	if roots != 1 || depth != 0 {
-		return "", errors.New("uiautomator returned no complete hierarchy")
+	if roots != 1 || len(parents) != 0 || len(ui.Elements) == 0 {
+		return nil, errors.New("uiautomator returned no usable hierarchy")
 	}
-	return string(data), nil
+	return ui, nil
+}
+
+func androidUIElement(attrs []xml.Attr) (AndroidUIElement, bool) {
+	var element AndroidUIElement
+	useful, editable, explicitEditable := false, false, false
+	for _, attr := range attrs {
+		value := attr.Value
+		switch attr.Name.Local {
+		case "text":
+			element.Text = value
+			useful = useful || strings.TrimSpace(value) != ""
+		case "content-desc":
+			element.Description = value
+			useful = useful || strings.TrimSpace(value) != ""
+		case "class":
+			element.Role = value[strings.LastIndexByte(value, '.')+1:]
+			editable = strings.HasSuffix(value, "EditText")
+		case "resource-id":
+			element.ResourceID = value
+		case "bounds":
+			element.Bounds = value
+		case "clickable", "long-clickable", "editable", "scrollable", "enabled", "checkable", "checked", "selected", "password", "focusable", "focused":
+			explicitEditable = explicitEditable || attr.Name.Local == "editable"
+			if value == "true" {
+				state := strings.ReplaceAll(attr.Name.Local, "-", "_")
+				element.States = append(element.States, state)
+				useful = useful || state != "enabled"
+			}
+		}
+	}
+	if editable && !explicitEditable {
+		element.States = append(element.States, "editable")
+		useful = true
+	}
+	if !useful {
+		return element, false
+	}
+	if element.States == nil {
+		element.States = []string{}
+	}
+	androidUIField(&element.Text, "text", 512, &element.TruncatedFields)
+	androidUIField(&element.Description, "description", 512, &element.TruncatedFields)
+	androidUIField(&element.Role, "role", 128, &element.TruncatedFields)
+	androidUIField(&element.ResourceID, "resource_id", 256, &element.TruncatedFields)
+	androidUIField(&element.Bounds, "bounds", 128, &element.TruncatedFields)
+	return element, true
+}
+
+func androidUIField(value *string, name string, limit int, truncated *[]string) {
+	if len(*value) <= limit {
+		return
+	}
+	for !utf8.RuneStart((*value)[limit]) {
+		limit--
+	}
+	*value = (*value)[:limit]
+	*truncated = append(*truncated, name)
 }
 
 func androidObservationLock(ctx context.Context, dir string) (func() error, error) {

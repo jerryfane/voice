@@ -14,7 +14,7 @@ import (
 // and raw ADB output are tool results, not speech or structured-action receipts.
 func phoneAgentCommand(ctx context.Context, devices *device.Registry, args []string) error {
 	if len(args) < 2 {
-		return errors.New("usage: voice phone ID observe | voice phone ID adb COMMAND [ARGS...]")
+		return errors.New("usage: voice phone ID observe [--screenshot|--both] | voice phone ID adb COMMAND [ARGS...]")
 	}
 	d, err := devices.Get(args[0])
 	if err != nil {
@@ -26,14 +26,20 @@ func phoneAgentCommand(ctx context.Context, devices *device.Registry, args []str
 	}
 	switch args[1] {
 	case "observe":
-		if len(args) != 2 {
-			return errors.New("usage: voice phone ID observe (no extra arguments)")
+		mode := device.AndroidObserveUI
+		if len(args) == 3 && args[2] == "--screenshot" {
+			mode = device.AndroidObserveScreenshot
+		} else if len(args) == 3 && args[2] == "--both" {
+			mode = device.AndroidObserveBoth
+		} else if len(args) != 2 {
+			return errors.New("usage: voice phone ID observe [--screenshot|--both]")
 		}
-		observation, err := phone.Observe(ctx)
+		observation, err := phone.Observe(ctx, mode)
 		if err != nil {
 			return err
 		}
-		data, err := json.Marshal(observation)
+		// Keep individual fields readable through the agent's per-line output cap.
+		data, err := json.MarshalIndent(observation, "", "  ")
 		if err != nil {
 			return fmt.Errorf("render Android observation: %w", err)
 		}
@@ -55,6 +61,6 @@ func phoneAgentCommand(ctx context.Context, devices *device.Registry, args []str
 		}
 		return errors.Join(stdout.err, stderr.err)
 	default:
-		return errors.New("usage: voice phone ID observe | voice phone ID adb COMMAND [ARGS...]")
+		return errors.New("usage: voice phone ID observe [--screenshot|--both] | voice phone ID adb COMMAND [ARGS...]")
 	}
 }

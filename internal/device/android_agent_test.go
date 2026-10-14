@@ -3,15 +3,18 @@ package device
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"image"
 	"image/color"
 	"image/png"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jerryfane/voice/internal/config"
 )
@@ -48,9 +51,11 @@ case "$1" in
     if [ "$2" != '-T' ] || [ "$3" != sh ] || [ "$4" != '-c' ]; then exit 92; fi
     case "$PHONE_UI_MODE" in
       fail) printf 'UI automation unavailable' >&2; exit 8 ;;
+      forbidden) : > "$PHONE_UI_FORBIDDEN"; exit 8 ;;
       delay) exec /bin/sleep 30 ;;
       malformed) printf '<hierarchy><node' ;;
       empty) exit 0 ;;
+      decorative) printf '%s' '<hierarchy><node class="android.widget.FrameLayout" enabled="true"><node class="android.widget.ImageView"/></node></hierarchy>' ;;
       *) printf '%s' '<?xml version="1.0"?><hierarchy rotation="0"><node text="Private chat &amp; name" bounds="[0,0][13,29]"/></hierarchy>' ;;
     esac ;;
   *) exit 93 ;;
@@ -64,6 +69,7 @@ esac
 	t.Setenv("PHONE_SCREEN_FIXTURE", path)
 	t.Setenv("PHONE_SCREEN_FAIL", "")
 	t.Setenv("PHONE_UI_MODE", "")
+	t.Setenv("PHONE_UI_FORBIDDEN", filepath.Join(dir, "unexpected-ui"))
 	return pngBytes.Bytes(), filepath.Join(state, "voice", "android")
 }
 
@@ -79,7 +85,7 @@ func TestAndroidAgentGateBeforeProcessOrState(t *testing.T) {
 		if _, err := d.ADB(context.Background(), []string{"shell", "input", "tap", "1", "2"}); err == nil {
 			t.Fatal("general command allowed without valid opt-in config")
 		}
-		if got, err := d.Observe(context.Background()); err == nil || got.ScreenshotPath != "" {
+		if got, err := d.Observe(context.Background(), AndroidObserveUI); err == nil || got.ScreenshotPath != "" {
 			t.Fatalf("observation allowed without valid opt-in config: %+v %v", got, err)
 		}
 	}
@@ -138,11 +144,11 @@ func TestAndroidObserveFullPrivateLatestArtifacts(t *testing.T) {
 		if err := os.WriteFile(os.Getenv("PHONE_SCREEN_FIXTURE"), want, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		got, err := generalAndroid().Observe(context.Background())
+		got, err := generalAndroid().Observe(context.Background(), AndroidObserveBoth)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.ScreenshotPath != filepath.Join(dir, "screen.png") || !strings.Contains(got.UIHierarchy, "Private chat &amp; name") || len(got.Warnings) != 0 {
+		if got.ScreenshotPath != filepath.Join(dir, "screen.png") || got.UI == nil || got.UI.Elements[0].Text != "Private chat & name" || len(got.Warnings) != 0 {
 			t.Fatalf("incomplete observation: %+v", got)
 		}
 		data, err := os.ReadFile(got.ScreenshotPath)
@@ -166,14 +172,14 @@ func TestAndroidObserveFullPrivateLatestArtifacts(t *testing.T) {
 	}
 }
 
-func TestAndroidObserveUIFailureRetainsScreenshot(t *testing.T) {
-	for _, mode := range []string{"fail", "malformed", "empty", "delay"} {
+func TestAndroidObserveUnavailableUIFallsBackToFreshScreenshot(t *testing.T) {
+	for _, mode := range []string{"fail", "malformed", "empty", "decorative", "delay"} {
 		t.Run(mode, func(t *testing.T) {
 			want, _ := androidObservationFixture(t)
 			t.Setenv("PHONE_UI_MODE", mode)
 			started := time.Now()
-			got, err := generalAndroid().Observe(context.Background())
-			if err != nil || got.UIHierarchy != "" || len(got.Warnings) != 1 {
+			got, err := generalAndroid().Observe(context.Background(), AndroidObserveUI)
+			if err != nil || got.UI != nil || got.Kind != "voice.android.observation" || len(got.Warnings) != 1 {
 				t.Fatalf("UI failure discarded screenshot or claimed hierarchy: %+v, %v", got, err)
 			}
 			if time.Since(started) > androidUITimeout+3*time.Second {
@@ -208,7 +214,7 @@ func TestAndroidObserveCaptureFailureAndCancellation(t *testing.T) {
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			got, err := generalAndroid().Observe(ctx)
+			got, err := generalAndroid().Observe(ctx, AndroidObserveScreenshot)
 			if err == nil || got.ScreenshotPath != "" {
 				t.Fatalf("failed capture claimed success: %+v %v", got, err)
 			}
@@ -227,7 +233,7 @@ func TestAndroidObserveCallerDeadlineIsNotUIWarning(t *testing.T) {
 	t.Setenv("PHONE_UI_MODE", "delay")
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	got, err := generalAndroid().Observe(ctx)
+	got, err := generalAndroid().Observe(ctx, AndroidObserveUI)
 	if !errors.Is(err, context.DeadlineExceeded) || got.ScreenshotPath != "" {
 		t.Fatalf("caller deadline reported success: %+v %v", got, err)
 	}
@@ -242,7 +248,7 @@ func TestAndroidArtifactsRejectSymlinksAndLockCancellation(t *testing.T) {
 	if err := os.Symlink(outside, dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := generalAndroid().Observe(context.Background()); err == nil {
+	if _, err := generalAndroid().Observe(context.Background(), AndroidObserveUI); err == nil {
 		t.Fatal("followed symlinked private state directory")
 	}
 	if err := os.Remove(dir); err != nil {
@@ -284,10 +290,159 @@ func TestAndroidArtifactsRejectSymlinksAndLockCancellation(t *testing.T) {
 }
 
 func TestAndroidHierarchyRejectsMissingOrMisleadingXML(t *testing.T) {
-	for _, input := range []string{"", "UI hierchary dumped", "<node/>", "<hierarchy>", "<hierarchy/><hierarchy/>", "error< hierarchy/>", "<hierarchy/>extra"} {
-		if got, err := androidHierarchy([]byte(input)); err == nil || got != "" {
-			t.Fatalf("accepted invalid hierarchy %q: %q %v", input, got, err)
+	for _, input := range []string{"", "UI hierchary dumped", "<node/>", "<hierarchy>", "<hierarchy/><hierarchy/>", "error< hierarchy/>", "<hierarchy/>extra", "<hierarchy/>", "<hierarchy><node/></hierarchy>", "<hierarchy><node text=\"usable\"/></hierarchy><bad/>", "<hierarchy><node text=\"usable\"/>oops</hierarchy>"} {
+		if got, err := androidHierarchy([]byte(input)); err == nil || got != nil {
+			t.Fatalf("accepted invalid hierarchy %q: %+v %v", input, got, err)
 		}
+	}
+}
+
+func TestAndroidCompactHierarchyRetainsSemanticsAndActionAncestors(t *testing.T) {
+	input := `<hierarchy rotation="0"><node class="android.widget.FrameLayout" package="any.app" index="0">
+<node resource-id="any.app:id/decoration" class="android.widget.ImageView" bounds="[0,0][10,10]" enabled="true"/>
+<node class="android.widget.LinearLayout" clickable="true" enabled="false" bounds="[0,10][300,80]" resource-id="any.app:id/action">
+  <node class="android.view.View"><node class="android.widget.TextView" text="Open &amp; read" enabled="true" bounds="[20,20][250,60]"/></node>
+</node>
+<node class="android.widget.EditText" content-desc="Secret" text="••••" resource-id="any.app:id/input" bounds="[0,80][300,140]" enabled="true" password="true" focused="true" selected="true" clickable="true"/>
+<node class="android.widget.CheckBox" text="Remember" enabled="true" checkable="true" checked="false" selected="false" bounds="[0,140][300,190]"/>
+<node class="android.widget.CheckBox" text="Confirmed" enabled="true" checkable="true" checked="true"/>
+<node class="android.widget.ScrollView" scrollable="true" enabled="true"><node text="Useful status" /></node>
+<node class="android.widget.EditText" text=" draft&#10; " enabled="true"/>
+</node></hierarchy>`
+	ui, err := androidHierarchy([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ui.Elements) != 8 || ui.Truncated || ui.OmittedElements != 0 {
+		t.Fatalf("lost semantic elements or retained decoration: %+v", ui)
+	}
+	action, label, inputNode, unchecked, checked, scroll, status := ui.Elements[0], ui.Elements[1], ui.Elements[2], ui.Elements[3], ui.Elements[4], ui.Elements[5], ui.Elements[6]
+	if action.Role != "LinearLayout" || action.ResourceID != "any.app:id/action" || action.Bounds != "[0,10][300,80]" || !slices.Equal(action.States, []string{"clickable"}) {
+		t.Fatalf("disabled ancestor action target lost: %+v", action)
+	}
+	if label.Text != "Open & read" || label.ParentID != action.ID || label.Role != "TextView" {
+		t.Fatalf("label lost its actionable ancestor: %+v", label)
+	}
+	if inputNode.Description != "Secret" || inputNode.Text != "••••" || inputNode.ResourceID != "any.app:id/input" || inputNode.Bounds != "[0,80][300,140]" {
+		t.Fatalf("input semantics lost: %+v", inputNode)
+	}
+	for _, state := range []string{"editable", "enabled", "password", "focused", "selected", "clickable"} {
+		if !slices.Contains(inputNode.States, state) {
+			t.Fatalf("input state %s lost: %+v", state, inputNode)
+		}
+	}
+	if !slices.Contains(unchecked.States, "checkable") || slices.Contains(unchecked.States, "checked") || slices.Contains(unchecked.States, "selected") || !slices.Contains(checked.States, "checked") {
+		t.Fatalf("positive/negative states confused: %+v %+v", unchecked, checked)
+	}
+	if !slices.Contains(scroll.States, "scrollable") || status.Text != "Useful status" || status.ParentID != scroll.ID {
+		t.Fatalf("noninteractive status or scroll target lost: %+v %+v", scroll, status)
+	}
+	if ui.Elements[7].Text != " draft\n " {
+		t.Fatalf("editable text whitespace lost: %+v", ui.Elements[7])
+	}
+}
+
+func TestAndroidCompactHierarchyBoundsOutputExplicitly(t *testing.T) {
+	for _, largeLabels := range []bool{false, true} {
+		label := "Useful item"
+		if largeLabels {
+			label = strings.Repeat("界", 300)
+		}
+		const count = 300
+		xmlData := "<hierarchy>" + strings.Repeat(`<node text="`+label+`" content-desc="`+label+`" clickable="true" enabled="false" checked="true" selected="true" password="true"/>`, count) + "</hierarchy>"
+		ui, err := androidHierarchy([]byte(xmlData))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ui.Truncated || ui.OmittedElements != count-len(ui.Elements) || ui.OmittedElements == 0 || len(ui.Elements) > androidUIMaxElements {
+			t.Fatalf("missing explicit element truncation: %+v", ui)
+		}
+		data, err := json.Marshal(ui.Elements)
+		if err != nil || len(data) > androidUIMaxBytes+2 {
+			t.Fatalf("element output not bounded: bytes=%d error=%v", len(data), err)
+		}
+		for _, element := range ui.Elements {
+			if !slices.Equal(element.States, []string{"clickable", "checked", "selected", "password"}) {
+				t.Fatalf("truncation discarded states: %+v", element)
+			}
+			if largeLabels && (!utf8.ValidString(element.Text) || len(element.Text) > 512 || !slices.Equal(element.TruncatedFields, []string{"text", "description"})) {
+				t.Fatalf("field truncation lost UTF-8 or indicators: %+v", element)
+			}
+		}
+		if largeLabels && len(ui.Elements) >= androidUIMaxElements {
+			t.Fatal("byte budget did not limit verbose elements")
+		}
+	}
+	ui, err := androidHierarchy([]byte(`<hierarchy><node text="` + strings.Repeat("x", 513) + `"/></hierarchy>`))
+	if err != nil || !ui.Truncated || ui.OmittedElements != 0 || len(ui.Elements[0].TruncatedFields) != 1 {
+		t.Fatalf("field-only truncation not reported: %+v %v", ui, err)
+	}
+	if ui, err := androidHierarchy([]byte(strings.Repeat("x", 2*1024*1024+1))); err == nil || ui != nil {
+		t.Fatal("oversized XML was accepted")
+	}
+}
+
+func TestAndroidObserveDefaultSkipsScreenshotAndInvalidatesPrevious(t *testing.T) {
+	_, dir := androidObservationFixture(t)
+	previous, err := generalAndroid().Observe(context.Background(), AndroidObserveScreenshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PHONE_SCREEN_FAIL", "1")
+	got, err := generalAndroid().Observe(context.Background(), AndroidObserveUI)
+	if err != nil || got.Kind != "voice.android.observation" || got.UI == nil || got.ScreenshotPath != "" || len(got.Warnings) != 0 {
+		t.Fatalf("default observation depends on screenshots: %+v %v", got, err)
+	}
+	if _, err := os.Stat(previous.ScreenshotPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("UI-only observation retained obsolete screenshot: %v", err)
+	}
+	data, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["screenshot_path"] != nil || fields["ui_hierarchy"] != nil || fields["ui"] == nil {
+		t.Fatalf("default public output leaked image path or raw XML: %s", data)
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil || len(files) != 1 || files[0].Name() != "observe.lock" {
+		t.Fatalf("unexpected UI-only artifacts: %v %v", files, err)
+	}
+}
+
+func TestAndroidObserveScreenshotSkipsUICompletely(t *testing.T) {
+	want, _ := androidObservationFixture(t)
+	t.Setenv("PHONE_UI_MODE", "forbidden")
+	got, err := generalAndroid().Observe(context.Background(), AndroidObserveScreenshot)
+	if err != nil || got.Kind != "voice.android.observation" || got.UI != nil || len(got.Warnings) != 0 {
+		t.Fatalf("screenshot-only attempted UI: %+v %v", got, err)
+	}
+	if _, err := os.Stat(os.Getenv("PHONE_UI_FORBIDDEN")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("screenshot-only started UI automation: %v", err)
+	}
+	data, err := os.ReadFile(got.ScreenshotPath)
+	if err != nil || !bytes.Equal(data, want) {
+		t.Fatalf("screenshot-only lost full PNG: %v", err)
+	}
+}
+
+func TestAndroidObserveFallbackCannotReusePreviousScreenshot(t *testing.T) {
+	_, _ = androidObservationFixture(t) // discard: This case checks stale-image invalidation, not fixture bytes or the directory.
+	previous, err := generalAndroid().Observe(context.Background(), AndroidObserveScreenshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PHONE_UI_MODE", "fail")
+	t.Setenv("PHONE_SCREEN_FAIL", "1")
+	got, err := generalAndroid().Observe(context.Background(), AndroidObserveUI)
+	if err == nil || got.ScreenshotPath != "" || got.UI != nil || got.Kind != "" {
+		t.Fatalf("failed fallback returned stale success: %+v %v", got, err)
+	}
+	if _, err := os.Stat(previous.ScreenshotPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed fallback retained obsolete screenshot: %v", err)
 	}
 }
 
@@ -305,5 +460,15 @@ func TestAndroidGeneralModeLeavesLegacyPermissionsIndependent(t *testing.T) {
 	}
 	if _, err := d.ADB(context.Background(), []string{"shell", "am", "start", "-n", "unlisted.app/.Activity"}); err != nil {
 		t.Fatalf("general mode incorrectly applied legacy app/operation permissions: %v", err)
+	}
+}
+
+func TestAndroidCompactHierarchyPreservesExplicitEditableState(t *testing.T) {
+	ui, err := androidHierarchy([]byte(`<hierarchy><node text="Read only" class="android.widget.EditText" editable="false" enabled="false"/><node class="custom.Input" editable="true" enabled="true"/></hierarchy>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ui.Elements) != 2 || len(ui.Elements[0].States) != 0 || !slices.Equal(ui.Elements[1].States, []string{"editable", "enabled"}) {
+		t.Fatalf("explicit editability was replaced by a role guess: %+v", ui)
 	}
 }

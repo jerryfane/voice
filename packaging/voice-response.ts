@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { prunePhoneContext } from "./voice-phone-context.ts";
 
 
 const responseDir = process.env.VOICE_AGENT_RESPONSES;
@@ -15,7 +16,7 @@ type CommandContext = {
   };
 };
 type ExtensionAPI = {
-  on(event: string, handler: (...args: unknown[]) => void): void;
+  on(event: string, handler: (...args: unknown[]) => unknown): void;
   registerCommand(
     name: string,
     options: {
@@ -168,6 +169,11 @@ function runVoicePlan(output: string, context: CommandContext): void {
 
 
 export default function (pi: ExtensionAPI) {
+  pi.on("context", (event: unknown) => {
+    if (!record(event) || !Array.isArray(event.messages)) return;
+    return { messages: prunePhoneContext(event.messages) };
+  });
+
   pi.registerCommand("voice", {
     description: "Speak text or ask for a spoken answer (/voice say|ask ...)",
     handler: async (args, context) => {
