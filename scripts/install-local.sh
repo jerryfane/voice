@@ -173,6 +173,8 @@ if sudo -n -H -u "$agent_user" /usr/local/bin/herdr kill >/dev/null 2>&1; then
 fi
 "$herdr_bin" --skill > /tmp/voice-herdr-skill.md
 sudo install -o "$agent_user" -g "$agent_user" -m 0644 /tmp/voice-herdr-skill.md "$agent_home/.omp/agent/skills/herdr/SKILL.md"
+sudo install -d -o "$agent_user" -g "$agent_user" -m 0750 "$agent_home/.omp/agent/skills/voice"
+sudo install -o "$agent_user" -g "$agent_user" -m 0644 skills/voice/SKILL.md "$agent_home/.omp/agent/skills/voice/SKILL.md"
 rm -f /tmp/voice-herdr-skill.md
 sudo install -m 0644 packaging/voice.service /etc/systemd/system/voice.service
 sudo install -m 0644 packaging/voice-whisper.service /etc/systemd/system/voice-whisper.service

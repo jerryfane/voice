@@ -2,11 +2,10 @@
 // speech engines, the agent CLI) and expands the placeholders used in
 // user-supplied command templates.
 //
-// Every externally configurable command in Voice is an argv slice, never a
-// shell string. There is no shell interpolation anywhere in Voice, so a device
-// name or a transcript containing quotes, semicolons or backticks can never
-// become executable. Placeholders are substituted after argv splitting, which
-// makes injection structurally impossible rather than merely filtered.
+// Commands are argv slices; this package never inserts a host shell.
+// Placeholders are substituted after argv splitting. Programs explicitly
+// invoked by a caller may interpret their own arguments: notably, ADB shell
+// uses the Android shell, so its caller must quote literal phone-side values.
 package proc
 
 import (

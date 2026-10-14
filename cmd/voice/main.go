@@ -205,9 +205,12 @@ func run(args []string) error {
 		// existed and was simply somewhere else.
 		return fmt.Errorf("load config: %w", err)
 	}
-	a := session.Build(cfg)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	if args[0] == "phone" && len(args) >= 3 && (args[2] == "observe" || args[2] == "adb") {
+		return phoneAgentCommand(ctx, device.Build(cfg), args[1:])
+	}
+	a := session.Build(cfg)
 	switch args[0] {
 	case "doctor":
 		return doctor(ctx, cfg, a, loaded)
@@ -308,7 +311,9 @@ Usage: voice [--config PATH] COMMAND
   switch ID OP             control an explicitly allowlisted safe switch
   climate ID OP [VALUE]    read/control an explicitly allowlisted smart thermostat
   lock ID read             read an exposed HA lock; never lock/unlock
-  phone ID OP [VALUE]       request an explicitly allowlisted connected Android phone task
+  phone ID OP [VALUE]       request a configured structured Android phone task
+  phone ID observe         JSON UI hierarchy + private local full-screen PNG path
+  phone ID adb COMMAND [ARGS...] general phone ADB command (configured serial pinned)
   proposals CMD [ARGS]      track what Voice was asked for and could not do
   config                    print effective config
   version                   print version
@@ -319,11 +324,19 @@ Music ops: play [track|album|artist|playlist QUERY], resume, pause, next, previo
 HA ops: read; light/switch allowlisted on/off/toggle; light brightness/color when supported
 Climate ops: read, temperature VALUE (HA's configured units), hvac-mode MODE
 Phone ops: read, open-app ALIAS, dial NUMBER, volume-up, volume-down, pause, resume
-Phone control is disabled by default; requires owner-configured operations/apps, adb,
-an explicit serial, and existing on-phone ADB authorization. Read checks connection only.
-Open-app accepts one configured alias; dial accepts one number string and opens the dialer
-only: physically confirm the call on the phone. Other phone ops take no extra arguments.
-No automatic pairing, private data access, message sending, or lock bypass.
+Phone tools observe/adb require android.agent_control=true (false by default), adb,
+an explicit serial, and existing on-phone ADB authorization. They do not use audio.
+General control has no app/action allowlist and can access private screen/data content.
+Observe returns screenshot_path, ui_hierarchy, and optional warnings; read the PNG
+visually, act with adb, then observe again to verify. The latest PNG is replaced on
+each observation and kept 0600 in the private state directory. UI XML may be unavailable.
+ADB forwards raw stdout/stderr, fails on nonzero exit, and intentionally supports remote
+shell commands, e.g. phone ID adb shell input tap X Y. No host shell is constructed.
+Global ADB options and host transport management are denied; wait-for-* must stand alone.
+Do not speak private screen content as a generic receipt; follow the user's task intent.
+Legacy phone ops require configured operations/apps even in general mode. Read checks
+connection only; open-app accepts a configured alias; dial opens the dialer only for
+physical confirmation. Other legacy ops take no extra arguments. No automatic pairing.
 Discovery needs home_assistant.url and token_env (default VOICE_HA_TOKEN).
 Candidates require an owner config edit: choose id/entity_id and explicit operations.
 No mDNS/subnet scan, automatic import, vendor-cloud appliance or direct Aqara support.

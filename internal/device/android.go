@@ -13,16 +13,17 @@ import (
 
 const androidTimeout = 10 * time.Second
 
-// Android sends a small, fixed set of commands to one already authorized ADB
-// target. ADB shell joins arguments into a remote shell command, so every value
-// reaching it is restricted even though proc.Run itself does not use a shell.
+// Android controls one already authorized ADB target. Legacy structured commands
+// restrict values reaching the remote shell; opt-in agent control intentionally
+// exposes the phone shell through tool-only ADB and Observe methods.
 // Activity-manager acknowledgements and keyevent exits are request receipts,
 // not proof of foreground UI, audio playback, volume, or a completed call.
 type Android struct {
-	id, serial string
-	ops        []Op
-	apps       map[string]string
-	err        error
+	id, serial   string
+	ops          []Op
+	apps         map[string]string
+	err          error
+	agentControl bool
 }
 
 // NewAndroid does no I/O. Invalid config grants no capabilities and fails both
@@ -32,6 +33,7 @@ func NewAndroid(cfg config.Android) *Android {
 	if d.err != nil {
 		return d
 	}
+	d.agentControl = cfg.AgentControl
 	d.ops = make([]Op, len(cfg.Operations))
 	for i, op := range cfg.Operations {
 		d.ops[i] = Op(op)
@@ -59,6 +61,9 @@ func (d *Android) allows(op Op) bool {
 }
 
 func (d *Android) Describe() string {
+	if d.agentControl {
+		return "Authorized Android phone with general tool-based control, including apps and private screen/data access. Use `voice phone " + d.id + " observe` for JSON UI hierarchy and a private local PNG path; read the PNG visually. Use `voice phone " + d.id + " adb <ADB command and args...>` for arbitrary phone commands, including shell input, am, content, and app workflows. The configured serial is pinned; host transport overrides are denied. No per-app or per-action allowlist applies to this tool path. Observe, act, then observe to verify the requested outcome; a successful command exit is not proof of UI outcome. Keep private output in tools, not generic spoken receipts. Legacy structured operations remain available only as configured."
+	}
 	aliases := make([]string, 0, len(d.apps))
 	if d.allows(OpOpenApp) {
 		for alias := range d.apps {

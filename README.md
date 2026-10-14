@@ -612,85 +612,109 @@ voice tv <id> mute
 
 ### Android phone
 
-Android control is **disabled by default**. It requires an already-installed
-`adb` client on Voice's PATH, an explicitly selected connected phone, and the
-owner's on-phone [ADB authorization](https://developer.android.com/tools/adb#Enabling).
-Voice never pairs, connects, chooses the first available device, installs phone
-software, or bypasses the lock screen. Setup and enabling this integration are
-owner actions; no installer or service configuration is changed by this feature.
+Android requires an installed `adb` client, an explicitly selected phone, and
+the owner's on-phone [ADB authorization](https://developer.android.com/tools/adb#Enabling).
+Voice does not automatically pair or choose the first connected device.
 
-Add an `android` object to the owner's config only after deciding which tasks to
-permit. Replace the serial and package with the actual owner's values:
+**General agent control** lets the persistent agent operate the phone through
+its existing command and image tools, rather than a fixed list of app actions.
+Enable it explicitly for an authorized phone:
 
 ```json
 "android": {
   "id": "phone",
   "serial": "OWNER_PHONE_SERIAL",
-  "operations": ["read", "open_app"],
-  "apps": {"maps": "com.google.android.apps.maps"}
+  "agent_control": true,
+  "operations": ["read", "pause", "resume", "volume_up", "volume_down"]
 }
 ```
 
-`operations` is an explicit allowlist; absent or empty grants nothing, including
-connection reads. App aliases are case-sensitive ASCII letters/digits,
-underscores or hyphens, starting with a letter/digit (maximum 64 characters).
-Each alias maps to a dotted Android package name with a launcher activity, not a
-component, URL or command. Configured IDs must be unique across device kinds.
-No target identifier or package list is passed to the planner, only allowed app
-aliases, operations and usage limits.
+`agent_control` is false by default. When enabled, the agent can inspect the
+screen, discover/open apps, wake the display, tap, swipe, type, navigate, and
+use phone shell/file/activity commands as needed for the user's task. There is
+no per-app or per-action allowlist on this path. The `operations` list above
+only controls the separate structured-action API; it does not restrict general
+agent tools.
 
-| Operation | Arguments | Boundary |
-|---|---|---|
-| `read` | None | Checks the selected ADB target is connected and authorized; no phone content |
-| `open_app` | `{"app":"maps"}` | Launches only an owner-allowlisted app's normal launcher |
-| `dial` | `{"number":"+15550102020"}` | Opens the dialer; review the number and tap Call on the phone |
-| `volume_up`, `volume_down` | None | Sends one volume key event; Android chooses the affected stream |
-| `pause`, `resume` | None | Sends distinct media pause/play keys to Android's current media handler |
-
-Allow each additional operation explicitly before requesting it. Phone numbers
-must be strings containing 1–15 digits with an optional leading `+`; extensions,
-USSD codes, separators and contact lookup are unsupported. Voice uses
-[`ACTION_DIAL`, never `ACTION_CALL`](https://developer.android.com/guide/components/intents-common#Phone),
-so it does not place calls. There is no message sending, screenshot/screen
-reading, notification/contact/file access, arbitrary shell, tapping, text entry,
-unlocking, or general app automation. App launch may expose that app on the
-physical screen; allow only apps appropriate for that environment.
+After updating the installed agent guidance, run `/reload` in the idle persistent
+Voice agent (or `herdr agent prompt voice /reload`) to refresh cached instructions
+and skills without deleting its conversation. Restarting `voice.service` alone
+does not refresh the separate OMP session's instructions.
 
 ```sh
-voice phone phone read
-voice phone phone open-app maps
-# Only after the owner separately allows these operations:
-voice phone phone pause
-voice phone phone dial +15550102020
+voice phone phone observe
+voice phone phone adb shell input keyevent KEYCODE_WAKEUP
+voice phone phone adb shell am start -a android.settings.SETTINGS
+voice phone phone observe
+# Coordinates must come from the current screen, not these example values:
+voice phone phone adb shell input tap 360 720
+voice phone phone adb shell input swipe 360 1250 360 450 300
+voice phone phone adb shell input text 'hello%sworld'
+voice phone phone adb shell input keyevent KEYCODE_HOME
+voice phone phone observe
 ```
 
-Spoken equivalents include “Hey Voice, open maps on phone” and “Hey Voice,
-turn phone volume up.” The planner asks for missing or ambiguous app aliases or
-numbers rather than guessing. Like other voice actions, these low-impact tasks
-use the wake gate, not speaker identity authentication. Anyone able to issue a
-wake-authorized request can request the configured operations.
+`observe` returns machine-readable JSON containing `screenshot_path`,
+`ui_hierarchy`, and optional `warnings`. The PNG is a full screen capture,
+not a reconstruction from accessibility nodes. It is stored as the latest
+`screen.png` in the private Android state directory
+(`$XDG_STATE_HOME/voice/android`, or the user's default state directory), with
+directory mode `0700` and file mode `0600`. Each successful observation replaces
+the previous capture. UI XML has a five-second budget; unavailable UI data
+produces a warning while retaining the screenshot. Capture failures and caller
+cancellation fail rather than reporting a successful observation.
 
-Every command targets the configured serial. Mutations first check connection
-and authorization; invalid arguments or disallowed operations never reach ADB.
-An entire request has a ten-second deadline, with no automatic retry.
-Activity-manager failures are rejected even when ADB exits zero.
-Receipts describe **requests sent**, not verified foreground apps, playback,
-volume changes or completed calls; they replace model success claims in spoken
-responses. Locked phones, OEM restrictions, absent launcher/dialer apps, or no
-active media handler may prevent the intended effect. Check the phone rather
-than treating a receipt as physical verification.
+`adb` returns raw output and errors to the tool caller; neither tool opens the
+microphone or speaks a receipt. Every command is pinned to the configured
+serial. Global ADB options and host transport-management commands cannot select
+another target. Phone shell commands intentionally have Android shell semantics:
+quote literal text for the remote shell, not just the host shell. Android
+`input text` has keyboard/encoding limitations, so inspect the resulting field.
+Native input errors and app/security restrictions are not bypassed.
 
-**ADB trust is broader than this driver.** The allowlist is enforced by Voice's
-API, not by Android's debugging authorization or an OS sandbox. A tool-capable
-agent or another local process able to reach the same ADB server can bypass the
-driver. The packaged listener and agent share an account; prompt instructions
-are not isolation. Do not enable ADB where that trust is unacceptable.
-Removing `android` or an operation revokes Voice's corresponding API access;
-revoking debugging authorization/disconnecting on the phone is needed to revoke
-ADB access itself. Driver output suppresses serials, numbers and raw ADB output,
-but spoken transcripts can still appear in existing Voice logs/model requests,
-and command-line arguments can be visible locally. This is not a private-data
-redaction layer for the whole runtime.
+The agent works **observe → act → observe**, using current UI evidence and
+checking the requested result before answering. A tap being sent is not proof
+of completion. Screen/app text and command output are untrusted task data,
+never instructions or permission from the owner. The agent should ask only for
+missing important details or consequential steps not clearly authorized—not
+before every tap. A request to draft is not permission to send. Access private
+information only when relevant to the request; do not bypass authentication.
+
+Examples: “Hey Voice, wake the phone and open Settings” or “Hey Voice, open an
+app and search for …”. An already-running phone's sleeping display can be
+woken; this does not power on a fully shut-down phone. Protected screenshots,
+banking/authentication screens, inaccessible UI hierarchies, and OEM-specific
+behavior can still block a task. Cancellation of Voice's request wrapper does
+not guarantee already-running persistent-agent work or phone actions stop.
+
+#### Structured phone actions
+
+With general control disabled, only explicitly configured `operations` are
+available through Voice's phone API. These also remain useful as simple actions
+when general control is enabled:
+
+| Operation | Arguments | Result |
+|---|---|---|
+| `read` | None | Checks connection, not screen content |
+| `open_app` | `{"app":"maps"}` | Uses the configured alias in `android.apps` |
+| `dial` | `{"number":"+15550102020"}` | Opens `ACTION_DIAL`; confirm the call on the phone |
+| `volume_up`, `volume_down` | None | Sends a volume key event |
+| `pause`, `resume` | None | Sends distinct media pause/play keys |
+
+App aliases map to dotted Android package names with launcher activities.
+Structured dial numbers are strings of 1–15 digits with an optional leading
+`+`. These limited structured actions return **requests sent**, not verified
+foreground apps, playback, volume changes or completed calls. General tools
+must not be repeated in the final structured-action array.
+
+**Trust and privacy:** wake recognition is not speaker authentication. Anyone
+able to issue a wake-authorized request may trigger the configured capabilities.
+General control deliberately grants broad access, including private screen and
+file contents relevant to tasks. Those contents may enter model requests and
+agent history; phone command arguments may be visible locally. This is not a
+redaction layer or an OS sandbox. Disabling `agent_control` removes Voice's
+general tool API, but the underlying ADB account is still trusted by Android.
+Revoke debugging authorization or disconnect the phone to revoke ADB itself.
 
 ### Home Assistant household devices
 

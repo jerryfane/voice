@@ -7,14 +7,15 @@ import (
 )
 
 // Android opts into controlling one already trusted, connected ADB target.
-// Operations grants no permissions when omitted. Apps maps owner-chosen aliases
-// to launcher packages; neither arbitrary intents nor shell commands are exposed.
+// Operations and Apps limit only the legacy structured commands. AgentControl
+// separately enables general tool-based phone access, including private data.
 // Installing adb and authorizing its host key on the phone are owner tasks.
 type Android struct {
-	ID         string            `json:"id"`
-	Serial     string            `json:"serial"`
-	Operations []string          `json:"operations,omitempty"`
-	Apps       map[string]string `json:"apps,omitempty"`
+	ID           string            `json:"id"`
+	Serial       string            `json:"serial"`
+	AgentControl bool              `json:"agent_control,omitempty"`
+	Operations   []string          `json:"operations,omitempty"`
+	Apps         map[string]string `json:"apps,omitempty"`
 }
 
 var (
