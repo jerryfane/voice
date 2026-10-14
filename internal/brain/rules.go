@@ -40,6 +40,12 @@ func (r *Rules) Plan(ctx context.Context, text string, inv []device.Info) (Plan,
 	if op, ok := musicCommand(n); ok {
 		return musicPlan(inv, op)
 	}
+	if op, target, ok := phoneQuickCommand(n); ok {
+		if d, ok := phoneQuickTarget(n, target, op, inv); ok {
+			return actionPlan(d, op, nil)
+		}
+		return r.Next.Plan(ctx, text, inv)
+	}
 	// Which devices does this utterance name? Collected rather than acted on
 	// immediately, because normalising both sides created a collision the
 	// review found: "lamp-2" and "lamp_2" reduce to the same text, and the
@@ -54,6 +60,11 @@ func (r *Rules) Plan(ctx context.Context, text string, inv []device.Info) (Plan,
 		named = append(named, d)
 	}
 	if len(named) > 1 {
+		for _, d := range named {
+			if d.Kind == "phone" {
+				return r.Next.Plan(ctx, text, inv)
+			}
+		}
 		ids := make([]string, 0, len(named))
 		for _, d := range named {
 			ids = append(ids, d.ID)

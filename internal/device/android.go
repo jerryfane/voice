@@ -48,7 +48,12 @@ func NewAndroid(cfg config.Android) *Android {
 func (d *Android) ID() string   { return d.id }
 func (d *Android) Kind() string { return "phone" }
 func (d *Android) Capabilities() []Op {
-	return append([]Op(nil), d.ops...)
+	if !d.agentControl || d.err != nil {
+		return append([]Op(nil), d.ops...)
+	}
+	ops := make([]Op, len(d.ops), len(d.ops)+3)
+	copy(ops, d.ops)
+	return append(ops, OpWake, OpHome, OpSettings)
 }
 
 func (d *Android) allows(op Op) bool {
@@ -62,7 +67,7 @@ func (d *Android) allows(op Op) bool {
 
 func (d *Android) Describe() string {
 	if d.agentControl {
-		return "Authorized Android phone with general tool-based control, including apps and private screen/data access. Use `voice phone " + d.id + " observe` for JSON UI hierarchy and a private local PNG path; read the PNG visually. Use `voice phone " + d.id + " adb <ADB command and args...>` for arbitrary phone commands, including shell input, am, content, and app workflows. The configured serial is pinned; host transport overrides are denied. No per-app or per-action allowlist applies to this tool path. Observe, act, then observe to verify the requested outcome; a successful command exit is not proof of UI outcome. Keep private output in tools, not generic spoken receipts. Legacy structured operations remain available only as configured."
+		return "Authorized Android phone with general tool-based control, including apps and private screen/data access. Structured wake, home, and settings take no args and return short verified outcomes; home and settings require an unlocked foreground, never bypass authentication. Use `voice phone " + d.id + " observe` for compact actionable UI JSON; a private PNG path is returned only on UI failure or with --screenshot/--both, and must be read visually when present. Use `voice phone " + d.id + " adb <ADB command and args...>` for arbitrary phone commands, including shell input, am, content, and app workflows. The configured serial is pinned; host transport overrides are denied. No per-app or per-action allowlist applies to this tool path. Observe, act, then observe to verify the requested outcome; a successful command exit is not proof of UI outcome. Keep private output in tools, not generic spoken receipts. Legacy structured operations remain available only as configured."
 	}
 	aliases := make([]string, 0, len(d.apps))
 	if d.allows(OpOpenApp) {
@@ -85,6 +90,15 @@ func (d *Android) Read(ctx context.Context) (State, error) {
 func (d *Android) Apply(ctx context.Context, cmd Command) (State, error) {
 	if d.err != nil {
 		return nil, d.err
+	}
+	if androidQuickOp(cmd.Op) {
+		if !d.agentControl {
+			return nil, errors.New("Android fast actions require android.agent_control=true")
+		}
+		if len(cmd.Args) != 0 {
+			return nil, errors.New("Android operation accepts no arguments")
+		}
+		return d.applyQuick(ctx, cmd.Op)
 	}
 	if !d.allows(cmd.Op) {
 		return nil, errors.New("Android operation is not allowed")

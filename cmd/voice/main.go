@@ -323,7 +323,8 @@ TV ops: on, off, volume-up, volume-down, mute
 Music ops: play [track|album|artist|playlist QUERY], resume, pause, next, previous, volume 0-10, volume-up, volume-down
 HA ops: read; light/switch allowlisted on/off/toggle; light brightness/color when supported
 Climate ops: read, temperature VALUE (HA's configured units), hvac-mode MODE
-Phone ops: read, open-app ALIAS, dial NUMBER, volume-up, volume-down, pause, resume
+Phone ops: read, wake, home, settings, open-app ALIAS, dial NUMBER, volume-up, volume-down, pause, resume
+Wake/home/settings require agent_control and verify the display/foreground outcome.
 Phone tools observe/adb require android.agent_control=true (false by default), adb,
 an explicit serial, and existing on-phone ADB authorization. They do not use audio.
 General control has no app/action allowlist and can access private screen/data content.
@@ -602,7 +603,7 @@ func commandDevice(ctx context.Context, a *session.Assistant, kind string, args 
 				return errors.New("dial requires exactly one phone number string; confirm the call on the phone")
 			}
 			cmd.Args = map[string]any{"number": args[2]}
-		case device.OpRead, device.OpVolumeUp, device.OpVolumeDown, device.OpPause, device.OpResume:
+		case device.OpRead, device.OpWake, device.OpHome, device.OpSettings, device.OpVolumeUp, device.OpVolumeDown, device.OpPause, device.OpResume:
 			if len(args) != 2 {
 				return fmt.Errorf("phone %s takes no extra arguments", args[1])
 			}

@@ -633,8 +633,9 @@ Enable it explicitly for an authorized phone:
 screen, discover/open apps, wake the display, tap, swipe, type, navigate, and
 use phone shell/file/activity commands as needed for the user's task. There is
 no per-app or per-action allowlist on this path. The `operations` list above
-only controls the separate structured-action API; it does not restrict general
-agent tools.
+controls legacy structured actions; enabling `agent_control` also advertises
+verified `wake`, `home`, and `settings` actions independently of that list.
+It does not restrict general agent tools.
 
 After updating installed agent code or guidance, wait until the persistent Voice
 agent is idle, then run `/restart` there (or `herdr agent prompt voice /restart`).
@@ -642,6 +643,25 @@ OMP restarts with the same launch flags and resumes the existing conversation.
 `/reload` refreshes skills/plugin discovery but does not re-import TypeScript
 extension code. Restarting `voice.service` alone does not refresh the separate
 OMP process.
+
+Unambiguous requests such as “wake the phone”, “go Home”, and “open Settings”
+take a deterministic fast path without waiting for the model. A generic phone
+target requires exactly one configured phone; an explicit device ID must be
+unambiguous. Negations, compound requests, other apps, and ambiguous targets
+remain with the general agent. This is an optimization, not an app whitelist.
+
+The same verified actions are available directly:
+
+```sh
+voice phone phone wake
+voice phone phone home
+voice phone phone settings
+```
+
+These actions check Android's power/window state before returning success.
+Home and Settings also require an unlocked screen and the resolved activity
+in the foreground. Missing or conflicting evidence is an error, not a success
+receipt. They never bypass authentication.
 
 ```sh
 # Group predictable requested steps, then inspect:
@@ -700,6 +720,10 @@ instructions or permission from the owner. Ask only for missing important detail
 or consequential steps not clearly authorized—not before every tap. A request to
 draft is not permission to send. Access private information only when relevant;
 do not bypass authentication.
+
+Routine completed actions get one short spoken outcome, usually under ten
+words. Requested answers, errors, uncertainty, blockers and necessary
+confirmation questions remain intact; replies are not mechanically truncated.
 
 The installed `voice-response` extension removes superseded phone observations
 and their associated screenshot images from the next model request, retaining

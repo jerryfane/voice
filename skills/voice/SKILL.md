@@ -51,6 +51,9 @@ the following tools directly, rather than returning every phone step as a
 structured action:
 
 ```sh
+voice phone <id> wake
+voice phone <id> home
+voice phone <id> settings
 voice phone <id> observe
 voice phone <id> observe --screenshot
 voice phone <id> observe --both
@@ -62,6 +65,16 @@ voice phone <id> adb shell input text 'hello%sworld'
 voice phone <id> adb shell input keyevent KEYCODE_BACK
 voice phone <id> adb shell input keyevent KEYCODE_HOME
 ```
+
+Prefer `wake`, `home`, and `settings` for those exact outcomes. With general
+control enabled, they are advertised independently of the legacy `operations`
+list and verify power/window state before reporting success. Home and Settings
+also require an unlocked foreground matching the resolved activity. Do not
+claim success when verification fails or bypass authentication.
+
+Simple unambiguous spoken requests for these actions bypass the model.
+Compound, ambiguous, negated and other-app requests still use the general
+agent; no app whitelist is introduced.
 
 Default `observe` returns JSON tagged `kind: "voice.android.observation"` with
 compact `ui.elements`: useful text, descriptions, roles, resource IDs, bounds,
@@ -98,6 +111,11 @@ input commands. Ask only for missing important details or consequential actions
 not clearly authorized; do not ask before every tap. Do not send a draft,
 browse unrelated private information, or bypass authentication/app security.
 Do not repeat tool-executed actions in final JSON.
+
+For routine completed actions, give one short spoken outcome, usually under
+ten words. Preserve requested answers, errors, uncertainty, blockers and
+necessary confirmation questions. Do not repeat the request, narrate steps,
+or add unrelated assurances; provide detail when asked.
 
 With general control disabled, only configured structured operations are
 available. `open-app` then requires a configured alias, `dial` only opens the

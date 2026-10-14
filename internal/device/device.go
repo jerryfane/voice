@@ -25,6 +25,9 @@ const (
 	OpHVACMode    Op = "hvac_mode"   // args: mode advertised by the thermostat
 	OpOpenApp     Op = "open_app"    // args: app (owner-allowlisted phone app alias)
 	OpDial        Op = "dial"        // args: number (opens dialer; user confirms on phone)
+	OpWake        Op = "wake"        // agent-controlled phone: verify awake display
+	OpHome        Op = "home"        // agent-controlled phone: verify unlocked HOME foreground
+	OpSettings    Op = "settings"    // agent-controlled phone: verify unlocked Settings foreground
 	OpOn          Op = "on"
 	OpOff         Op = "off"
 	OpToggle      Op = "toggle"
@@ -51,8 +54,9 @@ type Command struct {
 
 // State is a driver-reported snapshot. Keys are driver-defined but SHOULD use
 // "power" ("on"/"off"/"standby"), "r"/"g"/"b", "white", and "brightness" where
-// they apply, so the planner can describe state uniformly. A phone mutation
-// returns a "receipt" describing only the request sent, not verified completion.
+// they apply, so the planner can describe state uniformly. Phone mutations
+// return a "receipt": verified fast actions report the observed outcome, while
+// legacy operations describe only the request sent.
 type State map[string]any
 
 // Device is one addressable endpoint.
