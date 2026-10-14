@@ -399,9 +399,9 @@ type TTS struct {
 	OpenRouter *OpenRouterTTS `json:"openrouter,omitempty"`
 }
 
-// OpenRouterTTS describes conversational audio output through chat
-// completions. APIKeyEnv names the environment variable; the secret itself
-// never belongs in config.
+// OpenRouterTTS supports native /audio/speech and conversational chat audio.
+// Native speech may omit Voice to use the provider's default.
+// APIKeyEnv names the environment variable; the secret never belongs in config.
 type OpenRouterTTS struct {
 	Endpoint  string   `json:"endpoint"`
 	Model     string   `json:"model"`
@@ -932,7 +932,7 @@ func (c Config) Validate() error {
 		if strings.TrimSpace(c.TTS.OpenRouter.Model) == "" {
 			return fmt.Errorf("tts.openrouter.model is empty")
 		}
-		if strings.TrimSpace(c.TTS.OpenRouter.Voice) == "" {
+		if !strings.HasSuffix(strings.TrimRight(u.Path, "/"), "/audio/speech") && strings.TrimSpace(c.TTS.OpenRouter.Voice) == "" {
 			return fmt.Errorf("tts.openrouter.voice is empty")
 		}
 		if strings.TrimSpace(c.TTS.OpenRouter.APIKeyEnv) == "" {

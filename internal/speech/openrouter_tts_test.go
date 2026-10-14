@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -106,6 +107,53 @@ func TestOpenRouterSynthesizerRejectsMissingKeyBeforeNetwork(t *testing.T) {
 	_, err := synth.Synthesize(context.Background(), "hello")
 	if err == nil || !strings.Contains(err.Error(), "API key") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestNativeSpeechUsesReturnedPCMFormat(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/pcm;rate=44100;channels=1")
+		if _, err := w.Write([]byte{1, 0, 2, 0}); err != nil {
+			t.Error(err)
+		}
+	}))
+	t.Cleanup(server.Close)
+	synth := NewOpenRouterSynthesizer(server.URL+"/audio/speech", "fish-audio/drama-3", "", "secret", time.Second, nil)
+	synth.Client = server.Client()
+	wav, err := synth.Synthesize(context.Background(), "Hello.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := binary.LittleEndian.Uint32(wav[24:28]); got != 44100 {
+		t.Fatalf("sample rate = %d; native audio would play at the wrong speed", got)
+	}
+	if got := binary.LittleEndian.Uint16(wav[22:24]); got != 1 {
+		t.Fatalf("channels = %d", got)
+	}
+	if string(wav[44:]) != string([]byte{1, 0, 2, 0}) {
+		t.Fatal("native PCM samples changed")
+	}
+}
+
+func TestNativeSpeechRejectsUnplayableResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name, contentType, body string
+	}{
+		{"JSON instead of audio", "application/json", "{}"},
+		{"unknown sample rate", "audio/pcm;channels=1", "\x01\x00"},
+		{"invalid sample rate", "audio/pcm;rate=0;channels=1", "\x01\x00"},
+		{"unknown channels", "audio/pcm;rate=44100", "\x01\x00"},
+		{"invalid channels", "audio/pcm;rate=44100;channels=0", "\x01\x00"},
+		{"empty audio", "audio/pcm;rate=44100;channels=1", ""},
+		{"truncated sample", "audio/pcm;rate=44100;channels=1", "\x01"},
+		{"truncated stereo frame", "audio/pcm;rate=44100;channels=2", "\x01\x00"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := &http.Response{Header: http.Header{"Content-Type": {tc.contentType}}, Body: io.NopCloser(strings.NewReader(tc.body))}
+			if _, err := readNativeSpeech(response); err == nil {
+				t.Fatal("unsafe audio was accepted for playback")
+			}
+		})
 	}
 }
 

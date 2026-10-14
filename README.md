@@ -487,16 +487,41 @@ clock handling and reset logic. It is not a microphone-only filter.
 ## Speech output
 
 Piper is the offline speech engine. When `tts.openrouter` is configured and
-its API key environment variable is present, Voice first asks
-`openai/gpt-audio-mini` for streaming 24 kHz mono PCM16 speech through the
-OpenRouter chat-completions endpoint. The shipped voice is `marin`.
-
-The remote model is conversational rather than a strict narrator. Voice checks
-the transcript returned with every audio stream against the requested words
-before playing it. Added, omitted or changed words reject the remote audio and
-fall back to Piper, as do missing credentials, timeouts and network failures.
+its API key environment variable is present, Voice tries remote speech first.
 The secret belongs in `/etc/voice/voice.env`, which the local installer creates
 as `root:voice-agent` mode `0640`; it never belongs in `config.json`.
+
+For Fish Audio Drama 3, set `tts.openrouter` to:
+
+```json
+{
+  "endpoint": "https://openrouter.ai/api/v1/audio/speech",
+  "model": "fish-audio/drama-3",
+  "voice": "",
+  "api_key_env": "OPENROUTER_API_KEY",
+  "timeout": "5s"
+}
+```
+
+An empty voice uses the native speech provider's default voice; OpenAI's `marin`
+voice name is not passed to Fish Audio. Native `/audio/speech` requests send the
+reply as text and request PCM. Voice uses the response's explicit sample rate
+and channel count to construct a WAV, rather than assuming 24 kHz and changing
+the playback speed. Missing/invalid format metadata, empty or incomplete audio,
+oversized responses, missing credentials, timeouts and network failures fall
+back to Piper. Native TTS does not provide a transcript for comparison.
+
+The shipped default remains `openai/gpt-audio-mini` with `marin` through
+`https://openrouter.ai/api/v1/chat/completions`. To switch back, restore those
+three fields and restart `voice.service`. That conversational audio path
+streams 24 kHz mono PCM16 and checks the returned transcript against the
+requested words before playing it; added, omitted or changed words reject the
+remote audio and fall back to Piper.
+
+After changing speech configuration, restart `voice.service`; the persistent
+reasoning agent does not need restarting. `voice say TEXT` exercises synthesis
+and playback directly. Run it with the same protected environment as the
+service to avoid accidentally testing only the offline fallback.
 
 ## Timers
 

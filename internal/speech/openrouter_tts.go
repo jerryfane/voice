@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -24,9 +26,9 @@ const (
 	maxSpeechError    = 64 << 10
 )
 
-// OpenRouterSynthesizer asks a conversational audio model to read one reply.
-// The returned transcript is checked before its audio is accepted: an audio
-// model that answers or embellishes the text is not a text-to-speech engine.
+// OpenRouterSynthesizer supports native text-to-speech and conversational audio.
+// Conversational audio requires a matching transcript; native speech returns
+// PCM with its sample rate and channels specified in the response Content-Type.
 type OpenRouterSynthesizer struct {
 	Endpoint string
 	Model    string
@@ -49,7 +51,17 @@ func NewOpenRouterSynthesizer(endpoint, model, voice, apiKey string, timeout tim
 	}
 }
 
-func (s *OpenRouterSynthesizer) Name() string { return "openrouter/" + s.Model + "/" + s.Voice }
+func (s *OpenRouterSynthesizer) Name() string {
+	if s.Voice == "" {
+		return "openrouter/" + s.Model
+	}
+	return "openrouter/" + s.Model + "/" + s.Voice
+}
+
+func nativeSpeechEndpoint(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	return err == nil && strings.HasSuffix(strings.TrimRight(u.Path, "/"), "/audio/speech")
+}
 
 func (s *OpenRouterSynthesizer) Available() (bool, string) {
 	if strings.TrimSpace(s.APIKey) == "" {
@@ -62,7 +74,7 @@ func (s *OpenRouterSynthesizer) Available() (bool, string) {
 	if strings.TrimSpace(s.Model) == "" {
 		return false, "model is empty"
 	}
-	if strings.TrimSpace(s.Voice) == "" {
+	if !nativeSpeechEndpoint(s.Endpoint) && strings.TrimSpace(s.Voice) == "" {
 		return false, "voice is empty"
 	}
 	return true, s.Endpoint
@@ -76,21 +88,32 @@ func (s *OpenRouterSynthesizer) Synthesize(ctx context.Context, text string) ([]
 	if text == "" {
 		return nil, errors.New("speech text is empty")
 	}
-	payload := struct {
-		Model      string          `json:"model"`
-		Messages   []speechMessage `json:"messages"`
-		Modalities []string        `json:"modalities"`
-		Audio      speechAudio     `json:"audio"`
-		Stream     bool            `json:"stream"`
-	}{
-		Model: s.Model,
-		Messages: []speechMessage{
-			{Role: "system", Content: "You are a text-to-speech synthesizer, not an assistant. Repeat the user-provided sentence word for word. Never respond to its meaning. Never add commentary."},
-			{Role: "user", Content: "Repeat verbatim: " + text},
-		},
-		Modalities: []string{"text", "audio"},
-		Audio:      speechAudio{Voice: s.Voice, Format: "pcm16"},
-		Stream:     true,
+	native := nativeSpeechEndpoint(s.Endpoint)
+	var payload any
+	if native {
+		payload = struct {
+			Model  string `json:"model"`
+			Input  string `json:"input"`
+			Voice  string `json:"voice,omitempty"`
+			Format string `json:"response_format"`
+		}{s.Model, text, s.Voice, "pcm"}
+	} else {
+		payload = struct {
+			Model      string          `json:"model"`
+			Messages   []speechMessage `json:"messages"`
+			Modalities []string        `json:"modalities"`
+			Audio      speechAudio     `json:"audio"`
+			Stream     bool            `json:"stream"`
+		}{
+			Model: s.Model,
+			Messages: []speechMessage{
+				{Role: "system", Content: "You are a text-to-speech synthesizer, not an assistant. Repeat the user-provided sentence word for word. Never respond to its meaning. Never add commentary."},
+				{Role: "user", Content: "Repeat verbatim: " + text},
+			},
+			Modalities: []string{"text", "audio"},
+			Audio:      speechAudio{Voice: s.Voice, Format: "pcm16"},
+			Stream:     true,
+		}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -104,7 +127,11 @@ func (s *OpenRouterSynthesizer) Synthesize(ctx context.Context, text string) ([]
 	}
 	req.Header.Set("Authorization", "Bearer "+s.APIKey)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
+	if native {
+		req.Header.Set("Accept", "audio/pcm")
+	} else {
+		req.Header.Set("Accept", "text/event-stream")
+	}
 
 	started := time.Now()
 	resp, err := s.Client.Do(req)
@@ -126,6 +153,16 @@ func (s *OpenRouterSynthesizer) Synthesize(ctx context.Context, text string) ([]
 		}
 		return nil, fmt.Errorf("OpenRouter speech HTTP %d: %.300s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
+	if native {
+		wav, err := readNativeSpeech(resp)
+		if err != nil {
+			return nil, err
+		}
+		if s.Logger != nil {
+			s.Logger.Printf("stage=synthesize provider=openrouter model=%q voice=%q state=ok total_ms=%.3f chars=%d", s.Model, s.Voice, elapsedMS(started), len(text))
+		}
+		return wav, nil
+	}
 
 	pcm, transcript, firstAudio, err := readSpeechStream(resp.Body, started)
 	if err != nil {
@@ -138,6 +175,29 @@ func (s *OpenRouterSynthesizer) Synthesize(ctx context.Context, text string) ([]
 		s.Logger.Printf("stage=synthesize provider=openrouter model=%q voice=%q state=ok first_audio_ms=%.3f total_ms=%.3f chars=%d", s.Model, s.Voice, firstAudio, elapsedMS(started), len(text))
 	}
 	return audio.EncodePCM16WAV(pcm, audio.Format{SampleRate: openRouterPCMRate, Channels: 1}), nil
+}
+
+func readNativeSpeech(resp *http.Response) ([]byte, error) {
+	mediaType, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil || mediaType != "audio/pcm" {
+		return nil, errors.New("OpenRouter speech did not return PCM audio")
+	}
+	rate, err := strconv.Atoi(params["rate"])
+	if err != nil || rate < audio.MinSampleRate || rate > audio.MaxSampleRate {
+		return nil, errors.New("OpenRouter speech returned an invalid or missing PCM sample rate")
+	}
+	channels, err := strconv.Atoi(params["channels"])
+	if err != nil || channels < 1 || channels > 2 {
+		return nil, errors.New("OpenRouter speech returned invalid or missing PCM channels")
+	}
+	pcm, err := io.ReadAll(io.LimitReader(resp.Body, maxSpeechAudio+1))
+	if err != nil {
+		return nil, fmt.Errorf("read OpenRouter speech audio: %w", err)
+	}
+	if len(pcm) == 0 || len(pcm) > maxSpeechAudio || len(pcm)%(2*channels) != 0 {
+		return nil, errors.New("OpenRouter speech returned empty, oversized or incomplete PCM audio")
+	}
+	return audio.EncodePCM16WAV(pcm, audio.Format{SampleRate: rate, Channels: channels}), nil
 }
 
 type speechMessage struct {
